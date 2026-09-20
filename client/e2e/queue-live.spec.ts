@@ -83,10 +83,11 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     if (colorScheme === "dark") {
       const old = await state();
       const gate = new Promise<void>(resolve => { releaseRead = resolve; });
+      // Hold exactly one read and observe its completion before checking later reports.
       await page.route("**/api/queue?*", async route => {
-        if (route.request().method() === "GET") { readWaiting = true; await gate; await route.fulfill({ json: old }); }
-        else await route.continue();
-      });
+        expect(route.request().method()).toBe("GET");
+        readWaiting = true; await gate; await route.fulfill({ json: old });
+      }, { times: 1 });
       await expect.poll(() => readWaiting).toBe(true);
       await next().evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
     } else {
@@ -100,7 +101,8 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await expect.poll(async () => (await peer()).prints.length).toBe(before + 1);
     if (releaseRead) {
       await expect(page.getByLabel("現在の印刷")).toContainText(plates[0].name);
-      releaseRead(); await page.unrouteAll({ behavior: "wait" });
+      const delayedResponse = page.waitForResponse(response => response.url().includes("/api/queue?") && response.request().method() === "GET");
+      releaseRead(); await (await delayedResponse).finished();
       await expect(page.getByLabel("現在の印刷")).toContainText(plates[0].name);
     } else if (await page.getByRole("alert").count()) {
       await page.getByRole("button", { name: "最新状態を読み直す" }).click();
