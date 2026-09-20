@@ -21,10 +21,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err("SCAD_LIVE_URL must be UTF-8".into()),
     };
+    let slicer = if let Some(appdir) = std::env::var_os("ORCA_APPDIR") {
+        let seconds = match std::env::var("ORCA_TIMEOUT_SECS") {
+            Ok(value) => value.parse::<u64>()?,
+            Err(std::env::VarError::NotPresent) => 300,
+            Err(error) => return Err(error.into()),
+        };
+        Some(
+            orca_server::slicer::Slicer::new(
+                appdir.into(),
+                std::time::Duration::from_secs(seconds),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     info!(%bind_addr, "server listening");
-    axum::serve(listener, orca_server::app_with_source(plates, source))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        orca_server::app_with_slicer(plates, source, slicer),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     info!("server stopped");
     Ok(())

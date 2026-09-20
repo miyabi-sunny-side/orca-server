@@ -59,6 +59,8 @@ impl IntoResponse for Error {
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, message),
             Self::Upstream(message) => (StatusCode::BAD_GATEWAY, message),
             Self::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message),
+            Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "OrcaSlicer timed out"),
             Self::NotFound => (StatusCode::NOT_FOUND, "Plate or file not found"),
             Self::Io(error) => {
                 tracing::error!(%error, "plate storage operation failed");

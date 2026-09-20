@@ -4,6 +4,7 @@ use std::{
     fs,
     io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 #[derive(Debug)]
@@ -11,6 +12,8 @@ pub enum Error {
     Invalid(&'static str),
     Upstream(&'static str),
     Unavailable(&'static str),
+    Conflict(&'static str),
+    Timeout,
     NotFound,
     Io(io::Error),
 }
@@ -38,6 +41,8 @@ const MAX_METADATA: usize = 256 * 1024;
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
+    // ponytail: one shared store write lock; use per-plate locks if writes contend.
+    writes: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,6 +76,37 @@ pub struct Input {
 }
 
 impl Store {
+    pub(crate) fn save_artifacts(&self, plate: &Plate, directory: &Path) -> Result<Plate> {
+        let _guard = self
+            .writes
+            .lock()
+            .map_err(|_| io::Error::other("Storage lock poisoned"))?;
+        if self.get(&plate.id)?.revision != plate.revision {
+            return Err(Error::Conflict(
+                "Plate changed while slicing; retry the current revision",
+            ));
+        }
+        let models = plate
+            .models
+            .iter()
+            .map(|model| {
+                Ok(ModelInput {
+                    name: model.name.clone(),
+                    source: model.source.clone(),
+                    data: self.read_file(&plate.id, &model.path)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.write(
+            Some(&plate.id),
+            Input {
+                name: plate.name.clone(),
+                models,
+                settings: plate.settings.clone(),
+            },
+            Some(directory),
+        )
+    }
     /// Opens the application-owned storage directory.
     ///
     /// # Errors
@@ -79,6 +115,7 @@ impl Store {
         fs::create_dir_all(root.as_ref())?;
         Ok(Self {
             root: fs::canonicalize(root)?,
+            writes: Arc::new(Mutex::new(())),
         })
     }
 
@@ -87,6 +124,14 @@ impl Store {
     /// # Errors
     /// Rejects invalid input, unknown IDs, and inaccessible storage.
     pub fn save(&self, id: Option<&str>, input: Input) -> Result<Plate> {
+        let _guard = self
+            .writes
+            .lock()
+            .map_err(|_| io::Error::other("Storage lock poisoned"))?;
+        self.write(id, input, None)
+    }
+
+    fn write(&self, id: Option<&str>, input: Input, artifacts: Option<&Path>) -> Result<Plate> {
         validate(&input)?;
         let id = if let Some(id) = id {
             self.get(id)?;
@@ -120,18 +165,26 @@ impl Store {
                 path: format!("revisions/{revision}/{filename}"),
             });
         }
+        if let Some(directory) = artifacts {
+            for filename in ["project.3mf", "print.gcode.3mf"] {
+                let bytes = read_limited(&directory.join(filename), MAX_UPLOAD)?;
+                let mut file = fs::File::create(stage.path().join(filename))?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+        }
         fs::File::open(stage.path())?.sync_all()?;
         fs::rename(stage.path(), revisions.join(&revision))?;
         fs::File::open(&revisions)?.sync_all()?;
         let plate = Plate {
             format_version: 1,
             id,
-            revision,
+            revision: revision.clone(),
             name: input.name.trim().into(),
             models,
             settings: input.settings,
-            project: None,
-            print: None,
+            project: artifacts.map(|_| format!("revisions/{revision}/project.3mf")),
+            print: artifacts.map(|_| format!("revisions/{revision}/print.gcode.3mf")),
         };
         let mut metadata = tempfile::NamedTempFile::new_in(&plate_dir)?;
         serde_json::to_writer(&mut metadata, &plate).map_err(io::Error::other)?;
@@ -351,6 +404,42 @@ mod tests {
             }],
             settings: json!({"material":"PLA"}),
         }
+    }
+
+    #[test]
+    fn publishes_artifacts_atomically_and_rejects_stale_slice_results() {
+        let root = tempfile::tempdir().unwrap();
+        let outputs = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let before = store.save(None, input("original")).unwrap();
+        fs::write(outputs.path().join("project.3mf"), "project").unwrap();
+        assert!(store.save_artifacts(&before, outputs.path()).is_err());
+        assert_eq!(store.get(&before.id).unwrap(), before);
+        fs::write(outputs.path().join("print.gcode.3mf"), "gcode").unwrap();
+        let after = store.save_artifacts(&before, outputs.path()).unwrap();
+        assert_ne!(before.revision, after.revision);
+        assert_eq!(
+            store
+                .read_file(&after.id, after.project.as_ref().unwrap())
+                .unwrap(),
+            b"project"
+        );
+        assert_eq!(
+            store
+                .read_file(&after.id, after.print.as_ref().unwrap())
+                .unwrap(),
+            b"gcode"
+        );
+        assert_eq!(after.models[0].source, before.models[0].source);
+        let edited = store.save(Some(&before.id), input("edited")).unwrap();
+        assert!(
+            store
+                .clone()
+                .save_artifacts(&after, outputs.path())
+                .is_err()
+        );
+        assert_eq!(store.get(&before.id).unwrap(), edited);
+        assert!(edited.project.is_none());
     }
 
     #[test]

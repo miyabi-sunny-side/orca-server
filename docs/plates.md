@@ -9,7 +9,7 @@ STLファイルをまとめてプレートへ保存し、名前やモデルの�
 
 ```sh
 curl --fail http://127.0.0.1:3000/api/plates \
-  -F 'name=Desk box' -F 'models=@box.stl' -F 'settings={"material":"PLA"}'
+  -F 'name=Desk box' -F 'models=@box.stl'
 curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 ```
 
@@ -32,6 +32,11 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 未登録のファイルや未知のIDは404、不正な入力は400、保存領域の障害は500です。
 ブラウザからの書込みは同じホスト・ポートを持つOriginだけを受け付け、別サイトは403で拒否します。
 プロキシを使う場合は、利用者側のHostヘッダーを維持してください。
+
+## 配置と印刷データの生成
+
+保存後は[自動配置とスライス](slicing.md)のAPIで3MFを生成できます。
+STLや設定の再保存・再取り込みは生成物を解除します。新しい内容で再スライスしてください。
 
 ## scad-liveからの取り込み
 
@@ -68,7 +73,7 @@ curl --fail http://127.0.0.1:3000/api/plates/import \
 アップロード全体の上限はフォームのヘッダーを含め64 MiBです。
 `settings`は16 KiB以下のJSONオブジェクトです。
 STLはASCII・binaryの両形式を読み、空のモデルや有限でない座標を拒否します。
-形状の印刷適性や設定値のスライサー互換性は判定しません。
+保存時には形状の印刷適性を判定しません。スライス時にOrcaSlicerが検査します。
 モデル名は相対パスを使えますが、`..`・絶対パス・バックスラッシュは拒否します。
 アップロードされた名前を保存先のファイル名には使いません。
 
@@ -87,7 +92,7 @@ STLはASCII・binaryの両形式を読み、空のモデルや有限でない座
 モデルには表示用の`name`、保存先の相対`path`、取り込み元の`source`があります。
 直接アップロードしたモデルの`source`は`null`、scad-liveから取り込んだ場合は元の相対パスです。
 配置・モデル・スライス設定を持つ`project`と派生印刷データの`print`は別の参照です。
-この版は3MFを生成せず、両方とも`null`を返します。
+スライス前は両方とも`null`です。スライス後は同じrevision内の`project.3mf`と`print.gcode.3mf`を参照します。
 
 モデルを別revisionへ書き終えてから、`plate.json`を同じファイルシステム内で置き換えます。
 保存失敗でも既存revisionを書き換えません。過去のrevisionと失敗時の未参照ファイルは自動削除しません。

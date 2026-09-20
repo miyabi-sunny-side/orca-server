@@ -1,7 +1,10 @@
+mod artifacts;
 mod plate_api;
 pub mod plates;
+mod profiles;
 pub mod scad;
 mod search;
+pub mod slicer;
 
 use axum::{
     Json, Router,
@@ -16,9 +19,18 @@ use tower_http::trace::TraceLayer;
 static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/client/dist");
 
 pub fn app_with_source(store: plates::Store, source: Option<scad::Source>) -> Router {
+    app_with_slicer(store, source, None)
+}
+
+pub fn app_with_slicer(
+    store: plates::Store,
+    source: Option<scad::Source>,
+    slicer: Option<slicer::Slicer>,
+) -> Router {
     app()
         .merge(plate_api::router(store.clone()))
-        .merge(scad::router(store, source))
+        .merge(scad::router(store.clone(), source))
+        .merge(slicer::router(store, slicer))
         .layer(axum::middleware::from_fn(plate_api::same_origin))
 }
 

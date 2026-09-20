@@ -24,6 +24,8 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | `LOG_LEVEL` | `info` | `off`、`error`、`warn`、`info`、`debug`、`trace`。不正な値は`info`です。 |
 | `PLATES_DIR` | `data/plates` | プレートの保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
 | `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。未設定では取り込みAPIが503を返します。 |
+| `ORCA_APPDIR` | 未設定 | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
+| `ORCA_TIMEOUT_SECS` | `300` | 各CLI工程の上限秒数。OrcaSlicerを設定する場合は1〜3600。 |
 
 ネイティブ実行では全IPv4インターフェースで待ち受けます。
 到達範囲はホストのファイアウォールやコンテナのポート公開で制限します。
