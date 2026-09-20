@@ -83,11 +83,12 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     if (colorScheme === "dark") {
       const old = await state();
       const gate = new Promise<void>(resolve => { releaseRead = resolve; });
-      // Hold exactly one read and observe its completion before checking later reports.
+      // Keep routing installed while the held response completes and the app fetches AMS.
       await page.route("**/api/queue?*", async route => {
-        expect(route.request().method()).toBe("GET");
-        readWaiting = true; await gate; await route.fulfill({ json: old });
-      }, { times: 1 });
+        if (route.request().method() === "GET" && !readWaiting) {
+          readWaiting = true; await gate; await route.fulfill({ json: old });
+        } else await route.continue();
+      });
       await expect.poll(() => readWaiting).toBe(true);
       await next().evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
     } else {
@@ -118,7 +119,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await capture(`removal-375-${colorScheme}`);
     let lost = false, body = "";
     if (colorScheme === "dark") await page.route("**/api/queue?*", async route => {
-      if (route.request().method() === "POST" && route.request().postDataJSON().action.type === "next") {
+      if (!replayVerified && route.request().method() === "POST" && route.request().postDataJSON().action.type === "next") {
         if (!lost) { lost = true; body = route.request().postData()!; await route.fetch(); await route.abort("failed"); return; }
         expect(route.request().postData()).toBe(body); replayVerified = true;
       }
@@ -129,7 +130,6 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
       await expect(page.getByText("送信結果が不明です。別の印刷を始めず、同じ要求の結果を確認します。")).toBeVisible();
       await page.getByRole("button", { name: "同じ要求を再確認" }).click();
       await expect(page.getByRole("alert")).toHaveCount(0);
-      await page.unroute("**/api/queue?*");
     }
     await expect.poll(async () => (await peer()).prints.length).toBe(before + 2);
     expect((await peer()).prints.at(-1).ams_mapping).toEqual([0]);
@@ -146,7 +146,8 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   await report("RUNNING"); await report("FINISH");
   await expect(page.getByLabel("現在の印刷")).toContainText("取り外し待ち");
   const stale = await state();
-  await page.route("**/api/queue?*", route => route.request().method() === "GET" ? route.fulfill({ json: stale }) : route.continue());
+  let staleReads = true;
+  await page.route("**/api/queue?*", route => staleReads && route.request().method() === "GET" ? route.fulfill({ json: stale }) : route.continue());
   await confirm().check();
   await command({ type: "add", plate_id: plates[0].id, specification: specification(3) });
   await command({ type: "next", expected_job: stale.waiting[0].id, removed_job: stale.current?.id ?? null, cleared: true });
@@ -154,7 +155,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   await report("RUNNING"); await report("FINISH");
   await next().click();
   await expect(page.getByRole("alert")).toContainText("状態が変わりました");
-  await page.unroute("**/api/queue?*");
+  staleReads = false;
   await page.getByRole("button", { name: "最新状態を読み直す" }).click();
   await expect(page.getByLabel("現在の印刷")).toContainText(plates[3].name);
   await expect(confirm()).not.toBeChecked();
