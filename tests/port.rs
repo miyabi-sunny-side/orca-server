@@ -17,7 +17,10 @@ impl Drop for Server {
 
 fn command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orca-server"));
-    command.env_remove("PORT").env("LOG_LEVEL", "off");
+    command
+        .env_remove("PORT")
+        .env_remove("SCAD_LIVE_URL")
+        .env("LOG_LEVEL", "off");
     command
 }
 

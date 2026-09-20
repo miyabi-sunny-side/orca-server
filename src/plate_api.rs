@@ -57,6 +57,8 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+            Self::Upstream(message) => (StatusCode::BAD_GATEWAY, message),
+            Self::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
             Self::NotFound => (StatusCode::NOT_FOUND, "Plate or file not found"),
             Self::Io(error) => {
                 tracing::error!(%error, "plate storage operation failed");
@@ -70,7 +72,7 @@ impl IntoResponse for Error {
     }
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
     tokio::task::spawn_blocking(operation)

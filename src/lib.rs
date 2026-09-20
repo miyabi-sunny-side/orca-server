@@ -1,5 +1,6 @@
 mod plate_api;
 pub mod plates;
+pub mod scad;
 mod search;
 
 use axum::{
@@ -14,10 +15,15 @@ use tower_http::trace::TraceLayer;
 
 static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/client/dist");
 
-pub fn app_with_store(store: plates::Store) -> Router {
+pub fn app_with_source(store: plates::Store, source: Option<scad::Source>) -> Router {
     app()
-        .merge(plate_api::router(store))
+        .merge(plate_api::router(store.clone()))
+        .merge(scad::router(store, source))
         .layer(axum::middleware::from_fn(plate_api::same_origin))
+}
+
+pub fn app_with_store(store: plates::Store) -> Router {
+    app_with_source(store, None)
 }
 
 #[derive(Serialize)]

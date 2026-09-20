@@ -33,6 +33,35 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 ブラウザからの書込みは同じホスト・ポートを持つOriginだけを受け付け、別サイトは403で拒否します。
 プロキシを使う場合は、利用者側のHostヘッダーを維持してください。
 
+## scad-liveからの取り込み
+
+OrcaServerの環境変数`SCAD_LIVE_URL`へ、サーバーから到達できるscad-liveのURLを指定します。
+たとえば`http://scad-live:5003/`です。`scad-live`は例示用のホスト名なので、利用環境の値に変えてください。
+Dockerでは`-e SCAD_LIVE_URL=http://scad-live:5003/`を起動引数へ加えます。
+接続はブラウザからではなく、OrcaServerのプロセス・コンテナから行います。
+
+この版はHTTP接続を扱います。URL内の資格情報・query・fragment、リダイレクトは受け付けません。
+URLに`/scad/`などの接頭パスがある場合も、末尾に`api/models`と`models/`を付けてアクセスします。
+接続先の一覧APIは相対パスのJSON配列、モデル取得APIはSTL本体を返す必要があります。
+
+```sh
+curl --fail http://127.0.0.1:3000/api/scad/models
+curl --fail http://127.0.0.1:3000/api/plates/import \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Desk parts","models":["box one.stl","parts/holder.stl"]}'
+```
+
+`models`には一覧で返された相対パスを、そのまま文字列で渡します。
+空白・日本語・`%`などのURL符号化はサーバーが行います。クライアント側で二重に符号化しないでください。
+保存後にscad-live側が再生成されても、保存済みプレートは変わりません。
+同じプレートへ最新版を取り込み直す場合は、要求JSONへ既存の`plate_id`を加えて送ります。
+指定した全モデルを取り直して置換し、`settings`を省くと空の設定に戻します。
+新規は201、再取り込みは200とプレートJSONを返します。
+
+接続未設定は503、上流の通信・一覧・取得の異常は502、不正な選択やSTLは400です。
+取得が1つでも失敗した場合は保存しません。再取り込みの失敗でも既存プレートを保持します。
+各HTTP要求の期限は15秒、一覧は1 MiB、選択は1〜64モデル、取得内容の合計は64 MiBまでです。
+
 ## 制限
 
 プレート名は制御文字を含まない1〜256バイト、STLは1〜64個です。
@@ -56,7 +85,7 @@ STLはASCII・binaryの両形式を読み、空のモデルや有限でない座
 
 `plate.json`は形式版`format_version: 1`とID・revision・表示名・モデル一覧・設定を持ちます。
 モデルには表示用の`name`、保存先の相対`path`、取り込み元の`source`があります。
-直接アップロードしたモデルの`source`は`null`です。
+直接アップロードしたモデルの`source`は`null`、scad-liveから取り込んだ場合は元の相対パスです。
 配置・モデル・スライス設定を持つ`project`と派生印刷データの`print`は別の参照です。
 この版は3MFを生成せず、両方とも`null`を返します。
 

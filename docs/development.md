@@ -23,6 +23,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | `PORT` | `3000` | 待受ポート。1〜65535の整数。不正な値では起動しません。 |
 | `LOG_LEVEL` | `info` | `off`、`error`、`warn`、`info`、`debug`、`trace`。不正な値は`info`です。 |
 | `PLATES_DIR` | `data/plates` | プレートの保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
+| `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。未設定では取り込みAPIが503を返します。 |
 
 ネイティブ実行では全IPv4インターフェースで待ち受けます。
 到達範囲はホストのファイアウォールやコンテナのポート公開で制限します。
@@ -57,6 +58,7 @@ CIではビルドした実行ファイルを別ディレクトリから起動し
 - `src/`: Axumのルーター、起動処理、環境変数の読込み。
 - `client/`: Svelte 5の画面と検証コード。
 - `build.rs`: ビルド済み画面の存在確認と変更追跡。
+- [DESIGN.md](../DESIGN.md): 画面・テーマ・操作の設計。
 - `Dockerfile`: 画面とRustのビルド、非rootの実行イメージ。
 - `.github/workflows/`: CIとタグによるコンテナ公開。
 

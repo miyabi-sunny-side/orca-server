@@ -12,12 +12,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], port::from_env()?));
     let listener = TcpListener::bind(bind_addr).await?;
-    info!(%bind_addr, "server listening");
 
     let plates = orca_server::plates::Store::open(
         std::env::var_os("PLATES_DIR").unwrap_or_else(|| "data/plates".into()),
     )?;
-    axum::serve(listener, orca_server::app_with_store(plates))
+    let source = match std::env::var("SCAD_LIVE_URL") {
+        Ok(url) => Some(orca_server::scad::Source::new(&url)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err("SCAD_LIVE_URL must be UTF-8".into()),
+    };
+    info!(%bind_addr, "server listening");
+    axum::serve(listener, orca_server::app_with_source(plates, source))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

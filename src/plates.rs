@@ -9,6 +9,8 @@ use std::{
 #[derive(Debug)]
 pub enum Error {
     Invalid(&'static str),
+    Upstream(&'static str),
+    Unavailable(&'static str),
     NotFound,
     Io(io::Error),
 }
@@ -271,29 +273,32 @@ fn relative_path(path: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn validate(input: &Input) -> Result<()> {
-    if input.name.trim().is_empty()
-        || input.name.len() > 256
-        || input.name.chars().any(char::is_control)
-    {
+pub(crate) fn valid_model_name(name: &str) -> bool {
+    relative_path(name) && name.len() <= 1024 && name.to_ascii_lowercase().ends_with(".stl")
+}
+
+pub(crate) fn validate_metadata(name: &str, settings: &Value) -> Result<()> {
+    if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
         return Err(Error::Invalid(
             "Name must contain 1–256 bytes without control characters",
         ));
     }
-    if !input.settings.is_object() || input.settings.to_string().len() > 16 * 1024 {
+    if !settings.is_object() || settings.to_string().len() > 16 * 1024 {
         return Err(Error::Invalid(
             "Settings must be a JSON object no larger than 16 KiB",
         ));
     }
+    Ok(())
+}
+
+fn validate(input: &Input) -> Result<()> {
+    validate_metadata(&input.name, &input.settings)?;
     if input.models.is_empty() || input.models.len() > 64 {
         return Err(Error::Invalid("A plate must contain 1–64 STL models"));
     }
     let mut total = 0usize;
     for model in &input.models {
-        if !relative_path(&model.name)
-            || model.name.len() > 1024
-            || !model.name.to_ascii_lowercase().ends_with(".stl")
-        {
+        if !valid_model_name(&model.name) {
             return Err(Error::Invalid("Each model needs a relative STL filename"));
         }
         if model
