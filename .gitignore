@@ -10,3 +10,5 @@
 
 /client/test-results/
 /client/playwright-report/
+
+__pycache__/

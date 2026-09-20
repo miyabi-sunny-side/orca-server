@@ -32,7 +32,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 `GET /healthz`は`ok`、`GET /api/health`は`{"status":"ok"}`を返します。
 プレートの操作と保存形式は[プレートAPI](plates.md)を参照してください。
 
-P1SのMQTT接続設定と状態APIは[プリンター接続](printer.md)を参照してください。
+P1Sの接続設定・状態取得・印刷APIは[プリンター接続](printer.md)を参照してください。
 未設定でもプレートの保存・閲覧は使えます。
 
 ## 検証
@@ -75,8 +75,13 @@ MQTT接続の隔離検証にはPython 3と`openssl`コマンドを使います�
 
 ```sh
 python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
+python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 ```
 
+印刷開始の検証はFTPSのTLSセッション再利用・転送内容・AMS指定・拒否・通信断・重複操作も確認します。
+`tests/fixtures/p1_print.gcode.3mf`はOrcaSlicer 2.4.2で生成した通信検証用ファイルです。
+生成元は同梱の20mm立方体STL 2個、プリンターはP1S 0.4mmです。
+工程は0.20mm Standard、材料はGeneric PLA High Speed、プレートはTextured PEI Plateです。
 CIでも同じ経路を検証します。実機や利用者のアクセスコードには接続しません。
 
 ## 構成

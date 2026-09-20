@@ -2,6 +2,7 @@ mod artifacts;
 mod layout;
 mod plate_api;
 pub mod plates;
+mod print_start;
 pub mod printer;
 mod printer_state;
 mod profiles;

@@ -1,5 +1,14 @@
-use crate::printer_state::State;
-use axum::{Json, Router, routing::get};
+use crate::{
+    plates::{Error, Result, Store},
+    print_start::{self, Attempt, Phase},
+    printer_state::State,
+};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, Path, State as WebState},
+    http::StatusCode,
+    routing::{get, post},
+};
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, SubscribeReasonCode, Transport};
 use rustls::pki_types::pem::PemObject;
 use rustls::{
@@ -14,7 +23,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
 #[derive(Debug)]
 struct PinnedCertificate(CertificateDer<'static>);
@@ -26,7 +35,7 @@ impl ServerCertVerifier for PinnedCertificate {
         _name: &ServerName<'_>,
         _ocsp: &[u8],
         _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         if cert == &self.0 {
             Ok(ServerCertVerified::assertion())
         } else {
@@ -40,7 +49,7 @@ impl ServerCertVerifier for PinnedCertificate {
         message: &[u8],
         cert: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls12_signature(
             message,
             cert,
@@ -53,7 +62,7 @@ impl ServerCertVerifier for PinnedCertificate {
         message: &[u8],
         cert: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(
             message,
             cert,
@@ -68,24 +77,39 @@ impl ServerCertVerifier for PinnedCertificate {
     }
 }
 
+#[derive(Clone)]
 pub struct Config {
     ip: IpAddr,
     port: u16,
+    ftps_port: u16,
+    start_timeout: u64,
     serial: String,
     access_code: String,
     certificate: PathBuf,
 }
 
 impl Config {
-    fn parse(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, &'static str> {
+    fn parse(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> std::result::Result<Option<Self>, &'static str> {
         let ip = get("P1_IP");
         let serial = get("P1_SERIAL");
         let access_code = get("P1_ACCESS_CODE");
         let certificate = get("P1_TLS_CERT");
         let port = get("P1_MQTT_PORT");
-        if [&ip, &serial, &access_code, &certificate, &port]
-            .iter()
-            .all(|v| v.is_none())
+        let ftps_port = get("P1_FTPS_PORT");
+        let start_timeout = get("P1_START_TIMEOUT_SECS");
+        if [
+            &ip,
+            &serial,
+            &access_code,
+            &certificate,
+            &port,
+            &ftps_port,
+            &start_timeout,
+        ]
+        .iter()
+        .all(|v| v.is_none())
         {
             return Ok(None);
         }
@@ -110,9 +134,23 @@ impl Config {
             .ok()
             .filter(|&v| v > 0)
             .ok_or("P1_MQTT_PORT must be 1..65535")?;
+        let ftps_port = ftps_port
+            .unwrap_or_else(|| "990".into())
+            .parse::<u16>()
+            .ok()
+            .filter(|&v| v > 0)
+            .ok_or("P1_FTPS_PORT must be 1..65535")?;
+        let start_timeout = start_timeout
+            .unwrap_or_else(|| "600".into())
+            .parse::<u64>()
+            .ok()
+            .filter(|&v| (1..=3600).contains(&v))
+            .ok_or("P1_START_TIMEOUT_SECS must be 1..3600")?;
         Ok(Some(Self {
             ip,
             port,
+            ftps_port,
+            start_timeout,
             serial,
             access_code,
             certificate,
@@ -122,7 +160,7 @@ impl Config {
     /// Read printer-only settings; absence leaves printer integration disabled.
     /// # Errors
     /// Rejects incomplete settings or malformed values without echoing credentials.
-    pub fn from_env() -> Result<Option<Self>, &'static str> {
+    pub fn from_env() -> std::result::Result<Option<Self>, &'static str> {
         let mut values = std::collections::BTreeMap::new();
         for name in [
             "P1_IP",
@@ -130,6 +168,8 @@ impl Config {
             "P1_ACCESS_CODE",
             "P1_TLS_CERT",
             "P1_MQTT_PORT",
+            "P1_FTPS_PORT",
+            "P1_START_TIMEOUT_SECS",
         ] {
             match std::env::var(name) {
                 Ok(value) => {
@@ -144,7 +184,7 @@ impl Config {
 }
 
 impl Config {
-    fn options(&self) -> Result<MqttOptions, &'static str> {
+    fn tls(&self) -> std::result::Result<Arc<rustls::ClientConfig>, &'static str> {
         let file = std::fs::File::open(&self.certificate).map_err(|_| "Cannot read P1_TLS_CERT")?;
         let mut pem = Vec::new();
         file.take(65_537)
@@ -154,7 +194,7 @@ impl Config {
             return Err("P1_TLS_CERT exceeds 64 KiB");
         }
         let certificates = CertificateDer::pem_slice_iter(&pem)
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| "P1_TLS_CERT must be a PEM certificate")?;
         if certificates.len() != 1 {
             return Err("P1_TLS_CERT must contain exactly one printer certificate");
@@ -169,13 +209,18 @@ impl Config {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedCertificate(certificates[0].clone())))
         .with_no_client_auth();
+        Ok(Arc::new(tls))
+    }
+    fn options(&self) -> std::result::Result<MqttOptions, &'static str> {
         let mut options = MqttOptions::new(
             format!("orca-server-{}", uuid::Uuid::new_v4()),
             self.ip.to_string(),
             self.port,
         );
         options.set_credentials("bblp", &self.access_code);
-        options.set_transport(Transport::tls_with_config(tls.into()));
+        options.set_transport(Transport::tls_with_config(
+            rumqttc::TlsConfiguration::Rustls(self.tls()?),
+        ));
         options.set_keep_alive(Duration::from_secs(15));
         options.set_clean_session(true);
         options.set_max_packet_size(1024 * 1024, 64 * 1024);
@@ -190,25 +235,200 @@ fn now() -> u64 {
         .as_secs()
 }
 
-/// Start the configured printer connection and expose its current observation.
-/// # Errors
-/// Rejects a missing, oversized, or malformed pinned certificate.
-pub fn router(config: Option<Config>) -> Result<Router, &'static str> {
-    let state = Arc::new(Mutex::new(State::new(config.is_some())));
-    if let Some(config) = config {
-        let options = config.options()?;
-        tokio::spawn(run(options, config.serial, state.clone()));
-    }
-    Ok(Router::new().route(
-        "/api/printer/status",
-        get(move || {
-            let state = state.clone();
-            async move { Json(state.lock().await.status(now())) }
-        }),
-    ))
+#[derive(Clone)]
+pub struct Printer {
+    state: Arc<Mutex<State>>,
+    config: Option<Config>,
+    starts: mpsc::Sender<(String, u64)>,
 }
 
-fn request_snapshot(client: &AsyncClient, topic: &str) -> Result<(), rumqttc::ClientError> {
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartRequest {
+    pub revision: String,
+    pub ams_slot: u8,
+}
+
+impl Printer {
+    /// Start the configured observation loop. Missing settings disable printing.
+    /// # Errors
+    /// Rejects an invalid pinned certificate.
+    pub fn new(config: Option<Config>) -> std::result::Result<Self, &'static str> {
+        let state = Arc::new(Mutex::new(State::new(config.is_some())));
+        let (starts, receiver) = mpsc::channel(1);
+        if let Some(config) = &config {
+            tokio::spawn(run(
+                config.options()?,
+                config.serial.clone(),
+                state.clone(),
+                receiver,
+                config.start_timeout,
+            ));
+        }
+        Ok(Self {
+            state,
+            config,
+            starts,
+        })
+    }
+
+    pub fn router(&self, store: Store) -> Router {
+        Router::new()
+            .route("/api/printer/status", get(status))
+            .route("/api/plates/{id}/print", post(start))
+            .route("/api/printer/start/{id}/resolve", post(resolve))
+            .layer(DefaultBodyLimit::max(4096))
+            .layer(axum::middleware::from_fn(crate::plate_api::same_origin))
+            .with_state((self.clone(), store))
+    }
+
+    /// Upload a saved revision and request one print. HTTP cancellation does not retry it.
+    /// # Errors
+    /// Rejects unknown/busy printers, unresolved requests, invalid artifacts and AMS choices.
+    pub async fn start(&self, store: Store, id: String, request: StartRequest) -> Result<Attempt> {
+        let config = self
+            .config
+            .clone()
+            .ok_or(Error::Unavailable("Printer is not configured"))?;
+        let (plate, bytes, material) = crate::plate_api::blocking(move || {
+            let plate = store.get(&id)?;
+            if plate.revision != request.revision {
+                return Err(Error::Conflict("Plate revision changed"));
+            }
+            let path = plate
+                .print
+                .as_ref()
+                .ok_or(Error::Conflict("Slice the plate before printing"))?;
+            let bytes = store.read_file(&id, path)?;
+            let material = print_start::material(&bytes)?;
+            Ok((plate, bytes, material))
+        })
+        .await?;
+        let mut state = self.state.lock().await;
+        if state.start.as_ref().is_some_and(Attempt::blocks_start) {
+            return Err(Error::Conflict(
+                "A start request is still active or unresolved",
+            ));
+        }
+        print_start::check_ready(&state.status(now()), request.ams_slot, &material)?;
+        let attempt = Attempt::new(plate.id, plate.revision, request.ams_slot, material);
+        let epoch = state.epoch;
+        state.start = Some(attempt.clone());
+        drop(state);
+        let printer = self.clone();
+        let transfer = attempt.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_mins(5),
+                upload(&config, &transfer.filename(), &bytes),
+            )
+            .await;
+            let mut state = printer.state.lock().await;
+            let Some(start) = state.start.as_mut().filter(|s| s.id == transfer.id) else {
+                return;
+            };
+            if !matches!(result, Ok(Ok(()))) {
+                start.fail(
+                    Phase::UploadFailed,
+                    "FTPS transfer failed or timed out; no start command was sent",
+                );
+            } else if printer.starts.try_send((transfer.id, epoch)).is_err() {
+                start.fail(
+                    Phase::NotSent,
+                    "Printer command channel unavailable; no start command was sent",
+                );
+            }
+        });
+        Ok(attempt)
+    }
+}
+
+async fn status(
+    WebState((printer, _)): WebState<(Printer, Store)>,
+) -> Json<crate::printer_state::Status> {
+    Json(printer.state.lock().await.status(now()))
+}
+async fn start(
+    WebState((printer, store)): WebState<(Printer, Store)>,
+    Path(id): Path<String>,
+    Json(request): Json<StartRequest>,
+) -> Result<(StatusCode, Json<Attempt>)> {
+    printer
+        .start(store, id, request)
+        .await
+        .map(|a| (StatusCode::ACCEPTED, Json(a)))
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Resolution {
+    checked_printer: bool,
+}
+async fn resolve(
+    WebState((printer, _)): WebState<(Printer, Store)>,
+    Path(id): Path<String>,
+    Json(request): Json<Resolution>,
+) -> Result<Json<Attempt>> {
+    if !request.checked_printer {
+        return Err(Error::Invalid("Confirm that the printer was checked"));
+    }
+    let mut state = printer.state.lock().await;
+    let status = state.status(now());
+    let attempt = state
+        .start
+        .as_mut()
+        .filter(|a| a.id == id)
+        .ok_or(Error::NotFound)?;
+    attempt.resolve(&status)?;
+    Ok(Json(attempt.clone()))
+}
+
+async fn upload(config: &Config, name: &str, bytes: &[u8]) -> std::result::Result<(), ()> {
+    use suppaftp::{
+        tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream},
+        types::FileType,
+    };
+    // One TLS config per upload shares the control session with its data connection.
+    let connector = AsyncRustlsConnector::from(suppaftp::tokio_rustls::TlsConnector::from(
+        config.tls().map_err(|_| ())?,
+    ));
+    let mut ftp = AsyncRustlsFtpStream::connect_secure_implicit(
+        (config.ip, config.ftps_port),
+        connector,
+        &config.ip.to_string(),
+    )
+    .await
+    .map_err(|_| ())?;
+    // Keep PASV's dynamic port, but never follow its address to another host.
+    ftp.set_passive_nat_workaround(true);
+    if config.ip.is_ipv6() {
+        ftp.set_mode(suppaftp::Mode::ExtendedPassive);
+    }
+    ftp.login("bblp", &config.access_code)
+        .await
+        .map_err(|_| ())?;
+    ftp.custom_command("PBSZ 0", &[suppaftp::Status::CommandOk])
+        .await
+        .map_err(|_| ())?;
+    ftp.custom_command("PROT P", &[suppaftp::Status::CommandOk])
+        .await
+        .map_err(|_| ())?;
+    ftp.transfer_type(FileType::Binary).await.map_err(|_| ())?;
+    let count = ftp
+        .put_file(name, &mut std::io::Cursor::new(bytes))
+        .await
+        .map_err(|_| ())?;
+    if count != bytes.len() as u64 {
+        return Err(());
+    }
+    // A final positive transfer reply is authoritative; QUIT failure cannot undo it.
+    let _ = tokio::time::timeout(Duration::from_secs(2), ftp.quit()).await;
+    Ok(())
+}
+
+fn request_snapshot(
+    client: &AsyncClient,
+    topic: &str,
+) -> std::result::Result<(), rumqttc::ClientError> {
     client.try_publish(
         topic,
         QoS::AtMostOnce,
@@ -218,7 +438,13 @@ fn request_snapshot(client: &AsyncClient, topic: &str) -> Result<(), rumqttc::Cl
     )
 }
 
-async fn run(options: MqttOptions, serial: String, state: Arc<Mutex<State>>) {
+async fn run(
+    options: MqttOptions,
+    serial: String,
+    state: Arc<Mutex<State>>,
+    mut starts: mpsc::Receiver<(String, u64)>,
+    start_timeout: u64,
+) {
     let report = format!("device/{serial}/report");
     let request = format!("device/{serial}/request");
     loop {
@@ -228,6 +454,7 @@ async fn run(options: MqttOptions, serial: String, state: Arc<Mutex<State>>) {
         let mut refresh = tokio::time::interval(Duration::from_mins(5));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut subscribed = false;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 event = events.poll() => match event {
@@ -242,11 +469,38 @@ async fn run(options: MqttOptions, serial: String, state: Arc<Mutex<State>>) {
                         refresh.reset();
                     }
                     Ok(Event::Incoming(Incoming::Publish(message))) if subscribed && message.topic == report && !message.retain => {
-                        state.lock().await.apply(&message.payload, now());
+                        let mut state = state.lock().await;
+                        state.apply(&message.payload, now());
+                        let status = state.status(now());
+                        if let Ok(value) = serde_json::from_slice(&message.payload)
+                            && let Some(start) = &mut state.start { start.observe(&value, &status); }
                     }
                     Ok(_) => {},
                     Err(_) => break, // Never log library errors or packets: they may contain credentials.
                 },
+                Some((id, epoch)) = starts.recv() => {
+                    let mut state = state.lock().await;
+                    let status = state.status(now());
+                    let same_connection = state.epoch == epoch && subscribed;
+                    if let Some(start) = state.start.as_mut().filter(|s| s.id == id && s.phase == Phase::Uploading) {
+                        if !same_connection || print_start::check_ready(&status, start.ams_slot, &start.material).is_err() {
+                            start.fail(Phase::NotSent, "Printer status or selected AMS changed during transfer; no start command was sent");
+                        } else if client.try_publish(&request, QoS::AtMostOnce, false, start.command().to_string()).is_err() {
+                            start.fail(Phase::NotSent, "MQTT publish was not queued; no start command was sent");
+                        } else { start.sent(now()); }
+                    }
+                }
+                _ = tick.tick() => {
+                    let mut state = state.lock().await;
+                    let synchronized = state.status(now()).synchronized;
+                    if let Some(start) = &mut state.start {
+                        let pending = matches!(start.phase, Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing);
+                        start.tick(now(), start_timeout);
+                        if !synchronized { start.disconnected(); }
+                        // Drop this client's queue so timed-out writes cannot be sent later.
+                        if pending && start.phase == Phase::Unknown { break; }
+                    }
+                }
                 _ = refresh.tick() => {
                     if subscribed && !state.lock().await.status(now()).synchronized && request_snapshot(&client, &request).is_err() { break; }
                 }
@@ -277,6 +531,8 @@ mod tests {
         let config = Config {
             ip: "127.0.0.1".parse().unwrap(),
             port: 8883,
+            ftps_port: 990,
+            start_timeout: 600,
             serial: "TESTSERIAL".into(),
             access_code: "test-only-secret".into(),
             certificate: file,
@@ -331,6 +587,9 @@ mod tests {
             ("P1_TLS_CERT", ""),
             ("P1_MQTT_PORT", "0"),
             ("P1_MQTT_PORT", "65536"),
+            ("P1_FTPS_PORT", "0"),
+            ("P1_START_TIMEOUT_SECS", "0"),
+            ("P1_START_TIMEOUT_SECS", "3601"),
         ] {
             let mut fields = good.clone();
             fields.insert(key, bad);

@@ -12,13 +12,14 @@ pub fn init() {
         Ok("trace") => LevelFilter::TRACE,
         _ => LevelFilter::INFO,
     };
-    // rumqttc may log entire malformed packets, including credential fields.
+    // Protocol libraries may log malformed packets, credentials, or raw peer replies.
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
                 .with_filter(level)
                 .with_filter(filter_fn(|metadata| {
                     !metadata.target().starts_with("rumqttc")
+                        && !metadata.target().starts_with("suppaftp")
                 })),
         )
         .init();
@@ -41,6 +42,7 @@ mod tests {
     fn emit_logs() {
         super::init();
         tracing::error!(target: "rumqttc::state", "protocol-secret-probe");
+        tracing::error!(target: "suppaftp::command", "protocol-secret-probe");
         tracing::error!("log-probe-error");
         tracing::warn!("log-probe-warn");
         tracing::info!("log-probe-info");

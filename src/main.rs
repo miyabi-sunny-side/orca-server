@@ -37,7 +37,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let printer = orca_server::printer::router(orca_server::printer::Config::from_env()?)?;
+    let printer = orca_server::printer::Printer::new(orca_server::printer::Config::from_env()?)?
+        .router(plates.clone());
     info!(%bind_addr, "server listening");
     axum::serve(
         listener,

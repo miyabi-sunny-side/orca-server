@@ -11,6 +11,7 @@ pub struct PrintStatus {
     pub error: Option<u64>,
     pub job_id: Option<String>,
     pub file: Option<String>,
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -37,6 +38,7 @@ pub struct AmsStatus {
 
 #[derive(Serialize)]
 pub struct Status {
+    pub start: Option<crate::print_start::Attempt>,
     pub connection: &'static str,
     pub synchronized: bool,
     pub updated_at: Option<u64>,
@@ -46,6 +48,8 @@ pub struct Status {
 }
 
 pub struct State {
+    pub start: Option<crate::print_start::Attempt>,
+    pub epoch: u64,
     connection: &'static str,
     synchronized: bool,
     updated_at: Option<u64>,
@@ -57,6 +61,8 @@ pub struct State {
 impl State {
     pub fn new(configured: bool) -> Self {
         Self {
+            start: None,
+            epoch: 0,
             connection: if configured {
                 "connecting"
             } else {
@@ -70,10 +76,18 @@ impl State {
         }
     }
     pub fn connected(&mut self) {
+        let start = self.start.take();
+        let epoch = self.epoch.wrapping_add(1);
         *self = Self::new(true);
+        self.start = start;
+        self.epoch = epoch;
         self.connection = "connected";
     }
     pub fn disconnected(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if let Some(start) = &mut self.start {
+            start.disconnected();
+        }
         self.connection = "disconnected";
         self.synchronized = false;
     }
@@ -122,6 +136,7 @@ impl State {
         update(&mut self.print.error, report, "print_error", number);
         update(&mut self.print.job_id, report, "subtask_id", string);
         update(&mut self.print.file, report, "gcode_file", string);
+        update(&mut self.print.name, report, "subtask_name", string);
         if let Some(ams) = report.get("ams") {
             if let Some(ams) = ams.as_object() {
                 self.update_ams(ams);
@@ -150,6 +165,7 @@ impl State {
         };
         let synchronized = connection == "connected" && self.synchronized && fresh;
         Status {
+            start: self.start.clone(),
             connection,
             synchronized,
             updated_at: self.updated_at,

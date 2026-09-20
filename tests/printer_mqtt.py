@@ -131,9 +131,12 @@ class Broker:
                 length = struct.unpack('!H', body[:2])[0]
                 assert body[2:2+length].decode() == f'device/{SERIAL}/request'
                 value = json.loads(body[2+length:])
-                assert value['pushing']['command'] == 'pushall'
-                assert value['pushing']['version'] == 1 and value['pushing']['push_target'] == 1
-                self.requests.append(value)
+                self.on_request(value)
+
+    def on_request(self, value):
+        assert value['pushing']['command'] == 'pushall'
+        assert value['pushing']['version'] == 1 and value['pushing']['push_target'] == 1
+        self.requests.append(value)
 
     def send(self, value, retained=False, topic=REPORT):
         self.actions.put((value, retained, topic))
