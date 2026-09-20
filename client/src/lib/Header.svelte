@@ -56,6 +56,7 @@
         <button class="menu-item" type="button" onclick={openTheme}>
           テーマ設定
         </button>
+        <a class="menu-item" href="/about">ライセンスとソース</a>
       </nav>
     {/if}
   </div>
@@ -123,6 +124,7 @@
     font-size: var(--fs-md)
     font-weight: 500
     text-align: left
+    text-decoration: none
     cursor: pointer
 
     &:hover

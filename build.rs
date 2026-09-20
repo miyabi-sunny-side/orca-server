@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=ORCA_SOURCE_URL");
     println!("cargo:rerun-if-changed=client/dist");
     assert!(
         std::path::Path::new("client/dist/index.html").is_file(),

@@ -111,4 +111,25 @@ docker build -t orca-server .
 GitHub Releaseには公開イメージのdigestを記録します。
 
 元のテンプレートは`fa63d25dbcb3762e2ecf7e56bfaddb994cdba07c`です。
-MITの著作権表示はルートのLICENSEに保持しています。
+MITの著作権・許諾表示は[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES)に保持しています。
+
+
+### ライセンスと対応ソース
+
+OrcaServerは[AGPL v3](../LICENSE)（`AGPL-3.0-only`）で提供します。
+公開コンテナは、ビルドしたcommitのソースアーカイブを画面の「ライセンスとソース」から案内します。
+GitHub Releaseにも同じcommitのソースとビルド手順を載せます。
+コンテナ内の`/usr/share/doc/orca-server/`にライセンス本文と第三者通知を含めます。
+同じ本文は実行バイナリに埋め込み、`/LICENSE`と`/THIRD_PARTY_NOTICES`で取得できます。
+
+独自ビルドを配布・提供する場合は、その変更を含む対応ソースを取得できるURLを用意し、
+ビルド時の`ORCA_SOURCE_URL`へ設定してください。実行時の環境変数では変更できません。
+ソースにはRust/Svelteのコード、lockfile、Dockerfileと本書のビルド手順を含めます。
+
+```sh
+ORCA_SOURCE_URL=https://example.org/orca-server-source.tar.gz cargo build --locked --release
+docker build --build-arg ORCA_SOURCE_URL=https://example.org/orca-server-source.tar.gz -t orca-server .
+```
+
+例のURLを、自分が配布するビルドに対応した公開先へ置き換えます。
+未設定の開発ビルドでは公開先が未設定であることを画面へ表示し、公式版のソースへ誤って案内しません。

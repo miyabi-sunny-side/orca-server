@@ -13,20 +13,23 @@ COPY rust-toolchain.toml ./
 RUN cargo install cargo-chef --locked
 
 FROM chef AS planner
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock build.rs LICENSE THIRD_PARTY_NOTICES ./
 COPY src/ src/
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS backend
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --locked --release --recipe-path recipe.json
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock build.rs LICENSE THIRD_PARTY_NOTICES ./
 COPY src/ src/
 COPY --from=frontend /app/client/dist ./client/dist
-RUN cargo build --locked --release
+ARG ORCA_SOURCE_URL
+RUN ORCA_SOURCE_URL="$ORCA_SOURCE_URL" cargo build --locked --release
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+COPY LICENSE THIRD_PARTY_NOTICES /usr/share/doc/orca-server/
 COPY --from=backend /app/target/release/orca-server /usr/local/bin/orca-server
 ENV PORT=3000
 ENV PLATES_DIR=/data/plates

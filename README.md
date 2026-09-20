@@ -44,4 +44,7 @@ scad-liveとOrcaSlicerを設定したサーバーで操作します。
 
 ## ライセンス
 
-[MIT License](LICENSE)。[Rust + Svelte Template](https://github.com/miyabi-sunny-side/rust-svelte-template)を基にしています。
+OrcaServerは[GNU Affero General Public License version 3](LICENSE)（`AGPL-3.0-only`）で提供します。
+画面の「ライセンスとソース」から、利用中の配布版に対応するソースを取得できます。
+公開イメージの対応ソースとビルド手順は[各リリース](https://github.com/miyabi-sunny-side/orca-server/releases)にも記載しています。
+流用したMITコードの著作権・許諾表示は[第三者通知](THIRD_PARTY_NOTICES)に保持しています。

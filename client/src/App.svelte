@@ -1,5 +1,6 @@
 <script lang="ts">
   import Header from "./lib/Header.svelte";
+  import About from "./pages/About.svelte";
   import Home from "./pages/Home.svelte";
   import NewPlate from "./pages/NewPlate.svelte";
   import PlateDetail from "./pages/PlateDetail.svelte";
@@ -10,7 +11,8 @@
 <svelte:head><title>OrcaServer</title></svelte:head>
 <Header />
 <main>
-  {#if path === "/plates/new"}<NewPlate />
+  {#if path === "/about"}<About />
+  {:else if path === "/plates/new"}<NewPlate />
   {:else if id}<PlateDetail {id} />
   {:else}<Home />{/if}
 </main>

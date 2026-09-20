@@ -114,4 +114,4 @@ STLはASCII・binaryの両形式を読み、空のモデルや有限でない座
 コンテナへホストのフォルダーを渡す場合は、UID/GID 10001の書込み権限が必要です。
 
 検索順位は[scad-live](https://github.com/miyabi-sunny-side/scad-live)の方式を基にしています。
-MITの著作権表示は[LICENSE](../LICENSE)に保持しています。
+MITの著作権・許諾表示は[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES)に保持しています。

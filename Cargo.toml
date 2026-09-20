@@ -3,7 +3,7 @@ name = "orca-server"
 version = "0.1.7"
 edition = "2024"
 rust-version = "1.96"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["multipart"] }

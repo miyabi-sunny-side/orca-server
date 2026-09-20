@@ -51,10 +51,24 @@ struct HealthResponse {
 pub fn app() -> Router {
     let api = Router::new()
         .route("/health", get(api_health))
+        .route(
+            "/about",
+            get(|| async {
+                Json(serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "source_url": option_env!("ORCA_SOURCE_URL").filter(|url| !url.is_empty()),
+                }))
+            }),
+        )
         .fallback(api_not_found);
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/LICENSE", get(|| async { include_str!("../LICENSE") }))
+        .route(
+            "/THIRD_PARTY_NOTICES",
+            get(|| async { include_str!("../THIRD_PARTY_NOTICES") }),
+        )
         .route("/api", axum::routing::any(api_not_found))
         .route("/api/", axum::routing::any(api_not_found))
         .nest("/api", api)

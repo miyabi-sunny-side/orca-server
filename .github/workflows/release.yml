@@ -44,6 +44,8 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.licenses=AGPL-3.0-only
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest
@@ -53,6 +55,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            ORCA_SOURCE_URL=https://github.com/${{ github.repository }}/archive/${{ github.sha }}.tar.gz
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:build-cache
@@ -82,4 +86,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --verify-tag \
             --generate-notes \
-            --notes "Image: \`${{ steps.digest.outputs.image }}\`"
+            --notes "Image: \`${{ steps.digest.outputs.image }}\` · [Source](https://github.com/${{ github.repository }}/archive/${{ github.sha }}.tar.gz) · [Build instructions](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/development.md) · [AGPL v3](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/LICENSE)"
