@@ -152,6 +152,8 @@ export type FilamentSetting = {
   overrides_json: {
     nozzle_temperature_initial_layer?: number;
     nozzle_temperature?: number;
+    bed_temperature_initial_layer?: number;
+    bed_temperature?: number;
   };
   resolved?: FilamentTemperatures | null;
   error?: string | null;

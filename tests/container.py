@@ -39,6 +39,10 @@ def main():
     rig=ContainerRig(sys.argv[1],sys.argv[2])
     try:
         rig.launch();rig.seed()
+        material = rig.api('/api/filaments/'+rig.materials[1]['id'])['settings'][0]
+        setting = {k:material[k] for k in ['machine_profile_key','base_profile_key','overrides_json']}
+        setting['overrides_json'].update(bed_temperature_initial_layer=65,bed_temperature=65)
+        rig.api('/api/filaments/'+rig.materials[1]['id']+'/settings/'+material['id'],setting,'PUT')
         assert docker('exec',rig.name,'id','-u')=='10001'
         assert not any(e.startswith(('DISPLAY=','WAYLAND_DISPLAY=')) for e in docker('exec',rig.name,'env').splitlines())
         assert rig.api('/api/slicer/profiles')['version']=='2.4.2'
@@ -67,7 +71,15 @@ def main():
         assert all(0<=lo<hi<=limit for box in bounds for (lo,hi),limit in zip(box,[256,256,250]))
         assert any(bounds[0][a][1]<=bounds[1][a][0] or bounds[1][a][1]<=bounds[0][a][0] for a in (0,1))
         assert all(abs(x-y)<.001 for a,b in zip(bounds,printed) for c,d in zip(a,b) for x,y in zip(c,d))
-        assert len(zipfile.ZipFile(io.BytesIO(data['print'])).read('Metadata/plate_1.gcode'))>1000
+        archive=zipfile.ZipFile(io.BytesIO(data['print']))
+        gcode=archive.read('Metadata/plate_1.gcode')
+        assert len(gcode)>1000
+        settings=json.loads(archive.read('Metadata/project_settings.config'))
+        assert settings['textured_plate_temp_initial_layer']==['65'] and settings['textured_plate_temp']==['65']
+        bed_commands=[line.split(';',1)[0].strip() for line in gcode.decode().splitlines() if line.startswith(('M140 ', 'M190 '))]
+        assert any('S65' in line.split() for line in bed_commands), bed_commands
+        assert all(any(value in line.split() for value in ['S65','S0']) for line in bed_commands), bed_commands
+
         (rig.output/'first.log').write_text(docker('logs',rig.name))
         rig.stop();rig.launch()
         q=rig.api();assert q['current']['id']==job['id'] and q['current']['state']=='needs_attention'
@@ -78,7 +90,7 @@ def main():
             assert urllib.request.urlopen(rig.base+f'/api/plates/{plate["id"]}/files/{model["id"]}').read()==cube
         rig.idle();assert len(rig.broker.prints)==1
         until(lambda:docker('inspect','--format','{{.State.Health.Status}}',rig.name)=='healthy',45)
-        result=dict(image=rig.image,uid=10001,version='2.4.2',headless=True,world_bounds=bounds,persistent_composition_uploads_queue=True,uncertain_restart_no_resend=True,healthy=True)
+        result=dict(image=rig.image,uid=10001,version='2.4.2',headless=True,world_bounds=bounds,persistent_composition_uploads_queue=True,uncertain_restart_no_resend=True,bed_temperature_override_gcode=65,healthy=True)
         (rig.output/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
     finally:
         try:(rig.output/'server.log').write_text(docker('logs',rig.name))

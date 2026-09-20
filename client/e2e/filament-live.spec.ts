@@ -21,17 +21,28 @@ test('material CRUD, temperatures, manual mapping and stale observations',async(
   await page.getByRole('link',{name:'設定を追加'}).click();await page.getByLabel('機種・ノズル径').selectOption(c.machine);
   await page.getByLabel('基本のフィラメントプロファイル').selectOption('Generic PETG');
   await page.getByLabel('初層（℃）',{exact:true}).fill('250');await page.getByLabel('通常層（℃）',{exact:true}).fill('240');
+  await page.getByLabel('ベッド初層（℃）',{exact:true}).fill('65');await page.getByLabel('ベッド通常層（℃）',{exact:true}).fill('0');
   await page.route(`**/api/filaments/${id}/settings`,route=>route.fulfill({status:409,json:{error:'duplicate'}}));
   await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByRole('alert')).toContainText('同じ機種');await expect(page.getByLabel('初層（℃）',{exact:true})).toHaveValue('250');
   await page.unroute(`**/api/filaments/${id}/settings`);
   for(const scheme of ['dark','light'] as const){
     await page.emulateMedia({colorScheme:scheme});await page.setViewportSize({width:375,height:812});
+    await page.evaluate(()=>window.scrollTo(0,0));
     await page.screenshot({path:join(output,`temperature-${scheme}.png`),fullPage:true});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   }
   await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(new RegExp(`/filaments/${id}$`));
   await expect(page.getByRole('link',{name:/初層 250℃ \/ 通常 240℃/})).toBeVisible();
   await page.getByRole('link',{name:/初層 250℃ \/ 通常 240℃/}).click();await page.getByLabel('初層（℃）',{exact:true}).fill('251');await page.getByRole('button',{name:'保存',exact:true}).click();
   await expect(page.getByRole('link',{name:/初層 251℃/})).toBeVisible();
+  const saved = (await (await request.get(`/api/filaments/${id}`)).json()).settings[0];
+  expect(saved.overrides_json.bed_temperature_initial_layer).toBe(65);expect(saved.overrides_json.bed_temperature).toBe(0);
+  await page.getByRole('link',{name:/初層 251℃/}).click();
+  await expect(page.getByLabel('ベッド初層（℃）',{exact:true})).toHaveValue('65');await expect(page.getByLabel('ベッド通常層（℃）',{exact:true})).toHaveValue('0');
+  await page.getByLabel('ベッド初層（℃）',{exact:true}).fill('');await page.getByLabel('ベッド通常層（℃）',{exact:true}).fill('');
+  await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(new RegExp(`/filaments/${id}$`));
+  const cleared = (await (await request.get(`/api/filaments/${id}`)).json()).settings[0];
+  expect(cleared.overrides_json.bed_temperature_initial_layer).toBeUndefined();expect(cleared.overrides_json.bed_temperature).toBeUndefined();
+
   await page.getByRole('link',{name:/初層 251℃/}).click();page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'この設定を削除'}).click();
   await expect(page.getByText('使う機種・ノズル径ごとに基本プロファイルを選択してください。')).toBeVisible();
   page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'材料を削除',exact:true}).click();await expect(page).toHaveURL(/\/filaments$/);

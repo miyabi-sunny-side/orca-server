@@ -176,6 +176,22 @@ impl Profiles {
                 profile.insert(key.into(), serde_json::json!([value.to_string()]));
             }
         }
+        for prefix in ["cool_plate", "eng_plate", "hot_plate", "textured_plate"] {
+            for (suffix, value) in [
+                (
+                    "temp_initial_layer",
+                    setting.overrides_json.bed_temperature_initial_layer,
+                ),
+                ("temp", setting.overrides_json.bed_temperature),
+            ] {
+                if let Some(value) = value {
+                    profile.insert(
+                        format!("{prefix}_{suffix}"),
+                        serde_json::json!([value.to_string()]),
+                    );
+                }
+            }
+        }
         Ok(profile)
     }
 
@@ -270,7 +286,7 @@ mod tests {
             filament: BTreeMap::from([
                 (
                     "base".into(),
-                    json!({"instantiation":"false","filament_type":["PETG"],"nozzle_temperature_initial_layer":["255"],"nozzle_temperature":["255"],"required_nozzle_HRC":["0"]}),
+                    json!({"instantiation":"false","filament_type":["PETG"],"nozzle_temperature_initial_layer":["255"],"nozzle_temperature":["255"],"required_nozzle_HRC":["0"],"cool_plate_temp":["0"],"cool_plate_temp_initial_layer":["0"],"hot_plate_temp":["70"],"hot_plate_temp_initial_layer":["70"]}),
                 ),
                 (
                     "petg".into(),
@@ -293,6 +309,26 @@ mod tests {
         assert_eq!(resolved["nozzle_temperature_initial_layer"], json!(["250"]));
         assert_eq!(resolved["nozzle_temperature"], json!(["240"]));
         assert_eq!(resolved["required_nozzle_HRC"], json!(["0"]));
+        assert_eq!(resolved["cool_plate_temp"], json!(["0"]));
+        assert_eq!(resolved["hot_plate_temp"], json!(["70"]));
+        setting.overrides_json =
+            serde_json::from_value(json!({"bed_temperature_initial_layer":65,"bed_temperature":0}))
+                .unwrap();
+        let resolved = profiles.resolve_filament(&setting, "PETG").unwrap();
+        for prefix in ["cool_plate", "eng_plate", "hot_plate", "textured_plate"] {
+            assert_eq!(
+                resolved[&format!("{prefix}_temp_initial_layer")],
+                json!(["65"])
+            );
+            assert_eq!(resolved[&format!("{prefix}_temp")], json!(["0"]));
+        }
+        assert_eq!(resolved["nozzle_temperature"], json!(["255"]));
+        setting.overrides_json =
+            serde_json::from_value(json!({"bed_temperature_initial_layer":65})).unwrap();
+        let resolved = profiles.resolve_filament(&setting, "PETG").unwrap();
+        assert_eq!(resolved["hot_plate_temp_initial_layer"], json!(["65"]));
+        assert_eq!(resolved["hot_plate_temp"], json!(["70"]));
+
         assert!(profiles.resolve_filament(&setting, "PLA").is_err());
         setting.machine_profile_key = "Bambu Lab P1S 0.2 nozzle".into();
         assert!(profiles.resolve_filament(&setting, "PETG-GF").is_err());

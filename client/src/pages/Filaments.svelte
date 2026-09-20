@@ -32,6 +32,8 @@
   let base = $state("");
   let first = $state<number>();
   let normal = $state<number>();
+  let bedFirst = $state<number>();
+  let bedNormal = $state<number>();
   const selected = $derived(profiles.find((p) => p.key === base));
   const controller = new AbortController();
   let sequence = 0;
@@ -88,6 +90,8 @@
           base = s.base_profile_key;
           first = s.overrides_json.nozzle_temperature_initial_layer;
           normal = s.overrides_json.nozzle_temperature;
+          bedFirst = s.overrides_json.bed_temperature_initial_layer;
+          bedNormal = s.overrides_json.bed_temperature;
         }
         await loadProfiles();
       }
@@ -118,6 +122,8 @@
             overrides_json: {
               nozzle_temperature_initial_layer: first,
               nozzle_temperature: normal,
+              bed_temperature_initial_layer: bedFirst,
+              bed_temperature: bedNormal,
             },
           }),
         });
@@ -284,6 +290,30 @@
                 .nozzle_temperature_initial_layer ?? "不明"}℃ / 通常 {selected
                 .resolved.nozzle_temperature ?? "不明"}℃
             </p>{/if}
+          <h2>ベッド温度の調整</h2>
+          <p class="help">
+            空欄は選択したビルドプレートの基本温度を使用します。指定した温度はプレートの種類にかかわらず適用します。
+          </p>
+          <label class="field"
+            ><span>ベッド初層（℃）</span><input
+              type="number"
+              min="0"
+              max="120"
+              step="1"
+              bind:value={bedFirst}
+              placeholder="基本プロファイル"
+            /></label
+          >
+          <label class="field"
+            ><span>ベッド通常層（℃）</span><input
+              type="number"
+              min="0"
+              max="120"
+              step="1"
+              bind:value={bedNormal}
+              placeholder="基本プロファイル"
+            /></label
+          >
           <p class="help">
             材料メーカーの推奨温度とプリンターの仕様を確認してください。同じ構成のプリンターでこの設定を共有します。
           </p>
@@ -368,7 +398,16 @@
                   >初層 {s.resolved?.nozzle_temperature_initial_layer ??
                     "不明"}℃ / 通常 {s.resolved?.nozzle_temperature ??
                     "不明"}℃</span
-                >{#if s.error}<span role="alert"
+                >{#if s.overrides_json.bed_temperature_initial_layer !== undefined || s.overrides_json.bed_temperature !== undefined}<span
+                    class="caption"
+                    >ベッド: 初層 {s.overrides_json
+                      .bed_temperature_initial_layer === undefined
+                      ? "基本値"
+                      : `${s.overrides_json.bed_temperature_initial_layer}℃`} / 通常
+                    {s.overrides_json.bed_temperature === undefined
+                      ? "基本値"
+                      : `${s.overrides_json.bed_temperature}℃`}</span
+                  >{/if}{#if s.error}<span role="alert"
                     >基本プロファイルを選び直してください。</span
                   >{/if}</a
               >

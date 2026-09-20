@@ -597,6 +597,8 @@ mod tests {
                 overrides_json: crate::filament::Overrides {
                     nozzle_temperature_initial_layer: Some(250),
                     nozzle_temperature: Some(240),
+                    bed_temperature_initial_layer: Some(65),
+                    bed_temperature: Some(65),
                 },
             },
         };
@@ -613,6 +615,10 @@ mod tests {
                 .overrides_json
                 .nozzle_temperature,
             Some(240)
+        );
+        assert!(
+            db.filament_settings(&f.id).unwrap()[0].data.overrides_json
+                == setting.data.overrides_json
         );
         db.delete_filament(&f.id).unwrap();
         assert!(db.filament_settings(&f.id).unwrap().is_empty());

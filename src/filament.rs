@@ -53,6 +53,10 @@ pub(crate) struct Overrides {
     pub nozzle_temperature_initial_layer: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nozzle_temperature: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bed_temperature_initial_layer: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bed_temperature: Option<u16>,
 }
 impl Overrides {
     pub fn validate(&self) -> Result<()> {
@@ -66,6 +70,15 @@ impl Overrides {
         {
             return Err(Error::Invalid(
                 "Explicit nozzle temperatures must be integers from 120 to 350 Celsius",
+            ));
+        }
+        if [self.bed_temperature_initial_layer, self.bed_temperature]
+            .into_iter()
+            .flatten()
+            .any(|v| v > 120)
+        {
+            return Err(Error::Invalid(
+                "Explicit bed temperatures must be integers from 0 to 120 Celsius",
             ));
         }
         Ok(())
@@ -239,6 +252,23 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+    #[test]
+    fn bed_temperature_overrides_distinguish_zero_and_absence() {
+        let empty: Overrides = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(serde_json::to_value(empty).unwrap(), json!({}));
+        for value in [0, 65, 120] {
+            let input = json!({"bed_temperature_initial_layer":value,"bed_temperature":value});
+            let parsed: Overrides = serde_json::from_value(input.clone()).unwrap();
+            assert!(parsed.validate().is_ok());
+            assert_eq!(serde_json::to_value(parsed).unwrap(), input);
+        }
+        for value in [json!(-1), json!(121), json!(65.5), json!("65")] {
+            for key in ["bed_temperature_initial_layer", "bed_temperature"] {
+                let parsed = serde_json::from_value::<Overrides>(json!({key:value}));
+                assert!(parsed.map_or(true, |p| p.validate().is_err()));
+            }
+        }
     }
     #[test]
     fn abrasive_material_needs_a_suitable_known_nozzle() {
