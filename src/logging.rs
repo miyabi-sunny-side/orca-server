@@ -1,4 +1,7 @@
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::{
+    filter::{LevelFilter, filter_fn},
+    prelude::*,
+};
 
 pub fn init() {
     let level = match std::env::var("LOG_LEVEL").as_deref() {
@@ -9,7 +12,16 @@ pub fn init() {
         Ok("trace") => LevelFilter::TRACE,
         _ => LevelFilter::INFO,
     };
-    tracing_subscriber::fmt().with_max_level(level).init();
+    // rumqttc may log entire malformed packets, including credential fields.
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(level)
+                .with_filter(filter_fn(|metadata| {
+                    !metadata.target().starts_with("rumqttc")
+                })),
+        )
+        .init();
 }
 
 #[cfg(test)]
@@ -28,6 +40,7 @@ mod tests {
     #[ignore = "executed in a child process to isolate the global subscriber and environment"]
     fn emit_logs() {
         super::init();
+        tracing::error!(target: "rumqttc::state", "protocol-secret-probe");
         tracing::error!("log-probe-error");
         tracing::warn!("log-probe-warn");
         tracing::info!("log-probe-info");
@@ -78,6 +91,10 @@ mod tests {
                     "{}{}",
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr),
+                );
+                assert!(
+                    !logs.contains("protocol-secret-probe"),
+                    "protocol log must be filtered"
                 );
                 for (index, marker) in MARKERS.iter().enumerate() {
                     assert_eq!(

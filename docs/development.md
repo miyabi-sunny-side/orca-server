@@ -32,6 +32,9 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 `GET /healthz`は`ok`、`GET /api/health`は`{"status":"ok"}`を返します。
 プレートの操作と保存形式は[プレートAPI](plates.md)を参照してください。
 
+P1SのMQTT接続設定と状態APIは[プリンター接続](printer.md)を参照してください。
+未設定でもプレートの保存・閲覧は使えます。
+
 ## 検証
 
 リポジトリのルートで実行します。ブラウザ検証にはChromiumを使用します。
@@ -66,6 +69,15 @@ python3 tests/browser_cli.py "$ORCA_APPDIR" /tmp/orca-browser-check
 一時保存先とscad-live互換のHTTP応答を用意し、STL選択・設定・保存・再検索・再取り込みを操作します。
 RustサーバーとOrcaSlicerは実際に実行します。スクリーンショットと操作結果は指定した出力先へ保存します。
 プリンターには接続しません。起動したサーバーと一時データは終了時に片付けます。
+
+MQTT接続の隔離検証にはPython 3と`openssl`コマンドを使います。
+一時証明書のTLS接続先を用意し、購読・全状態要求・部分更新・再接続・証明書不一致・秘密値の非公開を確認します。
+
+```sh
+python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
+```
+
+CIでも同じ経路を検証します。実機や利用者のアクセスコードには接続しません。
 
 ## 構成
 

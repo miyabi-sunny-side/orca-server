@@ -1,0 +1,17 @@
+{
+  "print": {
+    "command": "push_status", "msg": 0,
+    "gcode_state": "IDLE", "mc_percent": 0, "print_error": 0,
+    "ams": {
+      "ams_exist_bits": "1", "tray_exist_bits": "3", "tray_now": "255",
+      "ams": [{
+        "id": "0", "humidity": "3",
+        "tray": [
+          {"id": "0", "tray_type": "PLA", "tray_color": "FF0000FF", "remain": 70},
+          {"id": "1", "tray_type": "PETG", "tray_color": "00FF00FF", "remain": 40},
+          {"id": "2"}, {"id": "3"}
+        ]
+      }]
+    }
+  }
+}

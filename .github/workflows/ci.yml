@@ -66,6 +66,9 @@ jobs:
       - name: Build smoke-test binary
         run: cargo build --locked
 
+      - name: Verify isolated MQTT and TLS printer connection
+        run: python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
+
       - name: Smoke-test embedded UI from an isolated directory
         shell: bash
         run: |

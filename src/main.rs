@@ -37,10 +37,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    let printer = orca_server::printer::router(orca_server::printer::Config::from_env()?)?;
     info!(%bind_addr, "server listening");
     axum::serve(
         listener,
-        orca_server::app_with_slicer(plates, source, slicer),
+        orca_server::app_with_slicer(plates, source, slicer).merge(printer),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;
