@@ -190,7 +190,13 @@ impl Attempt {
             }
             Some("PREPARE") if self.phase != Phase::Printing => self.phase = Phase::Accepted,
             Some("FINISH") if self.observed_printing => self.phase = Phase::Finished,
-            Some("FAILED") => self.fail(Phase::Unknown, "Print failed; inspect the printer"),
+            Some("FAILED" | "PAUSE") => {
+                self.fail(Phase::Unknown, "Print stopped; inspect the printer");
+            }
+            Some("IDLE") if self.observed_printing => self.fail(
+                Phase::Unknown,
+                "Print ended without a completion report; inspect the printer",
+            ),
             _ => {}
         }
     }
@@ -335,6 +341,23 @@ mod tests {
         a.observe(&json!({"print":{"command":"push_status"}}), &status);
         assert_eq!(a.phase, Phase::Finished);
         assert!(!a.blocks_start());
+    }
+
+    #[test]
+    fn an_interrupted_print_never_becomes_successful_completion() {
+        let mut status = ready();
+        let mut a = Attempt::new("plate".into(), "revision".into(), 0, "PLA".into());
+        a.sent(10);
+        status.print.name = Some(a.name());
+        status.print.state = Some("RUNNING".into());
+        a.observe(&json!({"print":{"command":"push_status"}}), &status);
+        for state in ["PAUSE", "IDLE", "FAILED"] {
+            let mut stopped = a.clone();
+            status.print.state = Some(state.into());
+            stopped.observe(&json!({"print":{"command":"push_status"}}), &status);
+            assert_eq!(stopped.phase, Phase::Unknown);
+            assert!(stopped.blocks_start());
+        }
     }
 
     #[test]

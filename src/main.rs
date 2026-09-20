@@ -37,12 +37,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let printer = orca_server::printer::Printer::new(orca_server::printer::Config::from_env()?)?
-        .router(plates.clone());
+    let printer = orca_server::printer::Printer::new(orca_server::printer::Config::from_env()?)?;
+    let queue = orca_server::queue::router(plates.clone(), printer.clone())?;
+    let printer = printer.router(plates.clone());
     info!(%bind_addr, "server listening");
     axum::serve(
         listener,
-        orca_server::app_with_slicer(plates, source, slicer).merge(printer),
+        orca_server::app_with_slicer(plates, source, slicer)
+            .merge(printer)
+            .merge(queue),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;

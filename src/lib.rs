@@ -6,6 +6,7 @@ mod print_start;
 pub mod printer;
 mod printer_state;
 mod profiles;
+pub mod queue;
 pub mod scad;
 mod search;
 pub mod slicer;

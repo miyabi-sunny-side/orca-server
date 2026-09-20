@@ -272,6 +272,28 @@ impl Printer {
         })
     }
 
+    pub async fn status(&self) -> crate::printer_state::Status {
+        self.state.lock().await.status(now())
+    }
+
+    /// Release an unknown request after the operator has inspected a ready printer.
+    /// # Errors
+    /// Refuses active, mismatched or unconfirmed requests.
+    pub async fn resolve(&self, id: &str, checked_printer: bool) -> Result<Attempt> {
+        if !checked_printer {
+            return Err(Error::Invalid("Confirm that the printer was checked"));
+        }
+        let mut state = self.state.lock().await;
+        let status = state.status(now());
+        let attempt = state
+            .start
+            .as_mut()
+            .filter(|a| a.id == id)
+            .ok_or(Error::NotFound)?;
+        attempt.resolve(&status)?;
+        Ok(attempt.clone())
+    }
+
     pub fn router(&self, store: Store) -> Router {
         Router::new()
             .route("/api/printer/status", get(status))
@@ -346,7 +368,7 @@ impl Printer {
 async fn status(
     WebState((printer, _)): WebState<(Printer, Store)>,
 ) -> Json<crate::printer_state::Status> {
-    Json(printer.state.lock().await.status(now()))
+    Json(printer.status().await)
 }
 async fn start(
     WebState((printer, store)): WebState<(Printer, Store)>,
@@ -368,18 +390,10 @@ async fn resolve(
     Path(id): Path<String>,
     Json(request): Json<Resolution>,
 ) -> Result<Json<Attempt>> {
-    if !request.checked_printer {
-        return Err(Error::Invalid("Confirm that the printer was checked"));
-    }
-    let mut state = printer.state.lock().await;
-    let status = state.status(now());
-    let attempt = state
-        .start
-        .as_mut()
-        .filter(|a| a.id == id)
-        .ok_or(Error::NotFound)?;
-    attempt.resolve(&status)?;
-    Ok(Json(attempt.clone()))
+    printer
+        .resolve(&id, request.checked_printer)
+        .await
+        .map(Json)
 }
 
 async fn upload(config: &Config, name: &str, bytes: &[u8]) -> std::result::Result<(), ()> {
