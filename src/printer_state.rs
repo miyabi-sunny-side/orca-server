@@ -38,6 +38,8 @@ pub struct AmsStatus {
 
 #[derive(Serialize)]
 pub struct Status {
+    pub nozzle_diameter: Option<String>,
+    pub nozzle_material: Option<String>,
     pub start: Option<crate::print_start::Attempt>,
     pub connection: &'static str,
     pub synchronized: bool,
@@ -48,6 +50,8 @@ pub struct Status {
 }
 
 pub struct State {
+    nozzle_diameter: Option<String>,
+    nozzle_material: Option<String>,
     pub start: Option<crate::print_start::Attempt>,
     pub epoch: u64,
     connection: &'static str,
@@ -61,6 +65,8 @@ pub struct State {
 impl State {
     pub fn new(configured: bool) -> Self {
         Self {
+            nozzle_diameter: None,
+            nozzle_material: None,
             start: None,
             epoch: 0,
             connection: if configured {
@@ -118,6 +124,8 @@ impl State {
             self.synchronized = false;
         }
         if full {
+            self.nozzle_diameter = None;
+            self.nozzle_material = None;
             self.print = PrintStatus::default();
             self.ams = None;
             self.tray_bits = None;
@@ -125,6 +133,8 @@ impl State {
         } else if !self.synchronized {
             return false;
         }
+        update(&mut self.nozzle_diameter, report, "nozzle_diameter", string);
+        update(&mut self.nozzle_material, report, "nozzle_type", string);
         update(&mut self.print.state, report, "gcode_state", string);
         update(&mut self.print.percent, report, "mc_percent", percent);
         update(
@@ -165,6 +175,8 @@ impl State {
         };
         let synchronized = connection == "connected" && self.synchronized && fresh;
         Status {
+            nozzle_diameter: self.nozzle_diameter.clone(),
+            nozzle_material: self.nozzle_material.clone(),
             start: self.start.clone(),
             connection,
             synchronized,
@@ -464,5 +476,30 @@ mod tests {
         );
         assert!(state.status(111).ams.is_none());
         assert!(!state.status(111).ready_to_print);
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    #[test]
+    fn observed_nozzle_changes_remain_distinct_from_unreported_settings() {
+        let mut state = State::new(true);
+        state.connected();
+        assert!(state.status(1).nozzle_diameter.is_none());
+        state.apply(br#"{"print":{"command":"push_status","gcode_state":"IDLE","print_error":0,"nozzle_diameter":"0.2","nozzle_type":"stainless_steel"}}"#,1);
+        assert_eq!(state.status(1).nozzle_diameter.as_deref(), Some("0.2"));
+        assert_eq!(
+            state.status(1).nozzle_material.as_deref(),
+            Some("stainless_steel")
+        );
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":1,"nozzle_diameter":"0.4"}}"#,
+            2,
+        );
+        assert_eq!(state.status(2).nozzle_diameter.as_deref(), Some("0.4"));
+        state.disconnected();
+        state.connected();
+        assert!(state.status(3).nozzle_diameter.is_none());
     }
 }

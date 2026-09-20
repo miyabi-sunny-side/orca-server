@@ -3,10 +3,13 @@
   import {
     request,
     type Plate,
+    type Printer,
     type Profiles,
     type Selection,
   } from "../lib/api";
 
+  let printers = $state<Printer[]>([]);
+  let printerId = $state("");
   let step = $state(1);
   let query = $state("");
   let retry = $state(0);
@@ -26,22 +29,45 @@
   let list = $state<HTMLUListElement>();
   const controller = new AbortController();
 
+  let profileSequence = 0;
   async function loadProfiles() {
+    const ticket = ++profileSequence;
+    profiles = undefined;
     profileError = "";
     try {
-      const result = await request<Profiles>("/api/slicer/profiles", {
+      const printer = printers.find((p) => p.id === printerId);
+      const url = printer
+        ? `/api/slicer/profiles?machine=${encodeURIComponent(printer.machine_profile_key)}`
+        : "/api/slicer/profiles";
+      const result = await request<Profiles>(url, {
         signal: controller.signal,
       });
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && ticket === profileSequence) {
         profiles = result;
         selection = { ...result.defaults };
+        if (printer) {
+          selection.process = printer.default_process_profile_key;
+          selection.bed = printer.bed_type;
+        }
       }
+    } catch (cause) {
+      if (!controller.signal.aborted && ticket === profileSequence)
+        profileError = (cause as Error).message;
+    }
+  }
+  async function loadPrinters() {
+    try {
+      printers = await request<Printer[]>("/api/printers", {
+        signal: controller.signal,
+      });
+      if (printers.length === 1) printerId = printers[0].id;
+      await loadProfiles();
     } catch (cause) {
       if (!controller.signal.aborted) profileError = (cause as Error).message;
     }
   }
   onMount(() => {
-    void loadProfiles();
+    void loadPrinters();
     return () => controller.abort();
   });
 
@@ -115,7 +141,9 @@
         method: "POST",
         signal: controller.signal,
       });
-      window.location.assign(`/plates/${plate.id}`);
+      window.location.assign(
+        `/plates/${plate.id}${printerId ? `?printer_id=${encodeURIComponent(printerId)}` : ""}`,
+      );
     } catch (cause) {
       if (!controller.signal.aborted) error = (cause as Error).message;
     } finally {
@@ -139,7 +167,7 @@
   {#if profileError}
     <div class="notice">
       <p role="alert">{profileError}</p>
-      <button class="btn" onclick={() => void loadProfiles()}
+      <button class="btn" onclick={() => void loadPrinters()}
         >設定を再読込み</button
       >
     </div>
@@ -212,6 +240,17 @@
             placeholder="例: 机の小物入れ"
           /></label
         >
+        {#if printers.length > 0}<label class="field"
+            ><span>プリンター</span><select
+              bind:value={printerId}
+              onchange={() => void loadProfiles()}
+            >
+              <option value="">P1S 0.4mm用のプレートを準備</option>
+              {#each printers as printer}<option value={printer.id}
+                  >{printer.name}</option
+                >{/each}
+            </select></label
+          >{/if}
         <p class="caption">{profiles?.printer}</p>
         <label class="field" for="process"
           ><span>工程</span><select id="process" bind:value={selection.process}

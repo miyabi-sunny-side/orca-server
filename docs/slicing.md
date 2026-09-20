@@ -1,7 +1,7 @@
 # 自動配置とスライス
 
 保存済みのSTLをOrcaSlicerで配置し、編集用`project.3mf`と印刷用`print.gcode.3mf`を生成します。
-対象はP1Sの0.4mmノズル、1プレート、単一材料です。プリンターへの送信は行いません。
+同梱BBLの単一ノズル構成を対象とし、1プレート・単一材料で生成します。プリンターへの送信は行いません。
 
 ## OrcaSlicerの設定
 
@@ -36,13 +36,16 @@ curl --fail http://127.0.0.1:3000/api/slicer/profiles
 ```
 
 応答は`printer`、`processes`、`filaments`、`beds`、`defaults`とCLIの`version`です。
-工程と材料は、配布物のBBL profileでP1S 0.4mmに対応するものを列挙します。
+`?machine=URLエンコードしたmachine_profile_key`を付けると、その機種・ノズルに適合する工程・材料だけを列挙します。
+省略時は既存のP1S 0.4mm用です。未知・消失したprofileは400となり、別の機種へ切り替えません。
+画面では登録したプリンターを選ぶと、その機器の既定工程とプレート種類を使います。
 プレートの保存時に、`settings`の`slicer`へ選択した名前を指定します。
 省略した項目には次の既定値を使います。
 
 ```json
 {
   "slicer": {
+    "machine": "Bambu Lab P1S 0.4 nozzle",
     "process": "0.20mm Standard @BBL X1C",
     "filament": "Generic PLA High Speed @BBL X1C",
     "bed": "Textured PEI Plate"

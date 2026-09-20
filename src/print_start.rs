@@ -38,6 +38,24 @@ pub struct Attempt {
     observed_printing: bool,
 }
 
+pub fn check_nozzle(status: &Status, diameter: &str, material: &str) -> Result<()> {
+    if status
+        .nozzle_diameter
+        .as_deref()
+        .is_some_and(|v| v != diameter)
+        || (material != "unknown"
+            && status
+                .nozzle_material
+                .as_deref()
+                .is_some_and(|v| v != material))
+    {
+        return Err(Error::Conflict(
+            "Printer reports a different nozzle; check the installed nozzle and registry",
+        ));
+    }
+    Ok(())
+}
+
 pub fn check_ready(status: &Status, slot: u8, material: &str) -> Result<()> {
     if !status.ready_to_print {
         return Err(Error::Conflict("Printer is not ready"));
@@ -202,10 +220,18 @@ impl Attempt {
     }
 }
 
-pub fn material(bytes: &[u8]) -> Result<String> {
+#[cfg(test)]
+fn material(bytes: &[u8]) -> Result<String> {
+    material_for(bytes, crate::profiles::PRINTER)
+}
+
+pub fn material_for(bytes: &[u8], machine: &str) -> Result<String> {
     use std::io::{Cursor, Read};
-    let invalid =
-        || Error::Invalid("Print must contain one P1S plate and one material at filament index 1");
+    let invalid = || {
+        Error::Invalid(
+            "Print must contain one matching printer plate and one material at filament index 1",
+        )
+    };
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid())?;
     if archive
         .file_names()
@@ -262,7 +288,7 @@ pub fn material(bytes: &[u8]) -> Result<String> {
         .collect();
     if filaments.len() != 1
         || filaments[0].attribute("id") != Some("1")
-        || settings["printer_settings_id"] != crate::profiles::PRINTER
+        || settings["printer_settings_id"] != machine
     {
         return Err(invalid());
     }
@@ -287,6 +313,18 @@ mod tests {
         state.connected();
         state.apply(include_bytes!("../tests/fixtures/p1_status.json"), 10);
         state.status(10)
+    }
+
+    #[test]
+    fn reported_nozzle_must_match_but_absent_readings_are_not_invented() {
+        let mut status = ready();
+        assert!(check_nozzle(&status, "0.4", "unknown").is_ok());
+        status.nozzle_diameter = Some("0.2".into());
+        assert!(check_nozzle(&status, "0.4", "unknown").is_err());
+        assert!(check_nozzle(&status, "0.2", "unknown").is_ok());
+        status.nozzle_material = Some("stainless_steel".into());
+        assert!(check_nozzle(&status, "0.2", "hardened_steel").is_err());
+        assert!(check_nozzle(&status, "0.2", "stainless_steel").is_ok());
     }
 
     #[test]
@@ -406,6 +444,15 @@ mod archive_tests {
             zip.write_all(content.as_bytes()).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+    #[test]
+    fn refuses_artifacts_for_another_machine_or_nozzle() {
+        let bytes = archive("<filament id=\"1\" type=\"PLA\"/>", &json!(["PLA"]));
+        assert!(material_for(&bytes, "Bambu Lab A1 mini 0.2 nozzle").is_err());
+        assert_eq!(
+            material_for(&bytes, crate::profiles::PRINTER).unwrap(),
+            "PLA"
+        );
     }
     #[test]
     fn reads_one_material_and_rejects_ambiguous_or_invalid_archives() {

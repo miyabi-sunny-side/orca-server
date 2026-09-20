@@ -2,6 +2,9 @@
   import { onMount } from "svelte";
   import { request, type Layout, type Plate } from "../lib/api";
   let { id }: { id: string } = $props();
+  const printerId = new URLSearchParams(window.location.search).get(
+    "printer_id",
+  );
   let plate = $state<Plate>();
   let layout = $state<Layout>();
   let loading = $state(true);
@@ -99,7 +102,10 @@
       <span class="caption">{plate.print ? "配置済み" : "スライス未完了"}</span>
     </div>
     {#if plate.print}<div class="actions">
-        <a class="btn primary" href={`/queue?plate=${plate.id}`}>印刷キューへ</a
+        <a
+          class="btn primary"
+          href={`/queue?plate=${plate.id}${printerId ? `&printer_id=${encodeURIComponent(printerId)}` : ""}`}
+          >印刷キューへ</a
         >
       </div>{/if}
     {#if busy}<p class="state" role="status">
@@ -114,23 +120,31 @@
     {#if layout}
       <figure>
         <svg
-          viewBox="0 0 256 256"
+          viewBox={`${layout.bed[0][0]} ${layout.bed[1][0]} ${layout.bed[0][1] - layout.bed[0][0]} ${layout.bed[1][1] - layout.bed[1][0]}`}
           role="img"
-          aria-label="モデルの配置（上面、256mm四方）"
+          aria-label={`モデルの配置（上面、${layout.bed[0][1] - layout.bed[0][0]} × ${layout.bed[1][1] - layout.bed[1][0]} mm）`}
         >
-          <rect class="bed" x=".5" y=".5" width="255" height="255" />
+          <rect
+            class="bed"
+            x={layout.bed[0][0]}
+            y={layout.bed[1][0]}
+            width={layout.bed[0][1] - layout.bed[0][0]}
+            height={layout.bed[1][1] - layout.bed[1][0]}
+          />
           {#each layout.models as model}
             <g>
               <rect
                 class="model"
                 x={model.bounds[0][0]}
-                y={256 - model.bounds[1][1]}
+                y={layout.bed[1][0] + layout.bed[1][1] - model.bounds[1][1]}
                 width={model.bounds[0][1] - model.bounds[0][0]}
                 height={model.bounds[1][1] - model.bounds[1][0]}
               />
               <text
                 x={(model.bounds[0][0] + model.bounds[0][1]) / 2}
-                y={256 - (model.bounds[1][0] + model.bounds[1][1]) / 2}
+                y={layout.bed[1][0] +
+                  layout.bed[1][1] -
+                  (model.bounds[1][0] + model.bounds[1][1]) / 2}
                 text-anchor="middle"
                 dominant-baseline="central">{model.index + 1}</text
               >
@@ -167,6 +181,8 @@
     <details class="settings">
       <summary>印刷設定</summary>
       <dl>
+        <dt>機種・ノズル</dt>
+        <dd>{plate.settings.slicer?.machine ?? "Bambu Lab P1S 0.4 nozzle"}</dd>
         <dt>工程</dt>
         <dd>{plate.settings.slicer?.process ?? "既定値"}</dd>
         <dt>材料</dt>

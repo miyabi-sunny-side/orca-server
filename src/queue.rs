@@ -36,7 +36,7 @@ struct Current {
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct Command {
+pub(crate) struct Command {
     generation: u64,
     request_id: String,
     action: Action,
@@ -260,6 +260,7 @@ fn freeze(
     id: &str,
     revision: &str,
     ams_slot: u8,
+    machine: &str,
 ) -> Result<Job> {
     if ams_slot >= 16 {
         return Err(Error::Invalid("ams_slot must be 0..15"));
@@ -271,7 +272,7 @@ fn freeze(
     let print = plate.print.as_ref().ok_or(Error::Conflict(
         "Slice the plate before adding it to the queue",
     ))?;
-    crate::print_start::material(&source.read_file(id, print)?)?;
+    crate::print_start::material_for(&source.read_file(id, print)?, machine)?;
     let directory = tempfile::Builder::new().prefix("job-").tempdir_in(root)?;
     let target = directory.path().join(id);
     std::fs::create_dir_all(target.join("revisions").join(revision))?;
@@ -301,40 +302,16 @@ fn freeze(
     })
 }
 
-use axum::{
-    Json, Router,
-    extract::{DefaultBodyLimit, State as WebState},
-    routing::get,
-};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-struct Service {
+pub(crate) struct Service {
+    machine: String,
     // ponytail: one queue lock includes snapshot copies; add reservations only if reads become too slow.
     queue: Mutex<Queue>,
     source: crate::plates::Store,
     printer: crate::printer::Printer,
     files: Arc<tempfile::TempDir>,
-}
-
-/// Create a process-local print queue and its temporary snapshot storage.
-/// # Errors
-/// Fails if the OS temporary directory cannot be created.
-pub fn router(
-    source: crate::plates::Store,
-    printer: crate::printer::Printer,
-) -> std::io::Result<Router> {
-    let service = Arc::new(Service {
-        queue: Mutex::new(Queue::default()),
-        source,
-        printer,
-        files: Arc::new(tempfile::Builder::new().prefix("orca-queue-").tempdir()?),
-    });
-    Ok(Router::new()
-        .route("/api/queue", get(read).post(act))
-        .layer(DefaultBodyLimit::max(4096))
-        .layer(axum::middleware::from_fn(crate::plate_api::same_origin))
-        .with_state(service))
 }
 
 fn view(queue: &Queue, printer: &Status) -> serde_json::Value {
@@ -347,24 +324,30 @@ fn cleanup(job: &Job) {
         );
     }
 }
-async fn read(WebState(service): WebState<Arc<Service>>) -> Json<serde_json::Value> {
-    let mut queue = service.queue.lock().await;
-    let status = service.printer.status().await;
-    queue.observe(&status);
-    Json(view(&queue, &status))
-}
-async fn act(
-    WebState(service): WebState<Arc<Service>>,
-    Json(request): Json<Command>,
-) -> Result<Json<serde_json::Value>> {
-    // Keep an accepted mutation alive if the HTTP client disconnects while files are read.
-    tokio::spawn(async move { service.apply(request).await })
-        .await
-        .map_err(|_| Error::Unavailable("Queue request was interrupted; refresh the queue"))?
-        .map(Json)
-}
-
 impl Service {
+    pub(crate) fn new(
+        source: crate::plates::Store,
+        printer: crate::printer::Printer,
+        machine: String,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            machine,
+            queue: Mutex::new(Queue::default()),
+            source,
+            printer,
+            files: Arc::new(tempfile::Builder::new().prefix("orca-queue-").tempdir()?),
+        })
+    }
+    pub(crate) async fn in_use(&self) -> bool {
+        let queue = self.queue.lock().await;
+        queue.current.is_some() || !queue.waiting.is_empty()
+    }
+    pub(crate) async fn read(&self) -> serde_json::Value {
+        let mut queue = self.queue.lock().await;
+        let status = self.printer.status().await;
+        queue.observe(&status);
+        view(&queue, &status)
+    }
     async fn recover(
         &self,
         queue: &Queue,
@@ -414,7 +397,7 @@ impl Service {
             }),
         }
     }
-    async fn apply(&self, request: Command) -> Result<serde_json::Value> {
+    pub(crate) async fn apply(&self, request: Command) -> Result<serde_json::Value> {
         let mut queue = self.queue.lock().await;
         let status = self.printer.status().await;
         queue.observe(&status);
@@ -430,8 +413,9 @@ impl Service {
                 let source = self.source.clone();
                 let root = self.files.clone();
                 let (id, revision, slot) = (plate_id.clone(), revision.clone(), *ams_slot);
+                let machine = self.machine.clone();
                 let job = crate::plate_api::blocking(move || {
-                    freeze(&source, root.path(), &id, &revision, slot)
+                    freeze(&source, root.path(), &id, &revision, slot, &machine)
                 })
                 .await?;
                 if let Err(error) = queue.add(job.clone()) {
@@ -648,7 +632,15 @@ mod snapshot_tests {
         std::fs::write(output.path().join("project.3mf"), bytes).unwrap();
         std::fs::write(output.path().join("print.gcode.3mf"), bytes).unwrap();
         let plate = source.save_artifacts(&plate, output.path()).unwrap();
-        let frozen = freeze(&source, jobs.path(), &plate.id, &plate.revision, 3).unwrap();
+        let frozen = freeze(
+            &source,
+            jobs.path(),
+            &plate.id,
+            &plate.revision,
+            3,
+            crate::profiles::PRINTER,
+        )
+        .unwrap();
         source.save(Some(&plate.id), input("after")).unwrap();
         let saved = Store::open(&frozen.directory).unwrap();
         let copy = saved.get(&plate.id).unwrap();
@@ -671,6 +663,16 @@ mod snapshot_tests {
                 .unwrap(),
             bytes
         );
-        assert!(freeze(&source, jobs.path(), &plate.id, &plate.revision, 3).is_err());
+        assert!(
+            freeze(
+                &source,
+                jobs.path(),
+                &plate.id,
+                &plate.revision,
+                3,
+                crate::profiles::PRINTER
+            )
+            .is_err()
+        );
     }
 }

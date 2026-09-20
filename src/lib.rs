@@ -1,4 +1,5 @@
 mod artifacts;
+mod database;
 mod layout;
 mod plate_api;
 pub mod plates;
@@ -7,6 +8,7 @@ pub mod printer;
 mod printer_state;
 mod profiles;
 pub mod queue;
+pub mod registry;
 pub mod scad;
 mod search;
 pub mod slicer;

@@ -13,6 +13,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -146,13 +147,27 @@ def main():
             selection = {'process': '0.16mm Optimal @BBL X1C', 'filament': 'Bambu PLA Basic @BBL X1C', 'bed': 'High Temp Plate'}
             selected = save('Other settings', [cube], {'slicer': selection})
             status, selected = slice_plate(selected)
-            assert status == 200 and selected['settings']['slicer'] == selection, (status, selected)
+            assert status == 200 and selected['settings']['slicer'] == dict(selection, machine=choices['printer']), (status, selected)
             for key in ('project', 'print'):
                 data = request(f'/api/plates/{selected["id"]}/files/{selected[key]}')[1]
                 settings = json.loads(zipfile.ZipFile(io.BytesIO(data)).read('Metadata/project_settings.config'))
                 assert settings['print_settings_id'] == selection['process']
                 assert settings['filament_settings_id'] == [selection['filament']]
                 assert settings['curr_bed_type'] == selection['bed']
+            a1 = 'Bambu Lab A1 mini 0.2 nozzle'
+            status, a1_choices = json_request('/api/slicer/profiles?machine=' + urllib.parse.quote(a1))
+            assert status == 200
+            a1_plate = save('A1 mini fine nozzle', [cube], {'slicer': a1_choices['defaults']})
+            status, a1_plate = slice_plate(a1_plate)
+            assert status == 200, (status, a1_plate)
+            status, preview = json_request('/api/plates/' + a1_plate['id'] + '/layout')
+            assert status == 200 and preview['bed'] == [[0, 180], [0, 180]], preview
+            for key in ('project', 'print'):
+                data = request(f'/api/plates/{a1_plate["id"]}/files/{a1_plate[key]}')[1]
+                settings = json.loads(zipfile.ZipFile(io.BytesIO(data)).read('Metadata/project_settings.config'))
+                assert settings['printer_settings_id'] == a1
+                assert settings['nozzle_diameter'] == ['0.2']
+                assert settings['print_settings_id'] == a1_choices['defaults']['process']
             # Two 200 mm cubes require multiple plates; a 400 mm cube cannot fit.
             for size, count in [(200, 2), (400, 1)]:
                 scaled = bytearray(cube)
@@ -188,6 +203,7 @@ def main():
             assert slice_plate(sliced)[0] == 200, 'slot not released after failure'
             assert json_request(f'/api/plates/{sliced["id"]}/slice', b'', {'Origin': 'https://untrusted.invalid'})[0] == 403
             results = {'version': choices['version'], 'world_bounds': before, 'roundtrip_bounds': after, 'nondefault_settings': selection, 'headless': True, 'saved_project_only_resliced': True, 'multiple_plate_rejected': True, 'oversized_rejected': True, 'invalid_model_rejected': True, 'failure_preserves_plate': True, 'timeout_preserves_plate': True, 'timeout_child_reaped': True, 'busy_rejected': True, 'server_stays_alive': True}
+            results['a1_mini_02_profile_and_bed'] = True
             (evidence / 'result.json').write_text(json.dumps(results, indent=2))
             print(json.dumps(results))
         finally:

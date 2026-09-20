@@ -106,6 +106,45 @@ fn vertices(
     Ok(())
 }
 
+fn bed_bounds(value: &serde_json::Value) -> Result<[[f64; 2]; 2]> {
+    let points = value
+        .as_array()
+        .filter(|v| v.len() >= 3 && v.len() <= 64)
+        .ok_or_else(invalid)?;
+    let mut bounds = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+    for point in points {
+        let (x, y) = point
+            .as_str()
+            .and_then(|v| v.split_once('x'))
+            .ok_or_else(invalid)?;
+        for (axis, coordinate) in [x, y].into_iter().enumerate() {
+            let coordinate = coordinate.parse::<f64>().map_err(|_| invalid())?;
+            if !coordinate.is_finite() {
+                return Err(invalid());
+            }
+            bounds[axis][0] = bounds[axis][0].min(coordinate);
+            bounds[axis][1] = bounds[axis][1].max(coordinate);
+        }
+    }
+    if bounds
+        .iter()
+        .any(|[min, max]| max <= min || max - min > 2000.)
+    {
+        return Err(invalid());
+    }
+    Ok(bounds)
+}
+pub fn bed(bytes: &[u8]) -> Result<[[f64; 2]; 2]> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid())?;
+    let settings = text(
+        &mut archive,
+        "Metadata/project_settings.config",
+        &mut (4 * 1024 * 1024),
+    )?;
+    let settings: serde_json::Value = serde_json::from_str(&settings).map_err(|_| invalid())?;
+    bed_bounds(&settings["printable_area"])
+}
+
 pub fn layout(bytes: &[u8]) -> Result<Vec<ModelBounds>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid())?;
     let mut budget = MAX_UPLOAD as u64;
@@ -186,6 +225,27 @@ mod tests {
         zip.finish().unwrap().into_inner()
     }
 
+    #[test]
+    fn bed_bounds_use_the_saved_machine_geometry_and_reject_invalid_coordinates() {
+        assert_eq!(
+            bed_bounds(&serde_json::json!(["0x0", "180x0", "180x180", "0x180"])).unwrap(),
+            [[0., 180.], [0., 180.]]
+        );
+        assert_eq!(
+            bed_bounds(&serde_json::json!([
+                "-10x-20", "256x-20", "256x200", "-10x200"
+            ]))
+            .unwrap(),
+            [[-10., 256.], [-20., 200.]]
+        );
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!(["0xNaN", "1x1", "2x2"]),
+            serde_json::json!(["0x0", "0x0", "0x0"]),
+        ] {
+            assert!(bed_bounds(&value).is_err());
+        }
+    }
     #[test]
     fn composes_build_and_component_transforms_before_bounding_vertices() {
         let preview = layout(&project(

@@ -80,7 +80,9 @@ def read_packet(peer):
 
 
 class Broker:
-    def __init__(self, cert, key):
+    def __init__(self, cert, key, serial=SERIAL):
+        self.serial = serial
+        self.report = f'device/{serial}/report'
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.maximum_version = ssl.TLSVersion.TLSv1_2
         self.context.load_cert_chain(cert, key)
@@ -120,7 +122,7 @@ class Broker:
         assert login[7] & 2, 'clean session required'
         peer.sendall(b'\x20\x02\x00\x00')
         header, body = read_packet(peer)
-        assert header == 0x82 and REPORT.encode() in body
+        assert header == 0x82 and self.report.encode() in body
         peer.sendall(b'\x90\x03' + body[:2] + b'\x00')
         while not self.stopped.is_set():
             try:
@@ -145,7 +147,7 @@ class Broker:
             else:
                 assert header == 0x30, 'only non-retained QoS0 status requests are allowed'
                 length = struct.unpack('!H', body[:2])[0]
-                assert body[2:2+length].decode() == f'device/{SERIAL}/request'
+                assert body[2:2+length].decode() == f'device/{self.serial}/request'
                 value = json.loads(body[2+length:])
                 self.on_request(value)
 
@@ -154,8 +156,8 @@ class Broker:
         assert value['pushing']['version'] == 1 and value['pushing']['push_target'] == 1
         self.requests.append(value)
 
-    def send(self, value, retained=False, topic=REPORT):
-        self.actions.put((value, retained, topic))
+    def send(self, value, retained=False, topic=None):
+        self.actions.put((value, retained, topic or self.report))
 
     def close(self):
         self.stopped.set()
@@ -196,7 +198,7 @@ def main():
                 listener.bind(('127.0.0.1', 0))
                 port = listener.getsockname()[1]
             env = {k:v for k,v in os.environ.items() if not k.startswith('P1_') and k not in ('ORCA_APPDIR', 'SCAD_LIVE_URL')}
-            env.update(PORT=str(port), PLATES_DIR=str(tmp / 'plates'), LOG_LEVEL='trace')
+            env.update(PORT=str(port), PLATES_DIR=str(tmp / f'plates-{broker.port if broker else 0}'), LOG_LEVEL='trace')
             if configured:
                 env.update(P1_IP='127.0.0.1', P1_SERIAL=SERIAL, P1_ACCESS_CODE=SECRET,
                            P1_TLS_CERT=str(tmp / 'trusted.pem'), P1_MQTT_PORT=str(broker.port))
@@ -277,13 +279,13 @@ def main():
             assert status()['connection'] == 'unconfigured' and not status()['ready_to_print']
         finally:
             stop(process, log)
-        for path in list(output.glob('*.log')) + list((tmp / 'plates').rglob('*')):
+        for path in list(output.glob('*.log')) + [p for root in tmp.glob('plates-*') for p in root.rglob('*') if p.name != 'orca.sqlite3']:
             if path.is_file():
                 assert SECRET.encode() not in path.read_bytes(), 'credential appeared in logs/storage'
     result = dict(certificate_version=version, tls_pin_matched=True, wrong_certificate_rejected=True, mqtt_credentials=True,
                   subscription_and_pushall=True, retained_report_ignored=True, partial_before_sync_ignored=True,
                   print_ams_merge=True, disconnect_and_resync=True, unrelated_topic_ignored=True,
-                  invalid_report_unsynchronized=True, secret_absent_from_api_logs_storage=True, unconfigured_unknown=True)
+                  invalid_report_unsynchronized=True, secret_absent_from_api_logs_plate_files=True, unconfigured_unknown=True)
     (output / 'result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
 

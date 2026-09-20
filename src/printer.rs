@@ -3,12 +3,6 @@ use crate::{
     print_start::{self, Attempt, Phase},
     printer_state::State,
 };
-use axum::{
-    Json, Router,
-    extract::{DefaultBodyLimit, Path, State as WebState},
-    http::StatusCode,
-    routing::{get, post},
-};
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, SubscribeReasonCode, Transport};
 use rustls::pki_types::pem::PemObject;
 use rustls::{
@@ -141,6 +135,39 @@ impl ServerCertVerifier for PinnedCertificate {
 }
 
 #[derive(Clone)]
+enum Certificate {
+    File(PathBuf),
+    Pem(Vec<u8>),
+}
+impl Certificate {
+    fn bytes(&self) -> std::result::Result<Vec<u8>, &'static str> {
+        let bytes = match self {
+            Self::File(path) => {
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)
+                    .map_err(|_| "Cannot read P1_TLS_CERT")?
+                    .take(65_537)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| "Cannot read P1_TLS_CERT")?;
+                bytes
+            }
+            Self::Pem(bytes) => bytes.clone(),
+        };
+        if bytes.len() > 65_536 {
+            return Err("Printer certificate exceeds 64 KiB");
+        }
+        Ok(bytes)
+    }
+    #[cfg(test)]
+    fn path(&self) -> &std::path::Path {
+        match self {
+            Self::File(path) => path,
+            Self::Pem(_) => panic!("file fixture expected"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Config {
     ip: IpAddr,
     port: u16,
@@ -148,7 +175,10 @@ pub struct Config {
     start_timeout: u64,
     serial: String,
     access_code: String,
-    certificate: PathBuf,
+    certificate: Certificate,
+    machine: String,
+    nozzle_diameter: String,
+    nozzle_material: String,
 }
 
 impl Config {
@@ -216,7 +246,10 @@ impl Config {
             start_timeout,
             serial,
             access_code,
-            certificate,
+            certificate: Certificate::File(certificate),
+            machine: crate::profiles::PRINTER.into(),
+            nozzle_diameter: "0.4".into(),
+            nozzle_material: "unknown".into(),
         }))
     }
 
@@ -248,14 +281,7 @@ impl Config {
 
 impl Config {
     fn tls(&self) -> std::result::Result<Arc<rustls::ClientConfig>, &'static str> {
-        let file = std::fs::File::open(&self.certificate).map_err(|_| "Cannot read P1_TLS_CERT")?;
-        let mut pem = Vec::new();
-        file.take(65_537)
-            .read_to_end(&mut pem)
-            .map_err(|_| "Cannot read P1_TLS_CERT")?;
-        if pem.len() > 65_536 {
-            return Err("P1_TLS_CERT exceeds 64 KiB");
-        }
+        let pem = self.certificate.bytes()?;
         let certificates = CertificateDer::pem_slice_iter(&pem)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| "P1_TLS_CERT must be a PEM certificate")?;
@@ -273,6 +299,53 @@ impl Config {
         .with_no_client_auth();
         Ok(Arc::new(tls))
     }
+    pub(crate) fn for_settings(
+        settings: &crate::database::Settings,
+        diameter: &str,
+    ) -> Result<Self> {
+        let values = std::collections::BTreeMap::from([
+            ("P1_IP", settings.host.clone()),
+            ("P1_SERIAL", settings.serial.clone()),
+            ("P1_ACCESS_CODE", settings.access_code.clone()),
+            ("P1_TLS_CERT", "inline".into()),
+            ("P1_MQTT_PORT", settings.mqtt_port.to_string()),
+            ("P1_FTPS_PORT", settings.ftps_port.to_string()),
+            (
+                "P1_START_TIMEOUT_SECS",
+                settings.start_timeout_secs.to_string(),
+            ),
+        ]);
+        let mut config = Self::parse(|key| values.get(key).cloned())
+            .map_err(Error::Invalid)?
+            .expect("settings provided");
+        config.certificate = Certificate::Pem(settings.tls_certificate.as_bytes().to_vec());
+        config.machine.clone_from(&settings.machine_profile_key);
+        diameter.clone_into(&mut config.nozzle_diameter);
+        config.nozzle_material.clone_from(&settings.nozzle_material);
+        config.tls().map_err(Error::Invalid)?;
+        Ok(config)
+    }
+
+    pub(crate) fn import(self) -> Result<crate::database::Settings> {
+        self.tls().map_err(Error::Invalid)?;
+        let pem = String::from_utf8(self.certificate.bytes().map_err(Error::Invalid)?)
+            .map_err(|_| Error::Invalid("Certificate PEM must be UTF-8"))?;
+        Ok(crate::database::Settings {
+            name: "P1S".into(),
+            host: self.ip.to_string(),
+            serial: self.serial,
+            access_code: self.access_code,
+            tls_certificate: pem,
+            machine_profile_key: self.machine,
+            default_process_profile_key: crate::profiles::Selection::default().process,
+            bed_type: crate::profiles::BEDS[0].into(),
+            nozzle_material: self.nozzle_material,
+            mqtt_port: self.port,
+            ftps_port: self.ftps_port,
+            start_timeout_secs: u16::try_from(self.start_timeout).expect("validated timeout"),
+        })
+    }
+
     fn options(&self) -> std::result::Result<MqttOptions, &'static str> {
         let mut options = MqttOptions::new(
             format!("orca-server-{}", uuid::Uuid::new_v4()),
@@ -297,11 +370,19 @@ fn now() -> u64 {
         .as_secs()
 }
 
+struct Observation(tokio::task::AbortHandle);
+impl Drop for Observation {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Clone)]
 pub struct Printer {
     state: Arc<Mutex<State>>,
     config: Option<Config>,
     starts: mpsc::Sender<(String, u64)>,
+    _observation: Option<Arc<Observation>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -318,19 +399,24 @@ impl Printer {
     pub fn new(config: Option<Config>) -> std::result::Result<Self, &'static str> {
         let state = Arc::new(Mutex::new(State::new(config.is_some())));
         let (starts, receiver) = mpsc::channel(1);
-        if let Some(config) = &config {
-            tokio::spawn(run(
-                config.options()?,
-                config.serial.clone(),
-                state.clone(),
-                receiver,
-                config.start_timeout,
-            ));
-        }
+        let observation = if let Some(config) = &config {
+            Some(Arc::new(Observation(
+                tokio::spawn(run(
+                    config.options()?,
+                    config.clone(),
+                    state.clone(),
+                    receiver,
+                ))
+                .abort_handle(),
+            )))
+        } else {
+            None
+        };
         Ok(Self {
             state,
             config,
             starts,
+            _observation: observation,
         })
     }
 
@@ -356,16 +442,6 @@ impl Printer {
         Ok(attempt.clone())
     }
 
-    pub fn router(&self, store: Store) -> Router {
-        Router::new()
-            .route("/api/printer/status", get(status))
-            .route("/api/plates/{id}/print", post(start))
-            .route("/api/printer/start/{id}/resolve", post(resolve))
-            .layer(DefaultBodyLimit::max(4096))
-            .layer(axum::middleware::from_fn(crate::plate_api::same_origin))
-            .with_state((self.clone(), store))
-    }
-
     /// Upload a saved revision and request one print. HTTP cancellation does not retry it.
     /// # Errors
     /// Rejects unknown/busy printers, unresolved requests, invalid artifacts and AMS choices.
@@ -374,6 +450,7 @@ impl Printer {
             .config
             .clone()
             .ok_or(Error::Unavailable("Printer is not configured"))?;
+        let machine = config.machine.clone();
         let (plate, bytes, material) = crate::plate_api::blocking(move || {
             let plate = store.get(&id)?;
             if plate.revision != request.revision {
@@ -384,7 +461,7 @@ impl Printer {
                 .as_ref()
                 .ok_or(Error::Conflict("Slice the plate before printing"))?;
             let bytes = store.read_file(&id, path)?;
-            let material = print_start::material(&bytes)?;
+            let material = print_start::material_for(&bytes, &machine)?;
             Ok((plate, bytes, material))
         })
         .await?;
@@ -394,7 +471,9 @@ impl Printer {
                 "A start request is still active or unresolved",
             ));
         }
-        print_start::check_ready(&state.status(now()), request.ams_slot, &material)?;
+        let status = state.status(now());
+        print_start::check_nozzle(&status, &config.nozzle_diameter, &config.nozzle_material)?;
+        print_start::check_ready(&status, request.ams_slot, &material)?;
         let attempt = Attempt::new(plate.id, plate.revision, request.ams_slot, material);
         let epoch = state.epoch;
         state.start = Some(attempt.clone());
@@ -425,37 +504,6 @@ impl Printer {
         });
         Ok(attempt)
     }
-}
-
-async fn status(
-    WebState((printer, _)): WebState<(Printer, Store)>,
-) -> Json<crate::printer_state::Status> {
-    Json(printer.status().await)
-}
-async fn start(
-    WebState((printer, store)): WebState<(Printer, Store)>,
-    Path(id): Path<String>,
-    Json(request): Json<StartRequest>,
-) -> Result<(StatusCode, Json<Attempt>)> {
-    printer
-        .start(store, id, request)
-        .await
-        .map(|a| (StatusCode::ACCEPTED, Json(a)))
-}
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Resolution {
-    checked_printer: bool,
-}
-async fn resolve(
-    WebState((printer, _)): WebState<(Printer, Store)>,
-    Path(id): Path<String>,
-    Json(request): Json<Resolution>,
-) -> Result<Json<Attempt>> {
-    printer
-        .resolve(&id, request.checked_printer)
-        .await
-        .map(Json)
 }
 
 async fn upload(config: &Config, name: &str, bytes: &[u8]) -> std::result::Result<(), ()> {
@@ -516,11 +564,12 @@ fn request_snapshot(
 
 async fn run(
     options: MqttOptions,
-    serial: String,
+    config: Config,
     state: Arc<Mutex<State>>,
     mut starts: mpsc::Receiver<(String, u64)>,
-    start_timeout: u64,
 ) {
+    let serial = &config.serial;
+    let start_timeout = config.start_timeout;
     let report = format!("device/{serial}/report");
     let request = format!("device/{serial}/request");
     loop {
@@ -559,7 +608,7 @@ async fn run(
                     let status = state.status(now());
                     let same_connection = state.epoch == epoch && subscribed;
                     if let Some(start) = state.start.as_mut().filter(|s| s.id == id && s.phase == Phase::Uploading) {
-                        if !same_connection || print_start::check_ready(&status, start.ams_slot, &start.material).is_err() {
+                        if !same_connection || print_start::check_ready(&status, start.ams_slot, &start.material).is_err() || print_start::check_nozzle(&status,&config.nozzle_diameter,&config.nozzle_material).is_err() {
                             start.fail(Phase::NotSent, "Printer status or selected AMS changed during transfer; no start command was sent");
                         } else if client.try_publish(&request, QoS::AtMostOnce, false, start.command().to_string()).is_err() {
                             start.fail(Phase::NotSent, "MQTT publish was not queued; no start command was sent");
@@ -644,7 +693,10 @@ mod tests {
             start_timeout: 600,
             serial: "TESTSERIAL".into(),
             access_code: "test-only-secret".into(),
-            certificate: pem,
+            certificate: Certificate::File(pem),
+            machine: crate::profiles::PRINTER.into(),
+            nozzle_diameter: "0.4".into(),
+            nozzle_material: "unknown".into(),
         }
     }
 
@@ -698,8 +750,8 @@ mod tests {
         let other = fixture(dir.path(), "other", "v1");
         for version in ["v1", "v3"] {
             let config = fixture(dir.path(), version, version);
-            let key = config.certificate.with_extension("key");
-            let der = CertificateDer::from_pem_file(&config.certificate).unwrap();
+            let key = config.certificate.path().with_extension("key");
+            let der = CertificateDer::from_pem_file(config.certificate.path()).unwrap();
             let parsed = x509_cert::Certificate::from_der(&der).unwrap();
             assert_eq!(
                 parsed.tbs_certificate().version(),
@@ -713,13 +765,13 @@ mod tests {
                 config.options().is_ok(),
                 "MQTT configuration must accept {version}"
             );
-            handshake(&config, &config.certificate, &key).unwrap();
+            handshake(&config, config.certificate.path(), &key).unwrap();
             // Even a different certificate for the same key must fail DER pinning.
             let renewed = dir.path().join("renewed.pem");
             assert!(
                 std::process::Command::new("openssl")
                     .args(["x509", "-in"])
-                    .arg(&config.certificate)
+                    .arg(config.certificate.path())
                     .args(["-set_serial", "1", "-signkey"])
                     .arg(&key)
                     .arg("-out")
@@ -738,8 +790,8 @@ mod tests {
             assert!(matches!(
                 handshake(
                     &config,
-                    &other.certificate,
-                    &other.certificate.with_extension("key")
+                    other.certificate.path(),
+                    &other.certificate.path().with_extension("key")
                 ),
                 Err(rustls::Error::InvalidCertificate(
                     rustls::CertificateError::ApplicationVerificationFailure
@@ -748,8 +800,8 @@ mod tests {
             assert!(matches!(
                 handshake(
                     &config,
-                    &config.certificate,
-                    &other.certificate.with_extension("key")
+                    config.certificate.path(),
+                    &other.certificate.path().with_extension("key")
                 ),
                 Err(rustls::Error::InvalidCertificate(
                     rustls::CertificateError::BadSignature
@@ -762,7 +814,7 @@ mod tests {
     fn malformed_certificate_is_a_startup_error() {
         let dir = tempfile::tempdir().unwrap();
         let config = fixture(dir.path(), "invalid", "v1");
-        let pem = std::fs::read_to_string(&config.certificate).unwrap();
+        let pem = std::fs::read_to_string(config.certificate.path()).unwrap();
         let der = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
         for bad in [
             String::new(),
@@ -772,7 +824,7 @@ mod tests {
             "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n".into(),
             "-----BEGIN CERTIFICATE-----\n!invalid!\n-----END CERTIFICATE-----\n".into(),
         ] {
-            std::fs::write(&config.certificate, bad).unwrap();
+            std::fs::write(config.certificate.path(), bad).unwrap();
             assert!(config.options().is_err());
             assert!(config.tls().is_err());
         }
@@ -800,7 +852,10 @@ mod tests {
         assert_eq!(config.port, 8883);
         assert_eq!(config.serial, "TESTP1SERIAL");
         assert_eq!(config.access_code, "test-secret");
-        assert_eq!(config.certificate, PathBuf::from("/tmp/printer.pem"));
+        assert_eq!(
+            config.certificate.path(),
+            std::path::Path::new("/tmp/printer.pem")
+        );
         for (key, bad) in [
             ("P1_IP", "bad"),
             ("P1_SERIAL", "../+/test-secret"),

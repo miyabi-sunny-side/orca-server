@@ -25,9 +25,9 @@ ARTIFACT = (REPO / 'tests/fixtures/p1_print.gcode.3mf').read_bytes()
 
 
 class PrintBroker(Broker):
-    def __init__(self, cert, key):
+    def __init__(self, cert, key, serial=SERIAL):
         self.prints = []
-        super().__init__(cert, key)
+        super().__init__(cert, key, serial)
 
     def on_request(self, value):
         if 'pushing' in value:
@@ -179,10 +179,10 @@ def main():
                    P1_FTPS_PORT=str(ftp.port),P1_START_TIMEOUT_SECS='3')
         log = (output/'server.log').open('w')
         process = subprocess.Popen([binary],env=env,cwd=tmp,stdout=log,stderr=log)
-        def api(path='/api/printer/status', body=None, origin=None, expected=200):
+        def api(path='/api/printer/status', body=None, origin=None, expected=200, method=None):
             headers = {'Content-Type':'application/json'}
             if origin: headers['Origin'] = origin
-            request = urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=json.dumps(body).encode() if body is not None else None,headers=headers)
+            request = urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=json.dumps(body).encode() if body is not None else None,headers=headers,method=method)
             try:
                 response = urllib.request.urlopen(request, timeout=3)
             except urllib.error.HTTPError as error:
@@ -256,18 +256,22 @@ def main():
         finally:
             process.terminate(); process.wait(timeout=5); log.close()
         # Keep MQTT trusted while a separate FTPS endpoint presents an untrusted certificate.
-        env['P1_FTPS_PORT'] = str(wrong.port)
         log = (output/'wrong-cert.log').open('w')
         process = subprocess.Popen([binary],env=env,cwd=tmp,stdout=log,stderr=log)
         try:
             until(lambda: len(broker.requests) == 4)
+            device=api('/api/printers')[0]
+            settings={k:v for k,v in device.items() if k not in ('id','status','machine','configuration_error')}
+            settings['ftps_port']=wrong.port
+            api('/api/printers/'+device['id'],settings,method='PUT')
+            until(lambda: len(broker.requests) == 5)
             idle(); start(); phase('upload_failed')
             assert wrong.tls_failures and not wrong.uploads and len(broker.prints) == 3
         finally:
             process.terminate(); process.wait(timeout=5); log.close()
             ftp.close(); wrong.close(); broker.close()
         for path in list(output.glob('*.log')) + list(store.rglob('*')):
-            if path.is_file(): assert SECRET.encode() not in path.read_bytes()
+            if path.is_file() and path.name != 'orca.sqlite3': assert SECRET.encode() not in path.read_bytes()
     result = dict(certificate_version=version, saved_bytes_uploaded=True, implicit_tls_session_reused=True, passive_port_observed=True,
                   selected_ams_mapping=True, unknown_busy_error_empty_or_wrong_material_refused=True,
                   concurrent_start_refused=True, upload_failure_no_command=True, state_change_during_upload_no_command=True,

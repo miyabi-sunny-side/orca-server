@@ -22,7 +22,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | --- | --- | --- |
 | `PORT` | `3000` | 待受ポート。1〜65535の整数。不正な値では起動しません。 |
 | `LOG_LEVEL` | `info` | `off`、`error`、`warn`、`info`、`debug`、`trace`。不正な値は`info`です。 |
-| `PLATES_DIR` | `data/plates` | プレートの保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
+| `PLATES_DIR` | `data/plates` | プレートとSQLite台帳の保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
 | `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。未設定では取り込みAPIが503を返します。 |
 | `ORCA_APPDIR` | ネイティブでは未設定、コンテナでは`/opt/orcaslicer` | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
 | `ORCA_TIMEOUT_SECS` | `300` | 各CLI工程の上限秒数。OrcaSlicerを設定する場合は1〜3600。 |
@@ -32,7 +32,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 `GET /healthz`は`ok`、`GET /api/health`は`{"status":"ok"}`を返します。
 プレートの操作と保存形式は[プレートAPI](plates.md)を参照してください。
 
-P1Sの接続設定・状態取得・印刷APIは[プリンター接続](printer.md)を参照してください。
+複数プリンターの台帳・環境変数からの初回取り込み・状態取得・印刷APIは[プリンター接続](printer.md)を参照してください。
 未設定でもプレートの保存・閲覧は使えます。印刷予定の操作は[キューAPI](queue.md)を参照してください。
 
 ## 検証
@@ -72,12 +72,15 @@ RustサーバーとOrcaSlicerは実際に実行します。スクリーンショ
 
 MQTT接続の隔離検証にはPython 3と`openssl`コマンドを使います。
 一時証明書のTLS接続先を用意し、購読・全状態要求・部分更新・再接続・証明書不一致・秘密値の非公開を確認します。
+台帳のブラウザ検証には、上記のChromiumと`ORCA_APPDIR`の設定も必要です。
 
 ```sh
+cargo build --locked
 python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
 python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
+REGISTRY_BROWSER=1 python3 tests/printer_registry.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-registry-check
 ```
 
 印刷開始の検証はFTPSのTLSセッション再利用・転送内容・AMS指定・拒否・通信断・重複操作も確認します。
@@ -85,7 +88,7 @@ python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 生成元は同梱の20mm立方体STL 2個、プリンターはP1S 0.4mmです。
 工程は0.20mm Standard、材料はGeneric PLA High Speed、プレートはTextured PEI Plateです。
 キュー検証では投入後の元データ更新、A完了後の取り外し待ち、同時・重複操作、停止後の復旧、再起動も通します。
-CIでも同じ経路を検証します。実機や利用者のアクセスコードには接続しません。
+CIでもMQTT・FTPS・キューの経路を検証します。実機や利用者のアクセスコードには接続しません。
 
 ## 構成
 

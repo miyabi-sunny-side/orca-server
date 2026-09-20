@@ -13,9 +13,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], port::from_env()?));
     let listener = TcpListener::bind(bind_addr).await?;
 
-    let plates = orca_server::plates::Store::open(
+    let root = std::path::PathBuf::from(
         std::env::var_os("PLATES_DIR").unwrap_or_else(|| "data/plates".into()),
-    )?;
+    );
+    let plates = orca_server::plates::Store::open(&root)?;
     let source = match std::env::var("SCAD_LIVE_URL") {
         Ok(url) => Some(orca_server::scad::Source::new(&url)?),
         Err(std::env::VarError::NotPresent) => None,
@@ -37,15 +38,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let printer = orca_server::printer::Printer::new(orca_server::printer::Config::from_env()?)?;
-    let queue = orca_server::queue::router(plates.clone(), printer.clone())?;
-    let printer = printer.router(plates.clone());
+    let registry = orca_server::registry::router(&root, plates.clone(), slicer.clone())?;
     info!(%bind_addr, "server listening");
     axum::serve(
         listener,
-        orca_server::app_with_slicer(plates, source, slicer)
-            .merge(printer)
-            .merge(queue),
+        orca_server::app_with_slicer(plates, source, slicer).merge(registry),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;

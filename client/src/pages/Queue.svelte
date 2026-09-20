@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ApiError, request, type Plate } from "../lib/api";
+  import { ApiError, request, type Plate, type Printer } from "../lib/api";
   import {
     failureText,
     phaseText,
@@ -10,6 +10,14 @@
     type Command,
     type QueueState,
   } from "../lib/queue";
+  let printers = $state<Printer[]>([]);
+  let printerId = $state(
+    new URLSearchParams(window.location.search).get("printer_id") ?? "",
+  );
+  let printersLoaded = $state(false);
+  const queuePath = $derived(
+    `/api/queue?printer_id=${encodeURIComponent(printerId)}`,
+  );
   let queue = $state<QueueState>();
   let selectedId = $state(
     new URLSearchParams(window.location.search).get("plate"),
@@ -22,7 +30,7 @@
   let error = $state("");
   let readError = $state("");
   let notice = $state("");
-  let reading = false;
+  let reading = $state(false);
   let sequence = 0;
   const controller = new AbortController();
   const ams = $derived(queue?.printer.synchronized ? queue.printer.ams : null);
@@ -33,6 +41,31 @@
   });
   const disabled = $derived(busy || !!pending || !!readError || !queue);
 
+  async function loadPrinters() {
+    try {
+      printers = await request<Printer[]>("/api/printers", {
+        signal: controller.signal,
+      });
+      printersLoaded = true;
+      if (!printerId && printers.length === 1) printerId = printers[0].id;
+      await refresh();
+    } catch (cause) {
+      if (!controller.signal.aborted) readError = (cause as Error).message;
+    }
+  }
+  function changePrinter() {
+    sequence++;
+    queue = undefined;
+    slot = -1;
+    cleared = false;
+    error = "";
+    readError = "";
+    notice = "";
+    const params = new URLSearchParams(window.location.search);
+    params.set("printer_id", printerId);
+    history.replaceState(null, "", `/queue?${params}`);
+    void refresh();
+  }
   function receive(value: QueueState) {
     if (
       queue?.generation !== value.generation ||
@@ -43,11 +76,11 @@
     readError = "";
   }
   async function refresh() {
-    if (reading || busy || pending) return;
+    if (reading || busy || pending || !printerId) return;
     reading = true;
     const ticket = ++sequence;
     try {
-      const value = await request<QueueState>("/api/queue", {
+      const value = await request<QueueState>(queuePath, {
         signal: controller.signal,
       });
       if (!controller.signal.aborted && ticket === sequence) receive(value);
@@ -73,7 +106,7 @@
     }
   }
   onMount(() => {
-    void refresh();
+    void loadPrinters();
     void loadPlate();
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();
@@ -100,7 +133,7 @@
     sequence++;
     let rejected = false;
     try {
-      const value = await request<QueueState>("/api/queue", {
+      const value = await request<QueueState>(queuePath, {
         method: "POST",
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
@@ -113,7 +146,11 @@
         selectedId = null;
         plate = undefined;
         slot = -1;
-        history.replaceState(null, "", "/queue");
+        history.replaceState(
+          null,
+          "",
+          `/queue?printer_id=${encodeURIComponent(printerId)}`,
+        );
         notice = "キューに追加しました";
       }
     } catch (cause) {
@@ -145,6 +182,21 @@
       >{selectedId ? "キューへ戻る" : "プレートを選ぶ"}</a
     >
   </div>
+  <label class="field"
+    ><span>プリンター</span><select
+      bind:value={printerId}
+      onchange={changePrinter}
+      disabled={busy || !!pending || reading}
+    >
+      <option value="" disabled>印刷先を選択</option>
+      {#each printers as printer}<option value={printer.id}
+          >{printer.name} / {printer.machine_profile_key}</option
+        >{/each}
+    </select></label
+  >
+  {#if printersLoaded && printers.length === 0}<p class="state">
+      印刷先が登録されていません。<a href="/printers/new">プリンターを追加</a>
+    </p>{/if}
   {#if error || readError}
     <div class="notice">
       <p role="alert">{error || readError}</p>
@@ -161,7 +213,7 @@
           disabled={busy}
           onclick={() => {
             error = "";
-            void refresh();
+            void loadPrinters();
             void loadPlate();
           }}>最新状態を読み直す</button
         >

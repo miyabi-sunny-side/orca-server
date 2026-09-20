@@ -26,7 +26,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await page.getByRole("combobox", { name: "使用するAMSスロット" }).selectOption(String(slot));
     if (index === 0) await capture(`add-${displayTheme}`);
     await page.getByRole("button", { name: "キューに追加", exact: true }).click();
-    await expect(page).toHaveURL(/\/queue$/);
+    await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
     await expect(page.getByRole("status")).toHaveText("キューに追加しました");
   };
   const confirm = () => page.getByRole("checkbox", { name: "造形物を取り外し、空のビルドプレートを戻しました" });
@@ -59,7 +59,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     if (colorScheme === "dark") {
       const old = await state();
       const gate = new Promise<void>(resolve => { releaseRead = resolve; });
-      await page.route("**/api/queue", async route => {
+      await page.route("**/api/queue?*", async route => {
         if (route.request().method() === "GET") { readWaiting = true; await gate; await route.fulfill({ json: old }); }
         else await route.continue();
       });
@@ -91,7 +91,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     expect((await peer()).prints.length).toBe(before + 1);
     await capture(`removal-375-${colorScheme}`);
     let lost = false, body = "";
-    if (colorScheme === "dark") await page.route("**/api/queue", async route => {
+    if (colorScheme === "dark") await page.route("**/api/queue?*", async route => {
       if (route.request().method() === "POST" && route.request().postDataJSON().action.type === "next") {
         if (!lost) { lost = true; body = route.request().postData()!; await route.fetch(); await route.abort("failed"); return; }
         expect(route.request().postData()).toBe(body); replayVerified = true;
@@ -103,7 +103,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
       await expect(page.getByText("送信結果が不明です。別の印刷を始めず、同じ要求の結果を確認します。")).toBeVisible();
       await page.getByRole("button", { name: "同じ要求を再確認" }).click();
       await expect(page.getByRole("alert")).toHaveCount(0);
-      await page.unroute("**/api/queue");
+      await page.unroute("**/api/queue?*");
     }
     await expect.poll(async () => (await peer()).prints.length).toBe(before + 2);
     expect((await peer()).prints.at(-1).ams_mapping).toEqual([0]);
@@ -120,7 +120,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   await report("RUNNING"); await report("FINISH");
   await expect(page.getByLabel("現在の印刷")).toContainText("取り外し待ち");
   const stale = await state();
-  await page.route("**/api/queue", route => route.request().method() === "GET" ? route.fulfill({ json: stale }) : route.continue());
+  await page.route("**/api/queue?*", route => route.request().method() === "GET" ? route.fulfill({ json: stale }) : route.continue());
   await confirm().check();
   await command({ type: "add", plate_id: plates[0].id, revision: plates[0].revision, ams_slot: 3 });
   await command({ type: "next", expected_job: stale.waiting[0].id, cleared: true });
@@ -128,7 +128,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   await report("RUNNING"); await report("FINISH");
   await next().click();
   await expect(page.getByRole("alert")).toContainText("状態が変わりました");
-  await page.unroute("**/api/queue");
+  await page.unroute("**/api/queue?*");
   await page.getByRole("button", { name: "最新状態を読み直す" }).click();
   await expect(page.getByLabel("現在の印刷")).toContainText(plates[3].name);
   await expect(confirm()).not.toBeChecked();
@@ -164,7 +164,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   expect((await state()).waiting).toHaveLength(0);
   await capture("revised-plate");
   await page.getByRole("button", { name: "キューに追加", exact: true }).click();
-  await expect(page).toHaveURL(/\/queue$/);
+  await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
   await expect(page.getByRole("listitem")).toContainText(`${plates[0].name}（更新）`);
   await page.getByRole("button", { name: `${plates[0].name}（更新）を削除` }).click();
   writeFileSync(`${process.env.E2E_EVIDENCE_DIR}/result.json`, JSON.stringify({ realApi: true, isolatedMqttFtps: true, darkLightMobile: true, doubleClickOnce: true, concurrentClientOnce: true, lateReadIgnored: true, removalRequired: true, exactReplayAfterLostResponse: replayVerified, staleClientNoAdvance: true, orderAndRemove: true, failedUploadExplicitRetry: true, revisedPlateRequiresFreshClick: true, keyboardAnd200Percent: true, prints: (await peer()).prints.length }, null, 2));

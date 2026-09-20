@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Path as UrlPath, State},
+    extract::{Path as UrlPath, Query, State},
     routing::{get, post},
 };
 use std::{
@@ -25,7 +25,7 @@ use tokio::{
 #[derive(Clone)]
 pub struct Slicer {
     binary: PathBuf,
-    profiles: Arc<Profiles>,
+    pub(crate) profiles: Arc<Profiles>,
     timeout: Duration,
     // ponytail: one CLI job per server; add a bounded queue only when needed.
     slot: Arc<Semaphore>,
@@ -251,14 +251,20 @@ pub(crate) fn router(store: Store, slicer: Option<Slicer>) -> Router {
         .route("/api/plates/{id}/slice", post(slice))
         .with_state((store, slicer))
 }
+#[derive(serde::Deserialize)]
+struct ProfileQuery {
+    machine: Option<String>,
+}
+
 async fn choices(
     State((_, slicer)): State<(Store, Option<Slicer>)>,
+    Query(query): Query<ProfileQuery>,
 ) -> Result<Json<serde_json::Value>> {
     Ok(Json(
         slicer
             .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
             .profiles
-            .choices(),
+            .choices_for(query.machine.as_deref().unwrap_or(crate::profiles::PRINTER))?,
     ))
 }
 async fn slice(
@@ -293,7 +299,7 @@ mod tests {
         ] {
             let directory = appdir.join("resources/profiles/BBL").join(category);
             std::fs::create_dir_all(&directory).unwrap();
-            std::fs::write(directory.join("profile.json"), serde_json::json!({"name":name, "instantiation":"true", "compatible_printers":[PRINTER]}).to_string()).unwrap();
+            std::fs::write(directory.join("profile.json"), serde_json::json!({"name":name, "instantiation":"true", "nozzle_diameter":["0.4"], "compatible_printers":[PRINTER]}).to_string()).unwrap();
         }
         let binary = appdir.join("AppRun");
         std::fs::write(&binary, "#!/bin/sh\nprintf 'OrcaSlicer-2.4.2:\\n'\n").unwrap();

@@ -18,6 +18,7 @@ pub const BEDS: [&str; 4] = [
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Selection {
+    pub machine: String,
     pub process: String,
     pub filament: String,
     pub bed: String,
@@ -25,6 +26,7 @@ pub struct Selection {
 impl Default for Selection {
     fn default() -> Self {
         Self {
+            machine: PRINTER.into(),
             process: "0.20mm Standard @BBL X1C".into(),
             filament: "Generic PLA High Speed @BBL X1C".into(),
             bed: BEDS[0].into(),
@@ -67,15 +69,70 @@ impl Profiles {
         })
     }
 
-    pub fn choices(&self) -> Value {
+    pub fn machine(&self, key: &str) -> Result<Map<String, Value>> {
+        let profile = flatten(&self.machine, key)?;
+        if profile.get("instantiation").and_then(Value::as_str) != Some("true")
+            || profile
+                .get("nozzle_diameter")
+                .and_then(Value::as_array)
+                .is_none_or(|v| v.len() != 1)
+        {
+            return Err(Error::Invalid(
+                "Select a supported single-nozzle machine profile",
+            ));
+        }
+        Ok(profile)
+    }
+
+    pub fn machines(&self) -> Value {
+        Value::Array(self.machine.keys().filter_map(|key| {
+            let p = self.machine(key).ok()?;
+            Some(serde_json::json!({"key":key,"model":p.get("printer_model"),"nozzle_diameter":p.get("nozzle_diameter").and_then(|v| v.get(0))}))
+        }).collect())
+    }
+
+    pub fn choices_for(&self, key: &str) -> Result<Value> {
+        let machine = self.machine(key)?;
         let names = |profiles: &BTreeMap<String, Value>| -> Vec<String> {
             profiles
                 .keys()
-                .filter(|name| selectable(profiles, name).is_ok())
+                .filter(|name| selectable(profiles, name, key).is_ok())
                 .cloned()
                 .collect()
         };
-        serde_json::json!({"version":"2.4.2", "printer":PRINTER, "processes":names(&self.process), "filaments":names(&self.filament), "beds":BEDS, "defaults":Selection::default()})
+        let processes = names(&self.process);
+        let filaments = names(&self.filament);
+        let process = machine
+            .get("default_print_profile")
+            .and_then(Value::as_str)
+            .filter(|s| processes.iter().any(|v| v == s))
+            .ok_or(Error::Invalid(
+                "Machine default process profile is unavailable",
+            ))?;
+        let legacy = Selection::default().filament;
+        let filament = if key == PRINTER && filaments.contains(&legacy) {
+            legacy
+        } else {
+            machine
+                .get("default_filament_profile")
+                .and_then(|v| v.get(0))
+                .and_then(Value::as_str)
+                .filter(|s| filaments.iter().any(|v| v == s))
+                .ok_or(Error::Invalid(
+                    "Machine default filament profile is unavailable",
+                ))?
+                .to_owned()
+        };
+        Ok(
+            serde_json::json!({"version":"2.4.2","printer":key,"processes":processes,"filaments":filaments,"beds":BEDS,
+            "defaults":Selection { machine:key.into(), process:process.into(), filament, bed:BEDS[0].into() }}),
+        )
+    }
+
+    pub fn validate_process(&self, machine: &str, process: &str) -> Result<()> {
+        self.machine(machine)?;
+        selectable(&self.process, process, machine)?;
+        Ok(())
     }
 
     pub fn write(&self, selection: &Selection, directory: &Path) -> Result<()> {
@@ -83,14 +140,14 @@ impl Profiles {
             return Err(Error::Invalid("Unknown bed type"));
         }
         for (filename, profile) in [
-            ("printer.json", flatten(&self.machine, PRINTER)?),
+            ("printer.json", self.machine(&selection.machine)?),
             (
                 "process.json",
-                selectable(&self.process, &selection.process)?,
+                selectable(&self.process, &selection.process, &selection.machine)?,
             ),
             (
                 "filament.json",
-                selectable(&self.filament, &selection.filament)?,
+                selectable(&self.filament, &selection.filament, &selection.machine)?,
             ),
         ] {
             serde_json::to_writer(fs::File::create(directory.join(filename))?, &profile)
@@ -100,15 +157,21 @@ impl Profiles {
     }
 }
 
-fn selectable(profiles: &BTreeMap<String, Value>, name: &str) -> Result<Map<String, Value>> {
+fn selectable(
+    profiles: &BTreeMap<String, Value>,
+    name: &str,
+    machine: &str,
+) -> Result<Map<String, Value>> {
     let profile = flatten(profiles, name)?;
     if profile.get("instantiation").and_then(Value::as_str) != Some("true")
         || !profile
             .get("compatible_printers")
             .and_then(Value::as_array)
-            .is_some_and(|names| names.iter().any(|v| v.as_str() == Some(PRINTER)))
+            .is_some_and(|names| names.iter().any(|v| v.as_str() == Some(machine)))
     {
-        return Err(Error::Invalid("Profile is not compatible with P1S 0.4 mm"));
+        return Err(Error::Invalid(
+            "Profile is not compatible with the selected machine and nozzle",
+        ));
     }
     Ok(profile)
 }
@@ -147,6 +210,53 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn machine_choices_and_defaults_never_cross_nozzle_profiles() {
+        let a1 = "Bambu Lab A1 mini 0.2 nozzle";
+        let machine = |name: &str, diameter: &str, process: &str, filament: &str| {
+            json!({
+                "name":name,"instantiation":"true","printer_model":name,
+                "nozzle_diameter":[diameter],"default_print_profile":process,
+                "default_filament_profile":[filament],"printable_area":["0x0","180x0","180x180","0x180"]
+            })
+        };
+        let preset = |name: &str, printer: &str| json!({"name":name,"instantiation":"true","compatible_printers":[printer]});
+        let profiles = Profiles {
+            machine: BTreeMap::from([
+                (
+                    PRINTER.into(),
+                    machine(PRINTER, "0.4", "p1-process", "p1-pla"),
+                ),
+                (a1.into(), machine(a1, "0.2", "a1-process", "a1-pla")),
+            ]),
+            process: BTreeMap::from([
+                ("p1-process".into(), preset("p1-process", PRINTER)),
+                ("a1-process".into(), preset("a1-process", a1)),
+            ]),
+            filament: BTreeMap::from([
+                ("p1-pla".into(), preset("p1-pla", PRINTER)),
+                ("a1-pla".into(), preset("a1-pla", a1)),
+            ]),
+        };
+        let choices = profiles.choices_for(a1).unwrap();
+        assert_eq!(choices["processes"], json!(["a1-process"]));
+        assert_eq!(choices["filaments"], json!(["a1-pla"]));
+        assert_eq!(choices["defaults"]["machine"], a1);
+        assert_eq!(
+            profiles.machine(a1).unwrap()["nozzle_diameter"],
+            json!(["0.2"])
+        );
+        assert!(profiles.choices_for("missing").is_err());
+        let mut selection: Selection = serde_json::from_value(choices["defaults"].clone()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        profiles.write(&selection, dir.path()).unwrap();
+        selection.process = "p1-process".into();
+        assert!(profiles.write(&selection, dir.path()).is_err());
+        selection.process = "a1-process".into();
+        selection.filament = "p1-pla".into();
+        assert!(profiles.write(&selection, dir.path()).is_err());
+    }
+
+    #[test]
     fn loads_nested_profiles_and_excludes_incompatible_or_base_presets() {
         let root = tempfile::tempdir().unwrap();
         for category in ["machine", "process", "filament/nested"] {
@@ -166,9 +276,9 @@ mod tests {
         .unwrap();
         fs::write(directory.join("other.json"), json!({"name":"other", "instantiation":"true", "compatible_printers":["different printer"]}).to_string()).unwrap();
         let profiles = Profiles::load(root.path()).unwrap();
-        assert_eq!(profiles.choices()["filaments"], json!(["selected"]));
-        assert!(selectable(&profiles.filament, "base").is_err());
-        assert!(selectable(&profiles.filament, "other").is_err());
+        assert!(selectable(&profiles.filament, "selected", PRINTER).is_ok());
+        assert!(selectable(&profiles.filament, "base", PRINTER).is_err());
+        assert!(selectable(&profiles.filament, "other", PRINTER).is_err());
     }
 
     #[test]

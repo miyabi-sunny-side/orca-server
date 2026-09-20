@@ -159,7 +159,7 @@ a
   background: var(--c-hover-1)
 
 
-button, input, select
+button, input, select, textarea
   font: inherit
 
 .btn
@@ -203,7 +203,7 @@ h1, h2
   color: var(--c-muted)
   font-size: var(--fs-xs)
 
-input[type="text"], input[type="search"], select
+input:not([type="checkbox"]):not([type="radio"]), select, textarea
   width: 100%
   min-width: 0
   padding: var(--sp-2)

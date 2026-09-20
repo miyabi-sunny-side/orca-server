@@ -127,13 +127,17 @@ async fn layout(
     blocking(move || {
         let plate = store.get(&id)?;
         let project = plate.project.ok_or(Error::NotFound)?;
-        let models = crate::layout::layout(&store.read_file(&id, &project)?)?;
+        let bytes = store.read_file(&id, &project)?;
+        let models = crate::layout::layout(&bytes)?;
+        let bed = crate::layout::bed(&bytes)?;
         if models.len() != plate.models.len()
             || models.iter().any(|m| m.index >= plate.models.len())
         {
             return Err(Error::Invalid("Saved layout does not match the plate"));
         }
-        Ok(Json(json!({"revision":plate.revision, "models":models})))
+        Ok(Json(
+            json!({"revision":plate.revision, "models":models, "bed":bed}),
+        ))
     })
     .await
 }

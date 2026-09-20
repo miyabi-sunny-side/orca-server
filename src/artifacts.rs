@@ -1,6 +1,6 @@
 use crate::{
     plates::{Error, MAX_UPLOAD, Result},
-    profiles::{PRINTER, Selection},
+    profiles::Selection,
 };
 use roxmltree::{Document, Node};
 use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
@@ -99,7 +99,7 @@ pub fn validate(path: &Path, models: usize, selection: &Selection, sliced: bool)
     let settings: serde_json::Value =
         serde_json::from_str(&read("Metadata/project_settings.config")?)
             .map_err(|_| Error::Upstream("Invalid 3MF settings"))?;
-    if settings["printer_settings_id"] != PRINTER
+    if settings["printer_settings_id"] != selection.machine
         || settings["print_settings_id"] != selection.process
         || settings["filament_settings_id"] != serde_json::json!([selection.filament])
         || settings["curr_bed_type"] != selection.bed
