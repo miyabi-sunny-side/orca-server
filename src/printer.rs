@@ -14,7 +14,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::{
     DigitallySignedStruct, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    pki_types::{CertificateDer, ServerName, UnixTime},
+    pki_types::{CertificateDer, ServerName, SubjectPublicKeyInfoDer, UnixTime},
 };
 use std::{
     io::Read,
@@ -24,9 +24,57 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, mpsc};
+use x509_cert::der::{Decode, Encode};
 
 #[derive(Debug)]
-struct PinnedCertificate(CertificateDer<'static>);
+struct PinnedCertificate {
+    certificate: CertificateDer<'static>,
+    public_key: SubjectPublicKeyInfoDer<'static>,
+}
+
+impl PinnedCertificate {
+    fn new(certificate: CertificateDer<'static>) -> std::result::Result<Self, &'static str> {
+        const INVALID: &str = "P1_TLS_CERT contains an invalid certificate";
+        let public_key =
+            if let Ok(parsed) = rustls::server::ParsedCertificate::try_from(&certificate) {
+                parsed.subject_public_key_info()
+            } else {
+                // WebPKI's end-entity parser only accepts v3. Parse the pinned v1
+                // certificate without changing its DER or inventing a trust chain.
+                let parsed = x509_cert::Certificate::from_der(&certificate).map_err(|_| INVALID)?;
+                let tbs = parsed.tbs_certificate();
+                if tbs.version() != x509_cert::Version::V1
+                    || tbs.extensions().is_some()
+                    || tbs.issuer_unique_id().is_some()
+                    || tbs.subject_unique_id().is_some()
+                    || tbs.signature() != parsed.signature_algorithm()
+                    || parsed.signature().unused_bits() != 0
+                {
+                    return Err(INVALID);
+                }
+                tbs.subject_public_key_info()
+                    .to_der()
+                    .map_err(|_| INVALID)?
+                    .into()
+            };
+        webpki::RawPublicKeyEntity::try_from(&public_key).map_err(|_| INVALID)?;
+        Ok(Self {
+            certificate,
+            public_key,
+        })
+    }
+
+    fn check_pin(&self, cert: &CertificateDer<'_>) -> std::result::Result<(), rustls::Error> {
+        if cert == &self.certificate {
+            Ok(())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+}
+
 impl ServerCertVerifier for PinnedCertificate {
     fn verify_server_cert(
         &self,
@@ -36,13 +84,8 @@ impl ServerCertVerifier for PinnedCertificate {
         _ocsp: &[u8],
         _now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        if cert == &self.0 {
-            Ok(ServerCertVerified::assertion())
-        } else {
-            Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::ApplicationVerificationFailure,
-            ))
-        }
+        self.check_pin(cert)?;
+        Ok(ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
         &self,
@@ -50,12 +93,31 @@ impl ServerCertVerifier for PinnedCertificate {
         cert: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            signature,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
+        self.check_pin(cert)?;
+        let algorithms = rustls::crypto::ring::default_provider().signature_verification_algorithms;
+        let candidates = algorithms
+            .mapping
+            .iter()
+            .find(|(scheme, _)| *scheme == signature.scheme)
+            .ok_or(rustls::Error::PeerMisbehaved(
+                rustls::PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
+            ))?
+            .1;
+        let key = webpki::RawPublicKeyEntity::try_from(&self.public_key).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        // TLS 1.2 schemes can map to several key algorithms (e.g. ECDSA curves).
+        // Verify the actual handshake signature with the key from the pinned DER.
+        if candidates.iter().any(|alg| {
+            key.verify_signature(*alg, message, signature.signature())
+                .is_ok()
+        }) {
+            Ok(HandshakeSignatureValid::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::BadSignature,
+            ))
+        }
     }
     fn verify_tls13_signature(
         &self,
@@ -63,9 +125,10 @@ impl ServerCertVerifier for PinnedCertificate {
         cert: &CertificateDer<'_>,
         signature: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
+        self.check_pin(cert)?;
+        rustls::crypto::verify_tls13_signature_with_raw_key(
             message,
-            cert,
+            &self.public_key,
             signature,
             &rustls::crypto::ring::default_provider().signature_verification_algorithms,
         )
@@ -199,15 +262,14 @@ impl Config {
         if certificates.len() != 1 {
             return Err("P1_TLS_CERT must contain exactly one printer certificate");
         }
-        rustls::server::ParsedCertificate::try_from(&certificates[0])
-            .map_err(|_| "P1_TLS_CERT contains an invalid certificate")?;
+        let pinned = PinnedCertificate::new(certificates[0].clone())?;
         let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
         .with_protocol_versions(&[&rustls::version::TLS12])
         .map_err(|_| "Cannot configure printer TLS")?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinnedCertificate(certificates[0].clone())))
+        .with_custom_certificate_verifier(Arc::new(pinned))
         .with_no_client_auth();
         Ok(Arc::new(tls))
     }
@@ -533,48 +595,193 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    #[test]
-    fn malformed_certificate_is_a_startup_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("bad.pem");
-        std::fs::write(
-            &file,
-            "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
-        )
-        .unwrap();
-        let config = Config {
+    fn fixture(dir: &std::path::Path, name: &str, version: &str) -> Config {
+        let pem = dir.join(format!("{name}.pem"));
+        let key = dir.join(format!("{name}.key"));
+        let version = if version == "v1" {
+            // OpenSSL < 3.2 defaults to v1 without this option.
+            let help = std::process::Command::new("openssl")
+                .args(["req", "-help"])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&help.stderr).contains("-x509v1") {
+                vec!["-x509v1"]
+            } else {
+                vec![]
+            }
+        } else {
+            vec!["-addext", "subjectAltName=DNS:isolated-printer"]
+        };
+        let output = std::process::Command::new("openssl")
+            .args([
+                "req",
+                "-config",
+                "/dev/null",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=isolated-printer",
+            ])
+            .args(version)
+            .arg("-out")
+            .arg(&pem)
+            .arg("-keyout")
+            .arg(key)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "synthetic certificate generation failed"
+        );
+        Config {
             ip: "127.0.0.1".parse().unwrap(),
             port: 8883,
             ftps_port: 990,
             start_timeout: 600,
             serial: "TESTSERIAL".into(),
             access_code: "test-only-secret".into(),
-            certificate: file,
-        };
-        assert!(config.options().is_err());
+            certificate: pem,
+        }
+    }
+
+    fn handshake(
+        config: &Config,
+        cert: &std::path::Path,
+        key: &std::path::Path,
+    ) -> std::result::Result<(), rustls::Error> {
+        fn transfer(
+            from: &mut rustls::Connection,
+            to: &mut rustls::Connection,
+        ) -> std::result::Result<(), rustls::Error> {
+            let mut wire = Vec::new();
+            from.write_tls(&mut wire).unwrap();
+            to.read_tls(&mut std::io::Cursor::new(wire)).unwrap();
+            to.process_new_packets()?;
+            Ok(())
+        }
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let cert = CertificateDer::from_pem_file(cert).unwrap();
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_file(key).unwrap();
+        // Supplying another key deliberately produces an invalid handshake signature.
+        let certified = rustls::sign::CertifiedKey::new(
+            vec![cert],
+            provider.key_provider.load_private_key(key).unwrap(),
+        );
+        let server = rustls::ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS12])
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(certified)));
+        let mut server =
+            rustls::Connection::Server(rustls::ServerConnection::new(Arc::new(server))?);
+        let mut client = rustls::Connection::Client(rustls::ClientConnection::new(
+            config.tls().expect("app TLS configuration"),
+            ServerName::from(config.ip),
+        )?);
+        for _ in 0..8 {
+            transfer(&mut client, &mut server)?;
+            transfer(&mut server, &mut client)?;
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return Ok(());
+            }
+        }
+        panic!("TLS handshake did not finish");
     }
 
     #[test]
-    fn only_the_explicitly_pinned_certificate_is_accepted() {
-        let trusted = CertificateDer::from(vec![1, 2, 3]);
-        let pinned = PinnedCertificate(trusted.clone());
-        let name = ServerName::try_from("127.0.0.1").unwrap();
-        assert!(
-            pinned
-                .verify_server_cert(&trusted, &[], &name, &[], UnixTime::now())
-                .is_ok()
-        );
-        assert!(
-            pinned
-                .verify_server_cert(
-                    &CertificateDer::from(vec![4, 5, 6]),
-                    &[],
-                    &name,
-                    &[],
-                    UnixTime::now()
-                )
-                .is_err()
-        );
+    fn pinned_tls_accepts_v1_and_v3_but_rejects_other_certificates_and_signing_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = fixture(dir.path(), "other", "v1");
+        for version in ["v1", "v3"] {
+            let config = fixture(dir.path(), version, version);
+            let key = config.certificate.with_extension("key");
+            let der = CertificateDer::from_pem_file(&config.certificate).unwrap();
+            let parsed = x509_cert::Certificate::from_der(&der).unwrap();
+            assert_eq!(
+                parsed.tbs_certificate().version(),
+                if version == "v1" {
+                    x509_cert::Version::V1
+                } else {
+                    x509_cert::Version::V3
+                }
+            );
+            assert!(
+                config.options().is_ok(),
+                "MQTT configuration must accept {version}"
+            );
+            handshake(&config, &config.certificate, &key).unwrap();
+            // Even a different certificate for the same key must fail DER pinning.
+            let renewed = dir.path().join("renewed.pem");
+            assert!(
+                std::process::Command::new("openssl")
+                    .args(["x509", "-in"])
+                    .arg(&config.certificate)
+                    .args(["-set_serial", "1", "-signkey"])
+                    .arg(&key)
+                    .arg("-out")
+                    .arg(&renewed)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert!(matches!(
+                handshake(&config, &renewed, &key),
+                Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure
+                ))
+            ));
+            assert!(matches!(
+                handshake(
+                    &config,
+                    &other.certificate,
+                    &other.certificate.with_extension("key")
+                ),
+                Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure
+                ))
+            ));
+            assert!(matches!(
+                handshake(
+                    &config,
+                    &config.certificate,
+                    &other.certificate.with_extension("key")
+                ),
+                Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::BadSignature
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_certificate_is_a_startup_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = fixture(dir.path(), "invalid", "v1");
+        let pem = std::fs::read_to_string(&config.certificate).unwrap();
+        let der = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
+        for bad in [
+            String::new(),
+            "not PEM".into(),
+            pem.repeat(2),
+            " ".repeat(65_537),
+            "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n".into(),
+            "-----BEGIN CERTIFICATE-----\n!invalid!\n-----END CERTIFICATE-----\n".into(),
+        ] {
+            std::fs::write(&config.certificate, bad).unwrap();
+            assert!(config.options().is_err());
+            assert!(config.tls().is_err());
+        }
+        for length in [0, 1, der.len() / 2, der.len() - 1] {
+            assert!(PinnedCertificate::new(der[..length].to_vec().into()).is_err());
+        }
+        let mut trailing = der.to_vec();
+        trailing.push(0);
+        assert!(PinnedCertificate::new(trailing.into()).is_err());
     }
 
     #[test]

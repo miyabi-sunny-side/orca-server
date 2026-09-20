@@ -24,6 +24,22 @@ SECRET = 'isolated-test-access-code'
 REPORT = f'device/{SERIAL}/report'
 
 
+def certificate(tmp, name, version='v3'):
+    # Synthetic, short-lived keys only; never copy a real printer certificate.
+    options = (['-newkey', 'rsa:2048'] if version == 'v1'
+               else ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
+                     '-addext', 'subjectAltName=DNS:isolated-printer'])
+    # OpenSSL before 3.2 defaults to v1 and has no -x509v1 option.
+    if version == 'v1' and b'-x509v1' in subprocess.run(['openssl', 'req', '-help'], capture_output=True, check=True).stderr:
+        options.append('-x509v1')
+    subprocess.run(['openssl', 'req', '-config', '/dev/null', '-x509', *options, '-nodes', '-days', '1',
+                    '-subj', '/CN=isolated-printer', '-keyout', str(tmp / f'{name}.key'),
+                    '-out', str(tmp / f'{name}.pem')],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    info = subprocess.check_output(['openssl', 'x509', '-in', str(tmp / f'{name}.pem'), '-noout', '-text'])
+    assert f'Version: {version[1]} ('.encode() in info, 'wrong fixture certificate version'
+
+
 def packet(header, body):
     length = len(body)
     result = bytes([header])
@@ -166,16 +182,15 @@ def main():
     binary = Path(sys.argv[1]).resolve()
     output = Path(sys.argv[2]).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    version = sys.argv[3] if len(sys.argv) > 3 else 'v3'
+    assert version in ('v1', 'v3')
     full = json.loads((REPO / 'tests/fixtures/p1_status.json').read_text())
     # Unknown fields, even if a peer echoes a credential, must not be exposed.
     full['print']['access_code'] = SECRET
     with tempfile.TemporaryDirectory(prefix='orca-mqtt-') as directory:
         tmp = Path(directory)
         for name in ['trusted', 'other']:
-            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
-                            '-nodes', '-days', '1', '-subj', '/CN=isolated-printer',
-                            '-keyout', str(tmp / f'{name}.key'), '-out', str(tmp / f'{name}.pem')],
-                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            certificate(tmp, name, version)
         def start(broker, configured=True):
             with socket.socket() as listener:
                 listener.bind(('127.0.0.1', 0))
@@ -265,7 +280,7 @@ def main():
         for path in list(output.glob('*.log')) + list((tmp / 'plates').rglob('*')):
             if path.is_file():
                 assert SECRET.encode() not in path.read_bytes(), 'credential appeared in logs/storage'
-    result = dict(tls_pin_matched=True, wrong_certificate_rejected=True, mqtt_credentials=True,
+    result = dict(certificate_version=version, tls_pin_matched=True, wrong_certificate_rejected=True, mqtt_credentials=True,
                   subscription_and_pushall=True, retained_report_ignored=True, partial_before_sync_ignored=True,
                   print_ams_merge=True, disconnect_and_resync=True, unrelated_topic_ignored=True,
                   invalid_report_unsynchronized=True, secret_absent_from_api_logs_storage=True, unconfigured_unknown=True)

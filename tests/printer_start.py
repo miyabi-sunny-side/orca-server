@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from printer_mqtt import Broker, SERIAL, SECRET, until
+from printer_mqtt import Broker, SERIAL, SECRET, until, certificate
 
 REPO = Path(__file__).resolve().parents[1]
 ARTIFACT = (REPO / 'tests/fixtures/p1_print.gcode.3mf').read_bytes()
@@ -147,12 +147,12 @@ def main():
     binary = str(Path(sys.argv[1]).resolve())
     output = Path(sys.argv[2]).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    version = sys.argv[3] if len(sys.argv) > 3 else 'v3'
+    assert version in ('v1', 'v3')
     with tempfile.TemporaryDirectory(prefix='orca-start-') as directory:
         tmp = Path(directory)
         for name in ['trusted', 'other']:
-            subprocess.run(['openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-days','1',
-                            '-subj','/CN=isolated-printer','-keyout',str(tmp/f'{name}.key'),'-out',str(tmp/f'{name}.pem')],
-                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            certificate(tmp, name, version)
         plate_id, revision = str(uuid.uuid4()), str(uuid.uuid4())
         store = tmp/'plates'
         artifacts = store/plate_id/'revisions'/revision
@@ -268,7 +268,7 @@ def main():
             ftp.close(); wrong.close(); broker.close()
         for path in list(output.glob('*.log')) + list(store.rglob('*')):
             if path.is_file(): assert SECRET.encode() not in path.read_bytes()
-    result = dict(saved_bytes_uploaded=True, implicit_tls_session_reused=True, passive_port_observed=True,
+    result = dict(certificate_version=version, saved_bytes_uploaded=True, implicit_tls_session_reused=True, passive_port_observed=True,
                   selected_ams_mapping=True, unknown_busy_error_empty_or_wrong_material_refused=True,
                   concurrent_start_refused=True, upload_failure_no_command=True, state_change_during_upload_no_command=True,
                   ack_distinct_from_printing=True, matching_status_required=True, timeout_and_reconnect_no_replay=True,

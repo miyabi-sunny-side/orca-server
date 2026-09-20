@@ -72,6 +72,11 @@ jobs:
       - name: Verify isolated FTPS upload and print start
         run: python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 
+      - name: Verify legacy v1 printer certificates over MQTT and FTPS
+        run: |
+          python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-v1-check v1
+          python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-v1-check v1
+
       - name: Verify queue snapshots and manual next-print flow
         run: python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 
