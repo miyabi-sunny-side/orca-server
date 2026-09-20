@@ -1,3 +1,7 @@
+mod plate_api;
+pub mod plates;
+mod search;
+
 use axum::{
     Json, Router,
     http::{StatusCode, Uri, header},
@@ -9,6 +13,12 @@ use serde::Serialize;
 use tower_http::trace::TraceLayer;
 
 static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/client/dist");
+
+pub fn app_with_store(store: plates::Store) -> Router {
+    app()
+        .merge(plate_api::router(store))
+        .layer(axum::middleware::from_fn(plate_api::same_origin))
+}
 
 #[derive(Serialize)]
 struct HealthResponse {

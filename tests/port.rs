@@ -25,6 +25,7 @@ fn command() -> Command {
 fn port_selects_http_listener_and_legacy_address_is_ignored() {
     // An occupied legacy address makes accidental use of APP_BIND_ADDR observable.
     let legacy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let storage = tempfile::tempdir().unwrap();
     for _ in 0..2 {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
@@ -34,6 +35,7 @@ fn port_selects_http_listener_and_legacy_address_is_ignored() {
         let mut server = Server(
             command
                 .env("PORT", address.port().to_string())
+                .env("PLATES_DIR", storage.path())
                 .env("APP_BIND_ADDR", legacy.local_addr().unwrap().to_string())
                 .stdout(Stdio::null())
                 .spawn()

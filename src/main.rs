@@ -14,7 +14,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!(%bind_addr, "server listening");
 
-    axum::serve(listener, orca_server::app())
+    let plates = orca_server::plates::Store::open(
+        std::env::var_os("PLATES_DIR").unwrap_or_else(|| "data/plates".into()),
+    )?;
+    axum::serve(listener, orca_server::app_with_store(plates))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

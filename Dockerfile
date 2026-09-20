@@ -29,6 +29,8 @@ FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 COPY --from=backend /app/target/release/orca-server /usr/local/bin/orca-server
 ENV PORT=3000
+ENV PLATES_DIR=/data/plates
+RUN mkdir -p /data/plates && chown -R 10001:10001 /data
 EXPOSE 3000
 USER 10001:10001
 ENTRYPOINT ["orca-server"]
