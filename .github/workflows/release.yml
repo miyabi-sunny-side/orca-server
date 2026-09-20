@@ -74,16 +74,24 @@ jobs:
             --format '{{ json .Manifest.Digest }}' | tr -d '"')
           echo "image=ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}@${digest}" >> "$GITHUB_OUTPUT"
 
+      - name: Export corresponding dependency sources
+        run: |
+          set -euo pipefail
+          docker buildx build --target sources \
+            --build-arg "ORCA_SOURCE_URL=https://github.com/${{ github.repository }}/archive/${{ github.sha }}.tar.gz" \
+            --output "type=local,dest=$RUNNER_TEMP/orca-sources" .
+          cd "$RUNNER_TEMP/orca-sources"
+          sha256sum ./*.tar.gz > SHA256SUMS
+
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; leaving it as it is"
-            exit 0
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --generate-notes \
+              --notes "Image: \`${{ steps.digest.outputs.image }}\` · [Source](https://github.com/${{ github.repository }}/archive/${{ github.sha }}.tar.gz) · [Build instructions](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/development.md) · [AGPL v3](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/LICENSE). OrcaSlicer 2.4.2 and dependency sources are attached below with SHA-256 checksums."
           fi
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --generate-notes \
-            --notes "Image: \`${{ steps.digest.outputs.image }}\` · [Source](https://github.com/${{ github.repository }}/archive/${{ github.sha }}.tar.gz) · [Build instructions](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/development.md) · [AGPL v3](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/LICENSE)"
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/orca-sources/"* --clobber

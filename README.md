@@ -8,7 +8,7 @@ scad-liveのSTLを選び、印刷用プレートとして保存・検索する�
 
 ## 起動
 
-Dockerを導入した環境で実行します。
+Dockerを導入したLinux x86_64環境で実行します。OrcaSlicer 2.4.2とprofileを同梱し、GUIは不要です。
 
 ```sh
 docker run --rm -p 127.0.0.1:3000:3000 -v orca-plates:/data/plates ghcr.io/miyabi-sunny-side/orca-server:latest
@@ -16,9 +16,8 @@ docker run --rm -p 127.0.0.1:3000:3000 -v orca-plates:/data/plates ghcr.io/miyab
 
 [プレート一覧](http://127.0.0.1:3000)を開きます。保存データがなければ空の一覧を表示します。
 この起動例では、[APIからのSTL保存・検索](docs/plates.md#保存と検索)と保存済みプレートの閲覧を利用できます。
-公開コンテナにはOrcaSlicerを含まないため、自動配置を使う場合はLinuxで
-[ソースから起動](docs/development.md#ソースから起動)し、[OrcaSlicerを設定](docs/slicing.md#orcaslicerの設定)してください。
-画面から新規作成するには、[scad-liveの接続設定](docs/plates.md#scad-liveからの取り込み)も必要です。
+APIで保存したSTLは、そのまま[自動配置とスライス](docs/slicing.md#設定を選んで実行)を実行できます。
+画面から新規作成する場合は、[コンテナの接続設定](docs/container.md)でscad-liveのURLを指定してください。
 
 プレートは`orca-plates`ボリュームへ保存され、コンテナ終了後も残ります。
 終了するには実行中のターミナルでCtrl+Cを押します。
@@ -27,7 +26,7 @@ docker run --rm -p 127.0.0.1:3000:3000 -v orca-plates:/data/plates ghcr.io/miyab
 
 ## プレートを作る
 
-scad-liveとOrcaSlicerを設定したサーバーで操作します。
+scad-liveを接続したサーバーで操作します。
 
 1. 「新規作成」を開き、モデル名で検索してSTLを選びます。複数選択できます。
 2. 「設定へ」でプレート名・工程・材料・プレート種類を確認し、「配置して保存」を押します。
@@ -48,3 +47,4 @@ OrcaServerは[GNU Affero General Public License version 3](LICENSE)（`AGPL-3.0-
 画面の「ライセンスとソース」から、利用中の配布版に対応するソースを取得できます。
 公開イメージの対応ソースとビルド手順は[各リリース](https://github.com/miyabi-sunny-side/orca-server/releases)にも記載しています。
 流用したMITコードの著作権・許諾表示は[第三者通知](THIRD_PARTY_NOTICES)に保持しています。
+OrcaSlicerと依存ソースは各リリースの`OrcaSlicer-2.4.2-sources.tar.gz`から取得できます。

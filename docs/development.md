@@ -24,7 +24,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | `LOG_LEVEL` | `info` | `off`、`error`、`warn`、`info`、`debug`、`trace`。不正な値は`info`です。 |
 | `PLATES_DIR` | `data/plates` | プレートの保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
 | `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。未設定では取り込みAPIが503を返します。 |
-| `ORCA_APPDIR` | 未設定 | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
+| `ORCA_APPDIR` | ネイティブでは未設定、コンテナでは`/opt/orcaslicer` | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
 | `ORCA_TIMEOUT_SECS` | `300` | 各CLI工程の上限秒数。OrcaSlicerを設定する場合は1〜3600。 |
 
 ネイティブ実行では全IPv4インターフェースで待ち受けます。
@@ -109,7 +109,20 @@ docker build -t orca-server .
 
 `Cargo.toml`の版と一致する`vX.Y.Z`タグをpushすると、コンテナを公開します。
 配布先は`ghcr.io/miyabi-sunny-side/orca-server`です。
-GitHub Releaseには公開イメージのdigestを記録します。
+GitHub Releaseには公開イメージのdigestとOrcaSlicerの依存ソースを添付します。
+[コンテナガイド](container.md)に導入と保存先、[同梱ソース](container.md#ライセンスとソース)に版と取得方法を記載しています。
+
+```sh
+python3 tests/container.py orca-server /tmp/orca-container-check
+docker build --target sources --output type=local,dest=/tmp/orca-sources .
+```
+
+コンテナ検証は一時volumeを作り、非rootの配置・スライス、再作成後の保持とキュー消失を確認します。
+`openssl`とPython 3、Dockerを使い、実プリンターへは接続しません。
+`sources` targetはOrcaSlicer本体と24種の依存アーカイブ、固定commitのwxWidgetsとsubmoduleをまとめます。
+Rust依存は`cargo vendor --locked`で取得し、別のソースアーカイブへまとめます。
+OrcaSlicerのソースURLとSHA-256は`packaging/slicer-sources.txt`、構成元は上流2.4.2の`deps/*.cmake`です。
+既に同梱された依存ソースは本体アーカイブに保持し、未使用のNanoSVG取得設定は含めません。
 
 元のテンプレートは`fa63d25dbcb3762e2ecf7e56bfaddb994cdba07c`です。
 MITの著作権・許諾表示は[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES)に保持しています。

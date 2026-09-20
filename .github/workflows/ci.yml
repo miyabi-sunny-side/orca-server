@@ -116,7 +116,6 @@ jobs:
           trap - EXIT
 
   container:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -130,5 +129,10 @@ jobs:
         with:
           context: .
           push: false
+          load: true
+          tags: orca-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify headless slicing and persistent storage
+        run: python3 tests/container.py orca-server:ci /tmp/orca-container-check

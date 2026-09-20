@@ -5,7 +5,7 @@
 
 ## OrcaSlicerの設定
 
-Linuxでソースから起動する場合に利用できます。現在の公開コンテナにはOrcaSlicerを含みません。
+公開コンテナには設定済みのOrcaSlicer 2.4.2を含みます。以下はLinuxでソースから起動する場合の手順です。
 [公式v2.4.2](https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/v2.4.2)の、実行環境に合うAppImageを取得します。
 Ubuntu 24.04向けx86_64版では、次のように展開します。
 

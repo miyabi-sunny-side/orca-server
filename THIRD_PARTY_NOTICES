@@ -31,3 +31,43 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+Official containers include the unmodified OrcaSlicer 2.4.2 executable and
+profiles from the Ubuntu 24.04 x86_64 AppImage.
+Copyright (C) 2026 OrcaSlicer Pte Ltd and the respective contributors.
+OrcaSlicer is based on PrusaSlicer and BambuStudio and is licensed under
+GNU Affero General Public License, version 3; see LICENSE.
+No warranty is provided. Other components retain their respective licenses.
+The optional proprietary Bambu networking plugin is not installed.
+
+Upstream commit: 8500fcdccaa10b5099ac20d252af3a7c560046f1
+https://github.com/OrcaSlicer/OrcaSlicer/tree/8500fcdccaa10b5099ac20d252af3a7c560046f1
+AppImage SHA-256:
+d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd
+
+Container packaging replaces the AppImage's private expat, lzma, mspack and
+zlib shared libraries with Ubuntu 24.04 packages. The executable, launcher
+and profiles are unchanged. The installed package versions are recorded in
+/usr/share/doc/orca-server/system-packages.txt; package copyright and license
+texts remain under /usr/share/doc/<package>/copyright.
+
+OrcaSlicer and dependency copyright/license/notice files are preserved under
+/usr/share/doc/orcaslicer/notices, and its library credits are retained in
+/usr/share/doc/orcaslicer/AboutDialog.cpp. Source archives, dependency
+versions, patches and build instructions are available without charge in
+the matching OrcaServer release's OrcaSlicer-2.4.2-sources.tar.gz asset:
+https://github.com/miyabi-sunny-side/orca-server/releases
+The dependency archive checksums and URLs are also in
+/usr/share/doc/orcaslicer/slicer-sources.txt.
+wxWidgets uses commit db1005db3dea2c37a46fb455a9a02e37aa360751
+(the v3.3.2 branch at the AppImage release date) with its recorded submodules.
+Each source retains its own copyright, license and build instructions.
+
+OrcaServer's Rust dependency licenses and notices are preserved under
+/usr/share/doc/orca-server/dependencies. The matching release includes their
+Cargo.lock-pinned sources in OrcaServer-dependencies.tar.gz, with Cargo's
+vendor configuration for rebuilding. The web bundle includes Svelte,
+esm-env, clsx and normalize.css; their MIT notices are retained under
+/usr/share/doc/orca-server/frontend. Exact package versions are in the
+OrcaServer source's client/package-lock.json.
