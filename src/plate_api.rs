@@ -49,6 +49,7 @@ pub fn router(store: Store) -> Router {
         .route("/api/plates", get(list).post(create))
         .route("/api/plates/{id}", get(read).put(replace))
         .route("/api/plates/{id}/files/{*path}", get(file))
+        .route("/api/plates/{id}/layout", get(layout))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(store)
 }
@@ -117,6 +118,24 @@ async fn replace(
     blocking(move || store.save(Some(&id), input))
         .await
         .map(Json)
+}
+
+async fn layout(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    blocking(move || {
+        let plate = store.get(&id)?;
+        let project = plate.project.ok_or(Error::NotFound)?;
+        let models = crate::layout::layout(&store.read_file(&id, &project)?)?;
+        if models.len() != plate.models.len()
+            || models.iter().any(|m| m.index >= plate.models.len())
+        {
+            return Err(Error::Invalid("Saved layout does not match the plate"));
+        }
+        Ok(Json(json!({"revision":plate.revision, "models":models})))
+    })
+    .await
 }
 
 async fn file(

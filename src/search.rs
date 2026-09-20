@@ -1,5 +1,14 @@
 // Adapted from scad-live/client/src/lib/fuzzy.js (MIT, see LICENSE).
 // Keep ranking here; clients consume the API order rather than reimplement it.
+pub fn rank(query: &str, paths: Vec<String>) -> Vec<String> {
+    let mut ranked: Vec<_> = paths
+        .into_iter()
+        .filter_map(|path| score(query.trim(), &path).map(|rank| (rank, path)))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked.into_iter().map(|(_, path)| path).collect()
+}
+
 pub fn score(query: &str, text: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
@@ -42,7 +51,19 @@ pub fn score(query: &str, text: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::score;
+    use super::{rank, score};
+
+    #[test]
+    fn ranks_model_candidates_with_existing_fuzzy_scores_and_excludes_misses() {
+        let paths = ["unrelated.stl", "deep/box.stl", "box.stl"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(rank(" bx ", paths.clone()), ["box.stl", "deep/box.stl"]);
+        assert_eq!(
+            rank("", paths),
+            ["box.stl", "deep/box.stl", "unrelated.stl"]
+        );
+    }
 
     #[test]
     fn subsequences_are_case_insensitive_and_misses_are_excluded() {

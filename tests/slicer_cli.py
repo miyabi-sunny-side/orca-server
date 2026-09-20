@@ -132,6 +132,10 @@ def main():
                 downloaded[key] = data
             before, after = boxes(downloaded['project']), boxes(downloaded['print'])
             assert len(before) == len(after) == 2
+            status, preview = json_request('/api/plates/' + saved['id'] + '/layout')
+            assert status == 200 and preview['revision'] == sliced['revision'], (status, preview)
+            assert sorted(item['bounds'] for item in preview['models']) == before
+            assert sorted(item['index'] for item in preview['models']) == [0, 1]
             for bounds in before:
                 assert all(0 <= low < high <= limit for (low, high), limit in zip(bounds, [256, 256, 250])), bounds
             assert any(before[0][axis][1] <= before[1][axis][0] or before[1][axis][1] <= before[0][axis][0] for axis in (0, 1)), before

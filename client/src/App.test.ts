@@ -7,7 +7,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("keeps the product header and theme controls on the service page", async () => {
+it("keeps the product header and theme controls on the plate list", async () => {
   vi.stubGlobal(
     "fetch",
     vi
@@ -29,5 +29,5 @@ it("keeps the product header and theme controls on the service page", async () =
   expect(screen.getByRole("banner").querySelectorAll("a, button")).toHaveLength(
     2,
   );
-  expect(await screen.findByText("OrcaServerに接続しました")).toBeTruthy();
+  expect(await screen.findByText("保存済みプレートはありません")).toBeTruthy();
 });

@@ -51,9 +51,21 @@ cargo test --locked
 cargo build --locked --release
 ```
 
-ブラウザテストは一時的なViteサーバーと隔離したAPI応答を使います。
+ブラウザテストは一時的なViteサーバーと隔離したAPI応答を使い、検索・失敗時の再試行・明暗・狭幅を確認します。
 RustのテストはHTTP応答と組み込み画面、一時保存先での復元・入力拒否・失敗時の保全を確認します。
 CIではビルドした実行ファイルを別ディレクトリから起動し、画面の配信も確認します。
+
+公式OrcaSlicerを[設定](slicing.md#orcaslicerの設定)した環境では、実APIとCLIを通した画面操作も確認できます。
+先に上記の手順で画面をビルドし、Chromiumを導入します。
+
+```sh
+cargo build --locked
+python3 tests/browser_cli.py "$ORCA_APPDIR" /tmp/orca-browser-check
+```
+
+一時保存先とscad-live互換のHTTP応答を用意し、STL選択・設定・保存・再検索・再取り込みを操作します。
+RustサーバーとOrcaSlicerは実際に実行します。スクリーンショットと操作結果は指定した出力先へ保存します。
+プリンターには接続しません。起動したサーバーと一時データは終了時に片付けます。
 
 ## 構成
 

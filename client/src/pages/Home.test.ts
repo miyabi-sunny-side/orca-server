@@ -7,36 +7,48 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function response(input: RequestInfo | URL) {
-  return new Response(
-    JSON.stringify(String(input) === "/api/health" ? { status: "ok" } : []),
-  );
-}
+const saved = {
+  id: "saved",
+  name: "机の小物入れ",
+  models: [{ name: "box.stl" }],
+  project: "project.3mf",
+  print: "print.gcode.3mf",
+};
 
-it("checks the service and shows its connection state", async () => {
+it("opens saved plates and filters using server-ranked search results", async () => {
   const fetchMock = vi
     .fn<typeof fetch>()
-    .mockImplementation(async (input) => response(input));
+    .mockImplementation(
+      async (input) =>
+        new Response(
+          JSON.stringify(String(input).includes("missing") ? [] : [saved]),
+        ),
+    );
   vi.stubGlobal("fetch", fetchMock);
   render(Home);
-  expect(await screen.findByText("OrcaServerに接続しました")).toBeTruthy();
-  expect(fetchMock).toHaveBeenCalledWith("/api/health", expect.anything());
-  expect(screen.queryByRole("searchbox")).toBeNull();
+  expect(
+    await screen.findByRole("link", { name: /机の小物入れ/ }),
+  ).toHaveProperty("href", expect.stringContaining("/plates/saved"));
+  expect(screen.getByRole("link", { name: "新規作成" })).toBeTruthy();
+  await fireEvent.input(screen.getByRole("searchbox"), {
+    target: { value: "missing" },
+  });
+  expect(await screen.findByText("一致するプレートがありません")).toBeTruthy();
+  expect(
+    fetchMock.mock.calls.some(([url]) => String(url).includes("q=missing")),
+  ).toBe(true);
 });
 
-it("keeps a failed connection retryable", async () => {
+it("keeps a failed list retryable and distinguishes an empty collection", async () => {
   vi.stubGlobal(
     "fetch",
     vi
-      .fn<typeof fetch>()
+      .fn()
       .mockRejectedValueOnce(new Error("offline"))
-      .mockImplementation(async (input) => response(input)),
+      .mockResolvedValue(new Response("[]")),
   );
   render(Home);
-  expect(await screen.findByRole("alert")).toHaveProperty(
-    "textContent",
-    "接続できませんでした",
-  );
+  expect(await screen.findByRole("alert")).toBeTruthy();
   await fireEvent.click(screen.getByRole("button", { name: "再試行" }));
-  expect(await screen.findByText("OrcaServerに接続しました")).toBeTruthy();
+  expect(await screen.findByText("保存済みプレートはありません")).toBeTruthy();
 });

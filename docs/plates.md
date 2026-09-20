@@ -38,6 +38,17 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 保存後は[自動配置とスライス](slicing.md)のAPIで3MFを生成できます。
 STLや設定の再保存・再取り込みは生成物を解除します。新しい内容で再スライスしてください。
 
+`GET /api/plates/{id}/layout`は、保存した3MFの配置を次の形で返します。
+
+```json
+{"revision":"revision-id","models":[{"index":0,"bounds":[[118,138],[107,127],[0,20]]}]}
+```
+
+`index`はプレートJSONの`models`に対応する0始まりの番号です。
+`bounds`は変換後のX・Y・Z座標の最小・最大値で、単位はmmです。形状の輪郭ではなく外形範囲を表します。
+`revision`がプレートJSONと異なる場合は、プレートを読み直してから表示してください。
+配置前は404を返します。
+
 ## scad-liveからの取り込み
 
 OrcaServerの環境変数`SCAD_LIVE_URL`へ、サーバーから到達できるscad-liveのURLを指定します。
@@ -56,6 +67,7 @@ curl --fail http://127.0.0.1:3000/api/plates/import \
   -d '{"name":"Desk parts","models":["box one.stl","parts/holder.stl"]}'
 ```
 
+一覧の`GET /api/scad/models`にも`q`を指定でき、同じ部分列検索でモデルのパスを絞り込めます。
 `models`には一覧で返された相対パスを、そのまま文字列で渡します。
 空白・日本語・`%`などのURL符号化はサーバーが行います。クライアント側で二重に符号化しないでください。
 保存後にscad-live側が再生成されても、保存済みプレートは変わりません。

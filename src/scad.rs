@@ -1,7 +1,7 @@
 use crate::plates::{Error, Input, MAX_UPLOAD, ModelInput, Result, valid_model_name};
 use axum::{
     Json, Router,
-    extract::{State, rejection::JsonRejection},
+    extract::{Query, State, rejection::JsonRejection},
     http::StatusCode,
     routing::{get, post},
 };
@@ -26,8 +26,23 @@ fn require_source(source: Option<Source>) -> Result<Source> {
     source.ok_or(Error::Unavailable("SCAD_LIVE_URL is not configured"))
 }
 
-async fn list_models(State(state): State<ImportState>) -> Result<Json<Vec<String>>> {
-    require_source(state.source)?.models().await.map(Json)
+#[derive(Deserialize)]
+struct ModelSearch {
+    #[serde(default)]
+    q: String,
+}
+
+async fn list_models(
+    State(state): State<ImportState>,
+    Query(query): Query<ModelSearch>,
+) -> Result<Json<Vec<String>>> {
+    if query.q.len() > 1024 {
+        return Err(Error::Invalid("Search query is too long"));
+    }
+    Ok(Json(crate::search::rank(
+        &query.q,
+        require_source(state.source)?.models().await?,
+    )))
 }
 
 #[derive(Deserialize)]
