@@ -39,7 +39,7 @@ async fn multipart_save_search_download_and_restart_use_the_same_store() {
     assert_eq!(response.status(), StatusCode::CREATED);
     let saved = json(response).await;
     let id = saved["id"].as_str().unwrap();
-    let file = saved["models"][0]["path"].as_str().unwrap();
+    let file = saved["models"][0]["id"].as_str().unwrap();
     let response = app
         .clone()
         .oneshot(
@@ -68,20 +68,30 @@ async fn multipart_save_search_download_and_restart_use_the_same_store() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json(response).await[0]["id"], saved["id"]);
-    let response = app
-        .clone()
-        .oneshot(upload(
-            "PUT",
-            &format!("/api/plates/{id}"),
-            "Renamed",
-            include_str!("fixtures/triangle.stl"),
-        ))
-        .await
-        .unwrap();
+    let replacement = serde_json::json!({"name":"Renamed","version":saved["version"],"models":[{
+        "id":saved["models"][0]["id"],"name":"parts/box.stl","source":null,"quantity":2}]});
+    let replace = |value: &Value| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/plates/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(value.to_string()))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(replace(&replacement)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let changed = json(response).await;
     assert_eq!(changed["name"], "Renamed");
-    assert_ne!(changed["revision"], saved["revision"]);
+    assert_ne!(changed["version"], saved["version"]);
+    assert_eq!(changed["models"][0]["quantity"], 2);
+    assert_eq!(
+        app.clone()
+            .oneshot(replace(&replacement))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
     let response = app
         .oneshot(
             Request::builder()
@@ -111,16 +121,8 @@ async fn bad_upload_unknown_plate_and_unlisted_files_fail_without_losing_data() 
     assert_eq!(response.status(), StatusCode::CREATED);
     let saved = json(response).await;
     let id = saved["id"].as_str().unwrap();
-    let response = app
-        .clone()
-        .oneshot(upload(
-            "PUT",
-            &format!("/api/plates/{id}"),
-            "Invalid",
-            "not STL",
-        ))
-        .await
-        .unwrap();
+    let response=app.clone().oneshot(Request::builder().method("PUT").uri(format!("/api/plates/{id}"))
+        .header("content-type","application/json").body(Body::from(serde_json::json!({"name":"Invalid","version":saved["version"],"models":[{"id":saved["models"][0]["id"],"name":"parts/box.stl","source":null,"quantity":0}]}).to_string())).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(json(response).await["error"].is_string());
     for path in [

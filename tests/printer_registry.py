@@ -60,7 +60,7 @@ def main():
         def queue(id): return api(f'/api/queue?printer_id={id}')
         def command(id,action,expected=200):
             view=queue(id)
-            return api(f'/api/queue?printer_id={id}',dict(generation=view['generation'],request_id=view['request_id'],action=action),expected=expected)
+            return api(f'/api/queue?printer_id={id}',dict(epoch=view['epoch'],generation=view['generation'],request_id=view['request_id'],action=action),expected=expected)
         try:
             start()
             assert api('/api/printers')==[]
@@ -93,25 +93,36 @@ def main():
             assert status(ids[0])['print']['percent']==0 and status(ids[1])['print']['percent']==17
             api('/api/printer/status',expected=409)
             api('/api/printer/status?printer_id=missing',expected=404)
-            add=dict(type='add',plate_id=plate_id,revision=revision,ams_slot=0)
-            command(ids[1],add,400) # P1S print data must never run on an A1 mini .2 nozzle.
+            material=api('/api/filaments',dict(name='PLA for routing',vendor='Fixture',material='PLA',color='FFFFFFFF',bambu_filament_id=None),expected=201)
+            api(f'/api/filaments/{material["id"]}/settings',dict(machine_profile_key=p1,base_profile_key=p1_profiles['defaults']['filament'],overrides_json={}),expected=201)
+            slots=[]
+            for id in ids:
+                slot=next(s for s in api(f'/api/printers/{id}/ams')['slots'] if s['ams_id']==0 and s['slot_index']==0)
+                api(f'/api/printers/{id}/ams/{slot["id"]}',dict(revision=slot['revision'],filament_id=material['id']),'PUT',204);slots.append(slot)
+            spec=dict(ams_slot_id=slots[1]['id'],filament_id=material['id'],required_machine_profile_key=p1,process_profile_key=p1_profiles['defaults']['process'],bed_type=p1_profiles['defaults']['bed'])
+            add=dict(type='add',plate_id=plate_id,specification=spec)
+            command(ids[0],add,400) # A slot belongs to exactly one printer.
+            view=command(ids[1],add);job=view['waiting'][0]
+            assert job['hold_reason'] and not view['allowed']['next']
+            command(ids[1],dict(type='next',expected_job=job['id'],removed_job=None,cleared=True),409)
             changed=copy.deepcopy(settings[1]);changed.update(machine_profile_key=p1,default_process_profile_key=p1_profiles['defaults']['process'],access_code='',tls_certificate='')
-            api('/api/printers/'+ids[1],changed,'PUT')
+            api('/api/printers/'+ids[1],changed,'PUT') # Waiting jobs do not prevent a registered nozzle change.
             until(lambda:len(brokers[1].requests)==2);brokers[1].send(full)
             until(lambda:status(ids[1])['ready_to_print'])
-            view=command(ids[1],add)
-            assert len(view['waiting'])==1 and queue(ids[0])['waiting']==[]
+            view=queue(ids[1]);assert len(view['waiting'])==1 and queue(ids[0])['waiting']==[]
+            assert view['waiting'][0]['required_machine_profile_key']==p1
             api('/api/printers/'+ids[1],method='DELETE',expected=409)
-            api('/api/printers/'+ids[1],settings[1],'PUT',409)
             changed['name']='Second edited';api('/api/printers/'+ids[1],changed,'PUT')
-            assert len(queue(ids[1])['waiting'])==1 and len(brokers[1].requests)==2
-            command(ids[1],dict(type='next',expected_job=view['waiting'][0]['id'],cleared=True))
-            until(lambda:len(brokers[1].prints)==1)
-            assert len(ftps[1].uploads)==1 and not brokers[0].prints and not ftps[0].uploads
-            api('/api/plates/'+plate_id+'/print?printer_id='+ids[0],dict(revision=revision,ams_slot=0),expected=202)
-            until(lambda:len(brokers[0].prints)==1)
-            assert len(ftps[0].uploads)==1
-            api('/api/printers/'+ids[0],method='DELETE',expected=409)
+            command(ids[1],dict(type='next',expected_job=job['id'],removed_job=None,cleared=True))
+            api('/api/printers/'+ids[1],settings[1],'PUT',409)
+            spec=copy.deepcopy(spec);spec['ams_slot_id']=slots[0]['id']
+            other=command(ids[0],dict(type='add',plate_id=plate_id,specification=spec))['waiting'][0]
+            command(ids[0],dict(type='next',expected_job=other['id'],removed_job=None,cleared=True))
+            until(lambda:len(brokers[1].prints)==len(brokers[0].prints)==1,60)
+            assert [len(f.uploads) for f in ftps]==[1,1]
+            for id,peer in zip(ids,ftps):
+                current=queue(id)['current'];assert peer.contents[0]==(store/current['artifact_path']/'print.gcode.3mf').read_bytes()
+                api('/api/printers/'+id,method='DELETE',expected=409)
             stop()
             env['P1_IP']='not-a-valid-IP-ignored-after-initialization'
             start()
@@ -120,7 +131,13 @@ def main():
             assert next(d for d in listed if d['id']==ids[1])['name']=='Second edited'
             time.sleep(.5)
             assert [len(b.prints) for b in brokers]==[1,1], 'restart replayed a print'
-            for id in ids: api('/api/printers/'+id,method='DELETE',expected=204)
+            for id,broker in zip(ids,brokers):
+                api('/api/printers/'+id,method='DELETE',expected=409)
+                until(lambda:len(broker.requests)>=2)
+                broker.send(full);until(lambda:status(id)['ready_to_print'])
+                job=queue(id)['current'];assert job['state']=='needs_attention'
+                command(id,dict(type='discard',expected_job=job['id'],cleared=True))
+                api('/api/printers/'+id,method='DELETE',expected=204)
             stop();start();assert api('/api/printers')==[], 'deleted registry was reimported'
             assert (store/'orca.sqlite3').stat().st_mode & 0o077 == 0
         finally:

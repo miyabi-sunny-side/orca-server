@@ -81,20 +81,23 @@ impl From<rusqlite::Error> for Error {
         }
     }
 }
+fn private_connection(root: &Path) -> Result<Connection> {
+    std::fs::create_dir_all(root)?;
+    let path = root.join("orca.sqlite3");
+    // The database contains access codes. Create with private permissions before SQLite opens it.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(&path)?;
+    Connection::open(&path).map_err(Error::from)
+}
 impl Database {
     pub fn open(root: &Path, initial: impl FnOnce() -> Result<Option<Device>>) -> Result<Self> {
-        std::fs::create_dir_all(root)?;
-        let path = root.join("orca.sqlite3");
-        // The database contains access codes. Create with private permissions before SQLite opens it.
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options.open(&path)?;
-        let mut connection = Connection::open(&path).map_err(Error::from)?;
+        let mut connection = private_connection(root)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(Error::from)?;
@@ -124,7 +127,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1 | 2 => {}
+            1..=3 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -154,6 +157,34 @@ impl Database {
                 CHECK(mapping_source IN ('unassigned','manual','automatic'))
             );
             PRAGMA user_version=2;").map_err(Error::from)?;
+        }
+        if version < 3 {
+            tx.execute_batch("ALTER TABLE printers ADD COLUMN queue_generation INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE printers ADD COLUMN queue_request TEXT;
+                CREATE TABLE plates (id TEXT PRIMARY KEY, name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1 CHECK(version>0));
+                CREATE TABLE plate_items (
+                    id TEXT PRIMARY KEY, plate_id TEXT NOT NULL REFERENCES plates(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL, name TEXT NOT NULL, source_kind TEXT NOT NULL CHECK(source_kind IN ('scad','upload')),
+                    model_key TEXT, original BLOB, quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 64),
+                    UNIQUE(plate_id,position),
+                    CHECK((source_kind='scad' AND model_key IS NOT NULL AND original IS NULL) OR
+                          (source_kind='upload' AND model_key IS NULL AND original IS NOT NULL))
+                );
+                CREATE UNIQUE INDEX ams_printer_slot ON ams_slots(printer_id,id);
+                CREATE TABLE print_jobs (
+                    id TEXT PRIMARY KEY, printer_id TEXT NOT NULL REFERENCES printers(id),
+                    plate_id TEXT NOT NULL REFERENCES plates(id), name TEXT NOT NULL,
+                    ams_slot_id TEXT NOT NULL, filament_id TEXT NOT NULL REFERENCES filaments(id),
+                    required_machine_profile_key TEXT NOT NULL, process_profile_key TEXT NOT NULL, bed_type TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('queued','preparing','printing','awaiting_removal','completed','needs_attention','cancelled')),
+                    position INTEGER NOT NULL, attempt_id TEXT, artifact_path TEXT, execution_json TEXT, attempt_json TEXT, last_error TEXT,
+                    FOREIGN KEY(printer_id,ams_slot_id) REFERENCES ams_slots(printer_id,id),
+                    FOREIGN KEY(filament_id,required_machine_profile_key) REFERENCES filament_settings(filament_id,machine_profile_key)
+                );
+                CREATE UNIQUE INDEX one_active_job ON print_jobs(printer_id)
+                    WHERE state IN ('preparing','printing','awaiting_removal','needs_attention');")?;
+            crate::plates::migrate(&tx, root)?;
+            tx.pragma_update(None, "user_version", 3)?;
         }
         tx.commit().map_err(Error::from)?;
         Ok(Self {
@@ -271,6 +302,7 @@ impl Database {
         let s = &device.settings;
         tx.execute("DELETE FROM ams_slots WHERE printer_id IN (SELECT id FROM printers WHERE id=?1 AND (host!=?2 OR serial!=?3 OR mqtt_port!=?4 OR access_code!=?5 OR tls_certificate!=?6))",
             params![device.id,s.host,s.serial,s.mqtt_port,s.access_code,s.tls_certificate])?;
+        tx.execute("UPDATE printers SET queue_generation=queue_generation+1,queue_request=NULL WHERE id=?1 AND (host!=?2 OR serial!=?3 OR access_code!=?4 OR tls_certificate!=?5 OR machine_profile_key!=?6 OR default_process_profile_key!=?7 OR bed_type!=?8 OR nozzle_material!=?9 OR mqtt_port!=?10 OR ftps_port!=?11 OR start_timeout_secs!=?12)",params![device.id,s.host,s.serial,s.access_code,s.tls_certificate,s.machine_profile_key,s.default_process_profile_key,s.bed_type,s.nozzle_material,s.mqtt_port,s.ftps_port,s.start_timeout_secs])?;
         save(&tx, device)?;
         tx.commit()?;
         Ok(())
@@ -291,7 +323,7 @@ impl Database {
 }
 fn save(connection: &Connection, device: &Device) -> Result<()> {
     let s = &device.settings;
-    connection.execute("INSERT INTO printers VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+    connection.execute("INSERT INTO printers(id,name,host,serial,access_code,tls_certificate,machine_profile_key,default_process_profile_key,bed_type,nozzle_material,mqtt_port,ftps_port,start_timeout_secs) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
         ON CONFLICT(id) DO UPDATE SET name=excluded.name,host=excluded.host,serial=excluded.serial,
         access_code=excluded.access_code,tls_certificate=excluded.tls_certificate,
         machine_profile_key=excluded.machine_profile_key,default_process_profile_key=excluded.default_process_profile_key,
@@ -343,6 +375,76 @@ mod tests {
         }
     }
     #[test]
+    fn migration_imports_references_and_uploads_once_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let revision = uuid::Uuid::new_v4().to_string();
+        let files = dir.path().join(&id).join("revisions").join(&revision);
+        std::fs::create_dir_all(&files).unwrap();
+        let bytes = include_bytes!("../tests/fixtures/triangle.stl");
+        std::fs::write(files.join("0.stl"), bytes).unwrap();
+        std::fs::write(files.join("1.stl"), bytes).unwrap();
+        let metadata = dir.path().join(&id).join("plate.json");
+        let plate = serde_json::json!({"format_version":1,"id":id,"revision":revision,"name":"Desk",
+            "settings":{"old":"ignored"},"project":null,"print":null,"models":[
+            {"name":"latest.stl","source":"parts/latest.stl","path":format!("revisions/{revision}/0.stl")},
+            {"name":"original.stl","source":null,"path":format!("revisions/{revision}/1.stl")}]});
+        std::fs::write(&metadata, serde_json::to_vec(&plate).unwrap()).unwrap();
+        // A corrupt published plate must abort the whole migration, without dropping originals.
+        let bad = dir.path().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&bad).unwrap();
+        std::fs::write(bad.join("plate.json"), "broken").unwrap();
+        assert!(Database::open(dir.path(), || Ok(None)).is_err());
+        assert_eq!(std::fs::read(files.join("1.stl")).unwrap(), bytes);
+        std::fs::remove_dir_all(bad).unwrap();
+        let db = Database::open(dir.path(), || Ok(None)).unwrap();
+        {
+            let c = db.connection().unwrap();
+            assert_eq!(
+                c.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                7
+            );
+            assert_eq!(
+                c.query_row("SELECT name FROM plates WHERE id=?1", [&id], |r| r
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "Desk"
+            );
+            assert_eq!(c.query_row("SELECT model_key FROM plate_items WHERE source_kind='scad' AND original IS NULL", [], |r|r.get::<_,String>(0)).unwrap(), "parts/latest.stl");
+            assert_eq!(
+                c.query_row(
+                    "SELECT original FROM plate_items WHERE source_kind='upload'",
+                    [],
+                    |r| r.get::<_, Vec<u8>>(0)
+                )
+                .unwrap(),
+                bytes
+            );
+            c.execute("UPDATE plates SET name='Edited' WHERE id=?1", [&id])
+                .unwrap();
+        }
+        drop(db);
+        std::fs::write(metadata, "old files must never be reimported").unwrap();
+        let db = Database::open(dir.path(), || panic!("no reimport")).unwrap();
+        let c = db.connection().unwrap();
+        assert_eq!(
+            c.query_row("SELECT name FROM plates", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "Edited"
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM plate_items", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
     fn new_ambiguous_catalog_entry_invalidates_automatic_mapping_without_a_report() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
@@ -373,7 +475,7 @@ mod tests {
     fn version_one_migration_preserves_printers_and_rolls_back_failed_ddl() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
-        db.connection().unwrap().execute_batch("DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;PRAGMA user_version=1;").unwrap();
+        db.connection().unwrap().execute_batch("DROP TABLE print_jobs;DROP TABLE plate_items;DROP TABLE plates;ALTER TABLE printers DROP COLUMN queue_request;ALTER TABLE printers DROP COLUMN queue_generation;DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;PRAGMA user_version=1;").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("no import during migration")).unwrap();
         assert_eq!(db.list().unwrap()[0].id, "stable-id");
@@ -382,9 +484,9 @@ mod tests {
         assert_eq!(
             c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
-        c.execute_batch("DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;CREATE TABLE ams_slots(conflict TEXT);PRAGMA user_version=1;").unwrap();
+        c.execute_batch("DROP TABLE print_jobs;DROP TABLE plate_items;DROP TABLE plates;ALTER TABLE printers DROP COLUMN queue_request;ALTER TABLE printers DROP COLUMN queue_generation;DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;CREATE TABLE ams_slots(conflict TEXT);PRAGMA user_version=1;").unwrap();
         drop(c);
         drop(db);
         assert!(Database::open(dir.path(), || panic!("no import")).is_err());

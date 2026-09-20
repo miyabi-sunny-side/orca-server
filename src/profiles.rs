@@ -179,22 +179,28 @@ impl Profiles {
         Ok(profile)
     }
 
-    pub fn write(&self, selection: &Selection, directory: &Path) -> Result<()> {
+    pub(crate) fn resolved(
+        &self,
+        selection: &Selection,
+    ) -> Result<BTreeMap<String, Map<String, Value>>> {
         if !BEDS.contains(&selection.bed.as_str()) {
             return Err(Error::Invalid("Unknown bed type"));
         }
-        for (filename, profile) in [
-            ("printer.json", self.machine(&selection.machine)?),
+        Ok(BTreeMap::from([
+            ("printer.json".into(), self.machine(&selection.machine)?),
             (
-                "process.json",
+                "process.json".into(),
                 selectable(&self.process, &selection.process, &selection.machine)?,
             ),
             (
-                "filament.json",
+                "filament.json".into(),
                 selectable(&self.filament, &selection.filament, &selection.machine)?,
             ),
-        ] {
-            serde_json::to_writer(fs::File::create(directory.join(filename))?, &profile)
+        ]))
+    }
+    pub fn write(&self, selection: &Selection, directory: &Path) -> Result<()> {
+        for (name, profile) in self.resolved(selection)? {
+            serde_json::to_writer(fs::File::create(directory.join(name))?, &profile)
                 .map_err(std::io::Error::other)?;
         }
         Ok(())

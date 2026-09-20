@@ -1,9 +1,24 @@
-export type Job = {
+export type Specification = {
+  ams_slot_id: string;
+  filament_id: string;
+  required_machine_profile_key: string;
+  process_profile_key: string;
+  bed_type: string;
+};
+export type Job = Specification & {
   id: string;
   plate_id: string;
-  revision: string;
   name: string;
-  ams_slot: number;
+  state:
+    | "queued"
+    | "preparing"
+    | "printing"
+    | "awaiting_removal"
+    | "needs_attention";
+  attempt_id: string | null;
+  artifact_path: string | null;
+  last_error: string | null;
+  hold_reason?: string | null;
 };
 type Ams = {
   units: {
@@ -24,23 +39,28 @@ export type Printer = {
   ams: Ams | null;
 };
 export type QueueState = {
+  epoch: string;
   generation: number;
   request_id: string;
   allowed: { next: boolean; retry: boolean; discard: boolean };
   waiting: Job[];
-  current: {
-    job: Job;
-    phase: "starting" | "printing" | "awaiting_removal" | "needs_attention";
-    message: string | null;
-  } | null;
+  current: Job | null;
   printer: Printer;
 };
 export type Action =
-  | { type: "add"; plate_id: string; revision: string; ams_slot: number }
+  | { type: "add"; plate_id: string; specification: Specification }
+  | { type: "edit"; job_id: string; specification: Specification }
   | { type: "move"; job_id: string; index: number }
   | { type: "remove"; job_id: string }
-  | { type: "next" | "retry" | "discard"; expected_job: string; cleared: true };
+  | {
+      type: "next";
+      expected_job: string;
+      removed_job: string | null;
+      cleared: true;
+    }
+  | { type: "retry" | "discard"; expected_job: string; cleared: true };
 export type Command = {
+  epoch: string;
   generation: number;
   request_id: string;
   action: Action;
@@ -71,12 +91,34 @@ export function printerText(printer: Printer) {
     : "プリンターの終了・復帰を待っています";
 }
 export const phaseText = {
-  starting: "転送・開始確認中",
+  queued: "待機中",
+  preparing: "最新モデルの取得・配置・スライス・開始確認中",
   printing: "印刷中",
   awaiting_removal: "完了 · 取り外し待ち",
   needs_attention: "確認が必要です",
 };
 export const failureText: Record<string, string> = {
+  "Wait for a current, ready printer report":
+    "プリンターの同期・待機状態を確認中です。",
+  "Required machine or nozzle differs from the registered configuration":
+    "要求する機種・ノズルが登録値と異なります。機器または待機設定を確認してください。",
+  "Selected AMS slot does not contain the planned material":
+    "AMSの現在の材料が使用予定と異なるか、装填を確認できません。",
+  "Selected AMS slot is not confirmed present":
+    "AMSスロットの装填を確認できません。",
+  "Material is incompatible with the registered nozzle":
+    "材料が登録したノズルの径・材質に対応していません。",
+  "Server restarted; inspect the printer before another start":
+    "再起動前の開始結果を確認できません。本体を確認してください。自動再送はしません。",
+  "scad-live returned an unsuccessful response":
+    "最新モデルを取得できません。SCADのモデルを確認してください。",
+  "scad-live request failed":
+    "SCADへ接続できません。古いデータでは印刷していません。",
+  "AMS assignment or material changed during preparation":
+    "準備中にAMS割当または材料が変わりました。",
+  "Printer status or selected AMS changed during transfer; no start command was sent":
+    "転送中に機器またはAMSの状態が変わりました。開始命令は送っていません。",
+
   "Selected AMS tray is absent, unknown or has a different material":
     "選択したAMSの材料・装填状態が合いません。本体を確認してください。",
   "FTPS transfer failed or timed out; no start command was sent":

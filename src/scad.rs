@@ -1,4 +1,4 @@
-use crate::plates::{Error, Input, MAX_UPLOAD, ModelInput, Result, valid_model_name};
+use crate::plates::{Error, Result, valid_model_name};
 use axum::{
     Json, Router,
     extract::{Query, State, rejection::JsonRejection},
@@ -45,38 +45,13 @@ async fn list_models(
     )))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ImportRequest {
-    name: String,
-    models: Vec<String>,
-    plate_id: Option<String>,
-    #[serde(default)]
-    settings: serde_json::Map<String, serde_json::Value>,
-}
-
 async fn import(
     State(state): State<ImportState>,
-    payload: std::result::Result<Json<ImportRequest>, JsonRejection>,
+    payload: std::result::Result<Json<crate::plates::Edit>, JsonRejection>,
 ) -> Result<(StatusCode, Json<crate::plates::Plate>)> {
-    let Json(payload) = payload.map_err(|_| Error::Invalid("Invalid import request"))?;
-    let source = require_source(state.source)?;
-    if let Some(id) = payload.plate_id.clone() {
-        let store = state.store.clone();
-        crate::plate_api::blocking(move || store.get(&id)).await?;
-    }
-    let input = source
-        .input(payload.name, payload.models, payload.settings.into())
-        .await?;
-    let status = if payload.plate_id.is_some() {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    let plate =
-        crate::plate_api::blocking(move || state.store.save(payload.plate_id.as_deref(), input))
-            .await?;
-    Ok((status, Json(plate)))
+    let Json(payload) = payload.map_err(|_| Error::Invalid("Invalid composition"))?;
+    let plate = crate::plate_api::blocking(move || state.store.edit(None, payload)).await?;
+    Ok((StatusCode::CREATED, Json(plate)))
 }
 
 #[derive(Clone)]
@@ -136,40 +111,13 @@ impl Source {
         Ok(paths)
     }
 
-    /// Copies the selected model bytes. No background synchronization is started.
-    ///
+    /// Fetch the current STL for one reference; no cached copy is used.
     /// # Errors
-    /// Rejects invalid selections, transfer failures, and payloads above the plate limit.
-    pub async fn input(
-        &self,
-        name: String,
-        models: Vec<String>,
-        settings: serde_json::Value,
-    ) -> Result<Input> {
-        crate::plates::validate_metadata(&name, &settings)?;
-        if models.is_empty() || models.len() > 64 {
-            return Err(Error::Invalid("Select 1–64 STL models"));
-        }
-        let urls: Vec<_> = models
-            .iter()
-            .map(|path| model_url(&self.base, path))
-            .collect::<Result<_>>()?;
-        let mut remaining = MAX_UPLOAD;
-        let mut imported = Vec::new();
-        for (path, url) in models.into_iter().zip(urls) {
-            let data = self.fetch(url, remaining).await?;
-            remaining -= data.len();
-            imported.push(ModelInput {
-                name: path.clone(),
-                source: Some(path),
-                data,
-            });
-        }
-        Ok(Input {
-            name,
-            models: imported,
-            settings,
-        })
+    /// Rejects invalid paths, missing/oversized models and malformed STL.
+    pub async fn model(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
+        let bytes = self.fetch(model_url(&self.base, path)?, limit).await?;
+        crate::plates::validate_stl(&bytes)?;
+        Ok(bytes)
     }
 
     async fn fetch(&self, url: Url, limit: usize) -> Result<Vec<u8>> {
@@ -325,30 +273,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_http_models_are_snapshots_until_explicit_reimport() {
+    async fn each_preparation_fetches_current_stl_and_never_falls_back() {
         let fixture = Fixture::default();
-        let stl = include_bytes!("../tests/fixtures/triangle.stl").to_vec();
-        for name in ["box one.stl", "parts/箱%#?.stl"] {
-            fixture
-                .files
-                .lock()
-                .unwrap()
-                .insert(name.into(), stl.clone());
-        }
+        let first = include_bytes!("../tests/fixtures/triangle.stl").to_vec();
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("box.stl".into(), first.clone());
         let server = fixture_server(fixture.clone()).await;
         let source = Source::new(&server.base).unwrap();
-        let models = source.models().await.unwrap();
-        assert_eq!(models, vec!["box one.stl", "parts/箱%#?.stl"]);
-        let root = tempfile::tempdir().unwrap();
-        let store = crate::plates::Store::open(root.path()).unwrap();
-        let input = source
-            .input("Imported".into(), models.clone(), serde_json::json!({}))
-            .await
-            .unwrap();
-        let saved = store.save(None, input).unwrap();
-        assert_eq!(saved.models.len(), 2);
-        assert_eq!(saved.models[0].source.as_deref(), Some("box one.stl"));
-        let changed = String::from_utf8(stl.clone())
+        assert_eq!(
+            source
+                .model("box.stl", crate::plates::MAX_UPLOAD)
+                .await
+                .unwrap(),
+            first
+        );
+        let changed = String::from_utf8(first)
             .unwrap()
             .replace("vertex 1 0 0", "vertex 2 0 0")
             .into_bytes();
@@ -356,41 +298,32 @@ mod tests {
             .files
             .lock()
             .unwrap()
-            .insert("box one.stl".into(), changed.clone());
+            .insert("box.stl".into(), changed.clone());
         assert_eq!(
-            store.read_file(&saved.id, &saved.models[0].path).unwrap(),
-            stl
-        );
-        let input = source
-            .input("Updated".into(), models.clone(), serde_json::json!({}))
-            .await
-            .unwrap();
-        let updated = store.save(Some(&saved.id), input).unwrap();
-        assert_eq!(
-            store
-                .read_file(&updated.id, &updated.models[0].path)
+            source
+                .model("box.stl", crate::plates::MAX_UPLOAD)
+                .await
                 .unwrap(),
             changed
         );
-        fixture.files.lock().unwrap().remove("parts/箱%#?.stl");
+        fixture.files.lock().unwrap().clear();
         assert!(
             source
-                .input("Failure".into(), models.clone(), serde_json::json!({}))
+                .model("box.stl", crate::plates::MAX_UPLOAD)
                 .await
                 .is_err()
         );
-        assert_eq!(store.get(&updated.id).unwrap(), updated);
         fixture
             .files
             .lock()
             .unwrap()
-            .insert("parts/箱%#?.stl".into(), b"broken STL".to_vec());
-        let broken = source
-            .input("Broken".into(), models, serde_json::json!({}))
-            .await
-            .unwrap();
-        assert!(store.save(Some(&updated.id), broken).is_err());
-        assert_eq!(store.get(&updated.id).unwrap(), updated);
+            .insert("box.stl".into(), b"broken".to_vec());
+        assert!(
+            source
+                .model("box.stl", crate::plates::MAX_UPLOAD)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -415,25 +348,9 @@ mod tests {
                 .await,
             Err(Error::Upstream("scad-live response exceeds the size limit"))
         ));
-        assert!(
-            source
-                .input(
-                    "Redirect".into(),
-                    vec!["redirect.stl".into()],
-                    serde_json::json!({})
-                )
-                .await
-                .is_err()
-        );
+        assert!(source.model("redirect.stl", 1024).await.is_err());
         assert_eq!(fixture.redirected.load(Ordering::SeqCst), 0);
-        for selection in [vec![], vec!["../bad.stl".into()], vec!["x.stl".into(); 65]] {
-            assert!(
-                source
-                    .input("Invalid".into(), selection, serde_json::json!({}))
-                    .await
-                    .is_err()
-            );
-        }
+        assert!(source.model("../bad.stl", 1024).await.is_err());
         let html =
             serve(Router::new().route("/api/models", get(|| async { "<html>not JSON</html>" })))
                 .await;
@@ -456,83 +373,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_api_lists_creates_reimports_and_retains_data_on_failure() {
-        let fixture = Fixture::default();
-        fixture.files.lock().unwrap().insert(
-            "box one.stl".into(),
-            include_bytes!("../tests/fixtures/triangle.stl").to_vec(),
-        );
-        let server = fixture_server(fixture.clone()).await;
+    async fn composition_api_saves_references_without_downloading_them() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::plates::Store::open(root.path()).unwrap();
-        let app = crate::app_with_source(store.clone(), Some(Source::new(&server.base).unwrap()));
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/scad/models")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Vec<String>>(&bytes).unwrap(),
-            ["box one.stl"]
-        );
-        let request = |value: serde_json::Value| {
-            Request::builder()
-                .method("POST")
-                .uri("/api/plates/import")
-                .header("content-type", "application/json")
-                .body(Body::from(value.to_string()))
-                .unwrap()
+        let app = crate::app_with_store(store.clone());
+        let request = |source: &str| {
+            Request::builder().method("POST").uri("/api/plates/import")
+            .header("content-type","application/json").body(Body::from(serde_json::json!({
+                "name":"Reference", "models":[{"name":"part.stl","source":source,"quantity":2}]
+            }).to_string())).unwrap()
         };
         let response = app
             .clone()
-            .oneshot(request(
-                serde_json::json!({"name":"First", "models":["box one.stl"]}),
-            ))
+            .oneshot(request("parts/part.stl"))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let saved: crate::plates::Plate = serde_json::from_slice(&bytes).unwrap();
-        let response = app
-            .clone()
-            .oneshot(request(
-                serde_json::json!({"plate_id":saved.id,"name":"Updated", "models":["box one.stl"]}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let updated = store.get(&saved.id).unwrap();
-        assert_ne!(updated.revision, saved.revision);
-        fixture.files.lock().unwrap().clear();
-        let response = app
-            .clone()
-            .oneshot(request(
-                serde_json::json!({"plate_id":saved.id,"name":"Failure", "models":["box one.stl"]}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(store.get(&saved.id).unwrap(), updated);
-        let response = app
-            .clone()
-            .oneshot(request(
-                serde_json::json!({"name":"Failure", "models":["../x.stl"]}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let mut outside = request(serde_json::json!({"name":"Injected", "models":["box one.stl"]}));
+        let saved = store.list("").unwrap().remove(0);
+        assert_eq!(saved.models[0].quantity, 2);
+        assert!(store.read_file(&saved.id, &saved.models[0].id).is_err());
+        assert_eq!(
+            app.clone()
+                .oneshot(request("../bad.stl"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut outside = request("part.stl");
         outside
             .headers_mut()
             .insert("origin", "http://elsewhere.test".parse().unwrap());

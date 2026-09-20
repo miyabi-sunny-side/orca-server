@@ -1,5 +1,5 @@
 use crate::{
-    plates::{Error, Result, Store},
+    plates::{Error, Result},
     print_start::{self, Attempt, Phase},
     printer_state::State,
 };
@@ -386,13 +386,6 @@ pub struct Printer {
     inventory: Option<(crate::database::Database, crate::database::Device)>,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StartRequest {
-    pub revision: String,
-    pub ams_slot: u8,
-}
-
 impl Printer {
     /// Start the configured observation loop. Missing settings disable printing.
     /// # Errors
@@ -401,7 +394,13 @@ impl Printer {
         config: Option<Config>,
         inventory: Option<(crate::database::Database, crate::database::Device)>,
     ) -> std::result::Result<Self, &'static str> {
-        let state = Arc::new(Mutex::new(State::new(config.is_some())));
+        let mut initial = State::new(config.is_some());
+        if let Some((db, device)) = &inventory {
+            initial.start = db
+                .restore_attempt(&device.id)
+                .map_err(|_| "Cannot restore print state")?;
+        }
+        let state = Arc::new(Mutex::new(initial));
         let (starts, receiver) = mpsc::channel(1);
         let observation = if let Some(config) = &config {
             Some(Arc::new(Observation(
@@ -458,57 +457,40 @@ impl Printer {
         Ok((current, slots))
     }
 
-    /// Release an unknown request after the operator has inspected a ready printer.
-    /// # Errors
-    /// Refuses active, mismatched or unconfirmed requests.
-    pub async fn resolve(&self, id: &str, checked_printer: bool) -> Result<Attempt> {
-        if !checked_printer {
-            return Err(Error::Invalid("Confirm that the printer was checked"));
-        }
+    pub(crate) async fn forget_retired(&self) -> Result<()> {
         let mut state = self.state.lock().await;
-        let status = state.status(now());
-        let attempt = state
-            .start
-            .as_mut()
-            .filter(|a| a.id == id)
-            .ok_or(Error::NotFound)?;
-        attempt.resolve(&status)?;
-        Ok(attempt.clone())
+        if let (Some((db, device)), Some(attempt)) = (&self.inventory, &state.start) {
+            let active:bool=db.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM print_jobs WHERE printer_id=?1 AND attempt_id=?2 AND state NOT IN ('completed','cancelled'))",rusqlite::params![device.id,attempt.id],|r|r.get(0))?;
+            if !active {
+                state.start = None;
+            }
+        }
+        Ok(())
     }
 
-    /// Upload a saved revision and request one print. HTTP cancellation does not retry it.
-    /// # Errors
-    /// Rejects unknown/busy printers, unresolved requests, invalid artifacts and AMS choices.
-    pub async fn start(&self, store: Store, id: String, request: StartRequest) -> Result<Attempt> {
+    /// Upload a durably reserved execution. The MQTT path persists the send barrier separately.
+    pub(crate) async fn start(&self, attempt: Attempt, bytes: Vec<u8>) -> Result<Attempt> {
         let config = self
             .config
             .clone()
             .ok_or(Error::Unavailable("Printer is not configured"))?;
-        let machine = config.machine.clone();
-        let (plate, bytes, material) = crate::plate_api::blocking(move || {
-            let plate = store.get(&id)?;
-            if plate.revision != request.revision {
-                return Err(Error::Conflict("Plate revision changed"));
-            }
-            let path = plate
-                .print
-                .as_ref()
-                .ok_or(Error::Conflict("Slice the plate before printing"))?;
-            let bytes = store.read_file(&id, path)?;
-            let material = print_start::material_for(&bytes, &machine)?;
-            Ok((plate, bytes, material))
-        })
-        .await?;
+        let (db, device) = self
+            .inventory
+            .as_ref()
+            .ok_or(Error::Unavailable("Printer registry is unavailable"))?;
         let mut state = self.state.lock().await;
-        if state.start.as_ref().is_some_and(Attempt::blocks_start) {
-            return Err(Error::Conflict(
-                "A start request is still active or unresolved",
-            ));
-        }
         let status = state.status(now());
         print_start::check_nozzle(&status, &config.nozzle_diameter, &config.nozzle_material)?;
-        print_start::check_ready(&status, request.ams_slot, &material)?;
-        let attempt = Attempt::new(plate.id, plate.revision, request.ams_slot, material);
+        db.check_attempt(device, &attempt, &status)?;
+        if state.start.as_ref().is_some_and(|a| {
+            matches!(
+                a.phase,
+                Phase::Uploading | Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing
+            )
+        }) {
+            return Err(Error::Conflict("A start request is still active"));
+        }
+        db.persist_attempt(&device.id, &attempt)?;
         let epoch = state.epoch;
         state.start = Some(attempt.clone());
         drop(state);
@@ -535,8 +517,20 @@ impl Printer {
                     "Printer command channel unavailable; no start command was sent",
                 );
             }
+            persist(printer.inventory.as_ref(), state.start.as_ref());
         });
         Ok(attempt)
+    }
+}
+
+fn persist(
+    inventory: Option<&(crate::database::Database, crate::database::Device)>,
+    attempt: Option<&Attempt>,
+) {
+    if let (Some((db, device)), Some(attempt)) = (inventory, attempt)
+        && db.persist_attempt(&device.id, attempt).is_err()
+    {
+        tracing::warn!("Print observation could not be saved; retrying on the next report or tick");
     }
 }
 
@@ -640,6 +634,7 @@ async fn run(
                         }
                         if let Ok(value) = serde_json::from_slice(&message.payload)
                             && let Some(start) = &mut state.start { start.observe(&value, &status); }
+                        persist(inventory.as_ref(),state.start.as_ref());
                     }
                     Ok(_) => {},
                     Err(_) => break, // Never log library errors or packets: they may contain credentials.
@@ -649,11 +644,20 @@ async fn run(
                     let status = state.status(now());
                     let same_connection = state.epoch == epoch && subscribed;
                     if let Some(start) = state.start.as_mut().filter(|s| s.id == id && s.phase == Phase::Uploading) {
-                        if !same_connection || print_start::check_ready(&status, start.ams_slot, &start.material).is_err() || print_start::check_nozzle(&status,&config.nozzle_diameter,&config.nozzle_material).is_err() {
-                            start.fail(Phase::NotSent, "Printer status or selected AMS changed during transfer; no start command was sent");
-                        } else if client.try_publish(&request, QoS::AtMostOnce, false, start.command().to_string()).is_err() {
-                            start.fail(Phase::NotSent, "MQTT publish was not queued; no start command was sent");
-                        } else { start.sent(now()); }
+                        let admitted=inventory.as_ref().is_some_and(|(db,device)|db.check_attempt(device,start,&status).is_ok());
+                        if !same_connection || !admitted || print_start::check_nozzle(&status,&config.nozzle_diameter,&config.nozzle_material).is_err() {
+                            start.fail(Phase::NotSent,"Printer status or selected AMS changed during transfer; no start command was sent");
+                        } else {
+                            // Commit BEFORE enqueueing MQTT. A crash in either side of this barrier is never replayed.
+                            start.sent(now());
+                            let saved=inventory.as_ref().is_some_and(|(db,device)|db.persist_attempt(&device.id,start).is_ok());
+                            if !saved {
+                                start.fail(Phase::NotSent,"Cannot persist the start request; no start command was sent");
+                            } else if client.try_publish(&request,QoS::AtMostOnce,false,start.command().to_string()).is_err() {
+                                start.fail(Phase::NotSent,"MQTT publish was not queued; no start command was sent");
+                            }
+                        }
+                        persist(inventory.as_ref(),Some(start));
                     }
                 }
                 _ = tick.tick() => {
@@ -663,6 +667,7 @@ async fn run(
                         let pending = matches!(start.phase, Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing);
                         start.tick(now(), start_timeout);
                         if !synchronized { start.disconnected(); }
+                        persist(inventory.as_ref(),Some(start));
                         // Drop this client's queue so timed-out writes cannot be sent later.
                         if pending && start.phase == Phase::Unknown { break; }
                     }
@@ -672,7 +677,11 @@ async fn run(
                 }
             }
         }
-        state.lock().await.disconnected();
+        {
+            let mut state = state.lock().await;
+            state.disconnected();
+            persist(inventory.as_ref(), state.start.as_ref());
+        }
         tracing::warn!(
             "P1 MQTT disconnected; check address, access code and pinned certificate; retrying"
         );

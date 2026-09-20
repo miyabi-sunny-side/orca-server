@@ -38,7 +38,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let registry = orca_server::registry::router(&root, plates.clone(), slicer.clone())?;
+    let registry =
+        orca_server::registry::router(&root, plates.clone(), slicer.clone(), source.clone())?;
     info!(%bind_addr, "server listening");
     axum::serve(
         listener,

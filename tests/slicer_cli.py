@@ -1,16 +1,10 @@
 """Real OrcaSlicer integration: python3 tests/slicer_cli.py APPDIR OUTPUT_DIR."""
-import concurrent.futures
 import io
 import json
 import os
 from pathlib import Path
-import shlex
-import socket
 import struct
-import subprocess
 import sys
-import tempfile
-import time
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -48,169 +42,58 @@ def boxes(data):
 
 
 def main():
-    appdir = Path(sys.argv[1]).resolve()
-    evidence = Path(sys.argv[2]).resolve()
-    evidence.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='orca-cli-check-') as tmp:
-        tmp = Path(tmp)
-        wrapper = tmp / 'app'
-        wrapper.mkdir()
-        (wrapper / 'resources').symlink_to(appdir / 'resources', target_is_directory=True)
-        mode = tmp / 'mode'
-        pid = tmp / 'child.pid'
-        mode.write_text('normal')
-        # The production command still executes the official binary. These two
-        # deliberate faults test our timeout/exit handling without a printer.
-        (wrapper / 'AppRun').write_text(
-            '#!/bin/sh\n' + f'mode=$(cat {shlex.quote(str(mode))})\n'
-            + 'case "$mode" in\nfail) exit 7;;\nsleep) '
-            + f'echo $$ > {shlex.quote(str(pid))}; exec sleep 30;;\nesac\n'
-            + f'exec {shlex.quote(str(appdir / "AppRun"))} "$@"\n')
-        (wrapper / 'AppRun').chmod(0o700)
-        with socket.socket() as sock:
-            sock.bind(('127.0.0.1', 0))
-            port = sock.getsockname()[1]
-        base = f'http://127.0.0.1:{port}'
-        env = dict(os.environ, PORT=str(port), PLATES_DIR=str(tmp / 'plates'), ORCA_APPDIR=str(wrapper), ORCA_TIMEOUT_SECS='2')
-        env.pop('SCAD_LIVE_URL', None)
-        env.pop('DISPLAY', None)
-        env.pop('WAYLAND_DISPLAY', None)
-        log = (evidence / 'server.log').open('w')
-        server = subprocess.Popen([str(REPO / 'target/debug/orca-server')], cwd=tmp, env=env, stdout=log, stderr=log)
-
-        def request(path, data=None, headers=None):
-            req = urllib.request.Request(base + path, data=data, headers=headers or {})
-            try:
-                with urllib.request.urlopen(req, timeout=20) as response:
-                    return response.status, response.read()
-            except urllib.error.HTTPError as error:
-                return error.code, error.read()
-
-        def json_request(path, data=None, headers=None):
-            status, body = request(path, data, headers)
-            return status, json.loads(body)
-
-        def save(name, models, settings=None):
-            fields = [('name', None, name.encode()), ('settings', None, json.dumps(settings or {}).encode())]
-            fields += [("models", f'{index}.stl', model) for index, model in enumerate(models)]
-            body = b''
-            for field, filename, data in fields:
-                disposition = f'Content-Disposition: form-data; name="{field}"'
-                if filename:
-                    disposition += f'; filename="{filename}"'
-                body += b'--orca-boundary\r\n' + disposition.encode() + b'\r\n\r\n' + data + b'\r\n'
-            body += b'--orca-boundary--\r\n'
-            status, plate = json_request('/api/plates', body, {'Content-Type': 'multipart/form-data; boundary=orca-boundary'})
-            assert status == 201, (status, plate)
-            return plate
-
-        def slice_plate(plate):
-            return json_request(f'/api/plates/{plate["id"]}/slice', b'')
-
-        try:
-            for _ in range(100):
-                if server.poll() is not None:
-                    raise RuntimeError('Server exited; see server.log')
-                try:
-                    if request('/healthz')[0] == 200:
-                        break
-                except OSError:
-                    pass
-                time.sleep(.1)
-            else:
-                raise RuntimeError('Server did not start')
-            status, choices = json_request('/api/slicer/profiles')
-            assert status == 200 and choices['version'] == '2.4.2'
-            cube = (REPO / 'tests/fixtures/cube.stl').read_bytes()
-            saved = save('Two cubes', [cube, cube])
-            status, sliced = slice_plate(saved)
-            assert status == 200, (status, sliced)
-            downloaded = {}
-            for key in ('project', 'print'):
-                status, data = request(f'/api/plates/{saved["id"]}/files/{sliced[key]}')
-                assert status == 200
-                (evidence / Path(sliced[key]).name).write_bytes(data)
-                downloaded[key] = data
-            before, after = boxes(downloaded['project']), boxes(downloaded['print'])
-            assert len(before) == len(after) == 2
-            status, preview = json_request('/api/plates/' + saved['id'] + '/layout')
-            assert status == 200 and preview['revision'] == sliced['revision'], (status, preview)
-            assert sorted(item['bounds'] for item in preview['models']) == before
-            assert sorted(item['index'] for item in preview['models']) == [0, 1]
-            for bounds in before:
-                assert all(0 <= low < high <= limit for (low, high), limit in zip(bounds, [256, 256, 250])), bounds
-            assert any(before[0][axis][1] <= before[1][axis][0] or before[1][axis][1] <= before[0][axis][0] for axis in (0, 1)), before
-            assert all(abs(x-y) < .001 for a, b in zip(before, after) for c, d in zip(a, b) for x, y in zip(c, d)), (before, after)
-            z = zipfile.ZipFile(io.BytesIO(downloaded['print']))
-            assert len(z.read('Metadata/plate_1.gcode')) > 1000
-            assert not any(n.endswith('.gcode') for n in zipfile.ZipFile(io.BytesIO(downloaded['project'])).namelist())
-            selection = {'process': '0.16mm Optimal @BBL X1C', 'filament': 'Bambu PLA Basic @BBL X1C', 'bed': 'High Temp Plate'}
-            selected = save('Other settings', [cube], {'slicer': selection})
-            status, selected = slice_plate(selected)
-            assert status == 200 and selected['settings']['slicer'] == dict(selection, machine=choices['printer']), (status, selected)
-            for key in ('project', 'print'):
-                data = request(f'/api/plates/{selected["id"]}/files/{selected[key]}')[1]
-                settings = json.loads(zipfile.ZipFile(io.BytesIO(data)).read('Metadata/project_settings.config'))
-                assert settings['print_settings_id'] == selection['process']
-                assert settings['filament_settings_id'] == [selection['filament']]
-                assert settings['curr_bed_type'] == selection['bed']
-            a1 = 'Bambu Lab A1 mini 0.2 nozzle'
-            status, a1_choices = json_request('/api/slicer/profiles?machine=' + urllib.parse.quote(a1))
-            assert status == 200
-            a1_plate = save('A1 mini fine nozzle', [cube], {'slicer': a1_choices['defaults']})
-            status, a1_plate = slice_plate(a1_plate)
-            assert status == 200, (status, a1_plate)
-            status, preview = json_request('/api/plates/' + a1_plate['id'] + '/layout')
-            assert status == 200 and preview['bed'] == [[0, 180], [0, 180]], preview
-            for key in ('project', 'print'):
-                data = request(f'/api/plates/{a1_plate["id"]}/files/{a1_plate[key]}')[1]
-                settings = json.loads(zipfile.ZipFile(io.BytesIO(data)).read('Metadata/project_settings.config'))
-                assert settings['printer_settings_id'] == a1
-                assert settings['nozzle_diameter'] == ['0.2']
-                assert settings['print_settings_id'] == a1_choices['defaults']['process']
-            # Two 200 mm cubes require multiple plates; a 400 mm cube cannot fit.
-            for size, count in [(200, 2), (400, 1)]:
-                scaled = bytearray(cube)
-                for triangle in range(struct.unpack_from('<I', cube, 80)[0]):
-                    for offset in range(96 + triangle * 50, 132 + triangle * 50, 4):
-                        coordinate = struct.unpack_from('<f', cube, offset)[0]
-                        struct.pack_into('<f', scaled, offset, coordinate * size / 20)
-                impossible = save('Does not fit', [scaled] * count)
-                status, error = slice_plate(impossible)
-                assert status in (400, 502), (size, status, error)
-                if size == 200:
-                    assert status == 400 and 'fit together' in error['error'], (status, error)
-                assert json_request('/api/plates/' + impossible['id'])[1] == impossible
-            invalid = save('Non-solid triangle', [(REPO / 'tests/fixtures/triangle.stl').read_bytes()])
-            assert slice_plate(invalid)[0] in (400, 502)
-            mode.write_text('fail')
-            assert slice_plate(sliced)[0] == 502
-            assert json_request('/api/plates/' + sliced['id'])[1] == sliced
-            mode.write_text('sleep')
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                pending = executor.submit(slice_plate, sliced)
-                for _ in range(100):
-                    if pid.exists():
-                        break
-                    time.sleep(.01)
-                assert pid.exists()
-                assert slice_plate(sliced)[0] == 409
-                assert request('/healthz') == (200, b'ok\n')
-                assert pending.result()[0] == 504
-            assert not Path('/proc/' + pid.read_text().strip()).exists(), 'timed-out child is still alive'
-            assert json_request('/api/plates/' + sliced['id'])[1] == sliced
-            mode.write_text('normal')
-            assert slice_plate(sliced)[0] == 200, 'slot not released after failure'
-            assert json_request(f'/api/plates/{sliced["id"]}/slice', b'', {'Origin': 'https://untrusted.invalid'})[0] == 403
-            results = {'version': choices['version'], 'world_bounds': before, 'roundtrip_bounds': after, 'nondefault_settings': selection, 'headless': True, 'saved_project_only_resliced': True, 'multiple_plate_rejected': True, 'oversized_rejected': True, 'invalid_model_rejected': True, 'failure_preserves_plate': True, 'timeout_preserves_plate': True, 'timeout_child_reaped': True, 'busy_rejected': True, 'server_stays_alive': True}
-            results['a1_mini_02_profile_and_bed'] = True
-            (evidence / 'result.json').write_text(json.dumps(results, indent=2))
-            print(json.dumps(results))
-        finally:
-            server.terminate()
-            server.wait(timeout=10)
-            log.close()
+    from print_fixture import Rig, MACHINE, FILAMENT, PROCESS
+    from printer_mqtt import until
+    appdir=Path(sys.argv[1]).resolve();output=Path(sys.argv[2]).resolve();output.mkdir(parents=True,exist_ok=True)
+    binary=os.environ.get('ORCA_TEST_BINARY',str(REPO/'target/debug/orca-server'))
+    rig=Rig(binary,output,appdir=appdir);results={}
+    try:
+        rig.launch();rig.seed()
+        for index,machine in enumerate([MACHINE,'Bambu Lab A1 mini 0.2 nozzle']):
+            selection=rig.api('/api/slicer/profiles?machine='+urllib.parse.quote(machine))['defaults']
+            if index:
+                settings={k:v for k,v in rig.api('/api/printers/p1').items() if k not in ('id','status','machine','configuration_error')}
+                settings.update(machine_profile_key=machine,default_process_profile_key=selection['process'])
+                requests=len(rig.broker.requests)
+                rig.api('/api/printers/p1',settings,'PUT');until(lambda:len(rig.broker.requests)>requests);rig.idle()
+                choices=rig.api(f'/api/filaments/{rig.materials[1]["id"]}/profiles?machine='+urllib.parse.quote(machine))
+                base=next(p['key'] for p in choices if p['key'].startswith('Generic PLA'))
+                rig.api(f'/api/filaments/{rig.materials[1]["id"]}/settings',dict(machine_profile_key=machine,base_profile_key=base,overrides_json={'nozzle_temperature':215}),expected=201)
+            spec=rig.specification();spec.update(required_machine_profile_key=machine,process_profile_key=selection['process'])
+            job=rig.send(dict(type='add',plate_id=rig.plate['id'],specification=spec))['waiting'][-1]
+            rig.next(job);until(lambda:len(rig.broker.prints)==index+1,90)
+            current=rig.api()['current'];directory=rig.store/current['artifact_path']
+            project=(directory/'project.3mf').read_bytes();printed=(directory/'print.gcode.3mf').read_bytes()
+            assert rig.ftp.contents[-1]==printed
+            before,after=boxes(project),boxes(printed);assert len(before)==len(after)==2
+            size=256 if index==0 else 180
+            assert all(0<=low<high<=limit for box in before for (low,high),limit in zip(box,[size,size,250 if index==0 else 180]))
+            assert any(before[0][axis][1]<=before[1][axis][0] or before[1][axis][1]<=before[0][axis][0] for axis in (0,1)),before
+            assert all(abs(x-y)<.001 for a,b in zip(before,after) for c,d in zip(a,b) for x,y in zip(c,d))
+            with zipfile.ZipFile(io.BytesIO(printed)) as archive:
+                settings=json.loads(archive.read('Metadata/project_settings.config'))
+                gcode=archive.read('Metadata/plate_1.gcode')
+                assert len(gcode)>1000 and b'215' in gcode
+                assert settings['printer_settings_id']==machine
+                assert settings['nozzle_diameter']==['0.4' if index==0 else '0.2']
+                assert settings['nozzle_temperature'][0]=='215',settings['nozzle_temperature']
+            assert not any(n.endswith('.gcode') for n in zipfile.ZipFile(io.BytesIO(project)).namelist())
+            (output/f'{index}-project.3mf').write_bytes(project);(output/f'{index}-print.gcode.3mf').write_bytes(printed)
+            rig.report('RUNNING');rig.phase('printing');rig.report('FINISH');rig.phase('awaiting_removal')
+            rig.send(dict(type='discard',expected_job=job['id'],cleared=True))
+        results.update(real_cli_version='2.4.2',references_resolved_at_start=True,quantity_arranged_without_overlap=True,registered_material_override_applied=True,p1_04_and_a1mini_02_profiles_preserved=True,uploaded_exact_execution_artifact=True)
+        # A plate that cannot fit must never send a start command or consume the waiting successor.
+        cube=bytearray(rig.files['parts/cube.stl'])
+        for triangle in range(struct.unpack_from('<I',cube,80)[0]):
+            for offset in range(96+triangle*50,132+triangle*50,4):
+                struct.pack_into('<f',cube,offset,struct.unpack_from('<f',cube,offset)[0]*20)
+        rig.files['parts/cube.stl']=bytes(cube)
+        job=rig.send(dict(type='add',plate_id=rig.plate['id'],specification=spec))['waiting'][-1]
+        rig.next(job);rig.phase('needs_attention');assert len(rig.broker.prints)==2
+        assert rig.api('/api/plates/'+rig.plate['id'])==rig.plate
+        results['impossible_layout_preserves_composition_without_start']=True
+    finally:rig.close()
+    (output/'result.json').write_text(json.dumps(results,indent=2));print(json.dumps(results))
 
 
-if __name__ == '__main__':
-    main()
+if __name__=='__main__':main()

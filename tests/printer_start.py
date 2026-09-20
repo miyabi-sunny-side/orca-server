@@ -5,19 +5,13 @@ Only disposable loopback peers are used; no hardware print is started.
 """
 import copy
 import json
-import os
 from pathlib import Path
 import queue
 import socket
 import ssl
-import subprocess
 import sys
-import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
-import uuid
 from printer_mqtt import Broker, SERIAL, SECRET, until, certificate
 
 REPO = Path(__file__).resolve().parents[1]
@@ -47,6 +41,7 @@ class Ftps:
         self.port = self.socket.getsockname()[1]
         self.actions = queue.Queue()
         self.uploads = []
+        self.contents = []
         self.errors = []
         self.tls_failures = 0
         self.gate = threading.Event()
@@ -112,7 +107,7 @@ class Ftps:
                                 if not chunk:
                                     break
                                 content += chunk
-                        assert content == ARTIFACT, 'uploaded bytes differ from the saved print'
+                        self.contents.append(content)
                         self.uploads.append(arg)
                         try:
                             action = self.actions.get_nowait()
@@ -144,142 +139,52 @@ class Ftps:
 
 
 def main():
-    binary = str(Path(sys.argv[1]).resolve())
-    output = Path(sys.argv[2]).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    version = sys.argv[3] if len(sys.argv) > 3 else 'v3'
-    assert version in ('v1', 'v3')
-    with tempfile.TemporaryDirectory(prefix='orca-start-') as directory:
-        tmp = Path(directory)
-        for name in ['trusted', 'other']:
-            certificate(tmp, name, version)
-        plate_id, revision = str(uuid.uuid4()), str(uuid.uuid4())
-        store = tmp/'plates'
-        artifacts = store/plate_id/'revisions'/revision
-        artifacts.mkdir(parents=True)
-        (artifacts/'print.gcode.3mf').write_bytes(ARTIFACT)
-        for index in range(2):
-            (artifacts/f'{index}.stl').write_bytes((REPO/'tests/fixtures/cube.stl').read_bytes())
-        plate = dict(format_version=1,id=plate_id,revision=revision,name='Two cubes',settings={},
-                     models=[dict(name=f'cube-{i}.stl',path=f'revisions/{revision}/{i}.stl',source=None) for i in range(2)],
-                     project=None,print=f'revisions/{revision}/print.gcode.3mf')
-        (store/plate_id/'plate.json').write_text(json.dumps(plate))
-        full = json.loads((REPO/'tests/fixtures/p1_status.json').read_text())
-        # A nonzero tray proves that physical tray selection is not the slicer's material index.
-        full['print']['ams']['tray_exist_bits'] = '9'
-        full['print']['ams']['ams'][0]['tray'][3].update(tray_type='PLA',tray_color='00FFFFFF')
-        broker = PrintBroker(tmp/'trusted.pem',tmp/'trusted.key')
-        ftp = Ftps(tmp/'trusted.pem',tmp/'trusted.key')
-        wrong = Ftps(tmp/'other.pem',tmp/'other.key')
-        with socket.socket() as s:
-            s.bind(('127.0.0.1',0)); port = s.getsockname()[1]
-        env = {k:v for k,v in os.environ.items() if not k.startswith('P1_') and k not in ('ORCA_APPDIR','SCAD_LIVE_URL')}
-        env.update(PORT=str(port),PLATES_DIR=str(store),LOG_LEVEL='trace',P1_IP='127.0.0.1',P1_SERIAL=SERIAL,
-                   P1_ACCESS_CODE=SECRET,P1_TLS_CERT=str(tmp/'trusted.pem'),P1_MQTT_PORT=str(broker.port),
-                   P1_FTPS_PORT=str(ftp.port),P1_START_TIMEOUT_SECS='3')
-        log = (output/'server.log').open('w')
-        process = subprocess.Popen([binary],env=env,cwd=tmp,stdout=log,stderr=log)
-        def api(path='/api/printer/status', body=None, origin=None, expected=200, method=None):
-            headers = {'Content-Type':'application/json'}
-            if origin: headers['Origin'] = origin
-            request = urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=json.dumps(body).encode() if body is not None else None,headers=headers,method=method)
-            try:
-                response = urllib.request.urlopen(request, timeout=3)
-            except urllib.error.HTTPError as error:
-                response = error
-            with response:
-                raw = response.read()
-                assert SECRET.encode() not in raw
-                assert response.code == expected, (path,response.code,raw)
-                return json.loads(raw)
-        def start(slot=3, expected=202, origin=None, rev=revision):
-            return api(f'/api/plates/{plate_id}/print',dict(revision=rev,ams_slot=slot),origin,expected)
-        def phase(expected):
-            return until(lambda: api()['start'] and api()['start']['phase'] == expected)
-        def idle():
-            broker.send(full)
-            until(lambda: api()['ready_to_print'])
-        try:
-            until(lambda: len(broker.requests) == 1)
-            start(expected=409) # not synchronized
-            idle()
-            start(expected=403,origin='https://foreign.invalid')
-            start(expected=409,rev=str(uuid.uuid4()))
-            for slot in [1,2,16,255]: start(slot,409)
-            busy = copy.deepcopy(full); busy['print']['gcode_state'] = 'RUNNING'
-            broker.send(busy); until(lambda: not api()['ready_to_print']); start(expected=409)
-            idle()
-            bad = copy.deepcopy(full); bad['print']['print_error'] = 42
-            broker.send(bad); until(lambda: not api()['ready_to_print']); start(expected=409)
-            idle()
-            attempt = start()
-            start(expected=409) # concurrent request cannot produce a second upload/command
-            until(lambda: len(broker.prints) == 1)
-            command = broker.prints[0]
-            assert command['url'] == 'ftp:///' + ftp.uploads[0]
-            assert command['param'] == 'Metadata/plate_1.gcode' and command['ams_mapping'] == [3] and command['use_ams']
-            phase('awaiting_confirmation')
-            broker.send({'print':dict(command='project_file',sequence_id='wrong',result='success')})
-            time.sleep(.15); assert api()['start']['phase'] == 'awaiting_confirmation'
-            broker.send({'print':dict(command='project_file',sequence_id=command['sequence_id'],result='success')})
-            phase('accepted')
-            running = copy.deepcopy(full)
-            running['print'].update(gcode_state='RUNNING',subtask_name=command['subtask_name'],gcode_file=command['file'])
-            broker.send(running); phase('printing')
-            broker.actions.put('disconnect'); phase('unknown')
-            until(lambda: len(broker.requests) == 2)
-            time.sleep(.2); assert len(broker.prints) == 1
-            broker.send(running); phase('printing')
-            running['print']['gcode_state'] = 'FINISH'; broker.send(running); phase('finished')
-            idle()
-            ftp.actions.put('fail')
-            start(); phase('upload_failed'); assert len(broker.prints) == 1
-            ftp.actions.put('wait')
-            start(); assert ftp.received.wait(5)
-            broker.send(busy); until(lambda: not api()['ready_to_print'])
-            ftp.gate.set(); phase('not_sent'); assert len(broker.prints) == 1
-            idle()
-            start(); until(lambda: len(broker.prints) == 2)
-            rejected = broker.prints[-1]
-            broker.send({'print':dict(command='project_file',sequence_id=rejected['sequence_id'],result='fail')})
-            phase('rejected')
-            unknown = start(); until(lambda: len(broker.prints) == 3)
-            phase('unknown'); start(expected=409)
-            until(lambda: len(broker.requests) == 3)
-            assert len(broker.prints) == 3
-            idle()
-            path = f"/api/printer/start/{unknown['id']}/resolve"
-            api(path,dict(checked_printer=False),expected=400)
-            api(path,dict(checked_printer=True),origin='https://foreign.invalid',expected=403)
-            api(path,dict(checked_printer=True))
-            phase('resolved')
-        finally:
-            process.terminate(); process.wait(timeout=5); log.close()
-        # Keep MQTT trusted while a separate FTPS endpoint presents an untrusted certificate.
-        log = (output/'wrong-cert.log').open('w')
-        process = subprocess.Popen([binary],env=env,cwd=tmp,stdout=log,stderr=log)
-        try:
-            until(lambda: len(broker.requests) == 4)
-            device=api('/api/printers')[0]
-            settings={k:v for k,v in device.items() if k not in ('id','status','machine','configuration_error')}
-            settings['ftps_port']=wrong.port
-            api('/api/printers/'+device['id'],settings,method='PUT')
-            until(lambda: len(broker.requests) == 5)
-            idle(); start(); phase('upload_failed')
-            assert wrong.tls_failures and not wrong.uploads and len(broker.prints) == 3
-        finally:
-            process.terminate(); process.wait(timeout=5); log.close()
-            ftp.close(); wrong.close(); broker.close()
-        for path in list(output.glob('*.log')) + list(store.rglob('*')):
-            if path.is_file() and path.name != 'orca.sqlite3': assert SECRET.encode() not in path.read_bytes()
-    result = dict(certificate_version=version, saved_bytes_uploaded=True, implicit_tls_session_reused=True, passive_port_observed=True,
-                  selected_ams_mapping=True, unknown_busy_error_empty_or_wrong_material_refused=True,
-                  concurrent_start_refused=True, upload_failure_no_command=True, state_change_during_upload_no_command=True,
-                  ack_distinct_from_printing=True, matching_status_required=True, timeout_and_reconnect_no_replay=True,
-                  explicit_resolution=True, wrong_ftp_certificate_refused=True, browser_origin_checked=True, secrets_redacted=True)
-    (output/'result.json').write_text(json.dumps(result,indent=2))
-    print(json.dumps(result))
+    from print_fixture import Rig
+    version=sys.argv[3] if len(sys.argv)>3 else 'v3'
+    rig=Rig(sys.argv[1],sys.argv[2],version);rig.env['P1_START_TIMEOUT_SECS']='3'
+    certificate(rig.root,'other',version);wrong=Ftps(rig.root/'other.pem',rig.root/'other.key')
+    def phase(name):return until(lambda:rig.api()['printer']['start'] and rig.api()['printer']['start']['phase']==name)
+    def retry(job):return rig.send(dict(type='retry',expected_job=job['id'],cleared=True))
+    try:
+        rig.launch();rig.seed();job=rig.add();rig.next(job);until(lambda:len(rig.broker.prints)==1)
+        command=rig.broker.prints[0]
+        assert command['url']=='ftp:///'+rig.ftp.uploads[0]
+        assert command['param']=='Metadata/plate_1.gcode' and command['ams_mapping']==[3] and command['use_ams']
+        current=rig.api()['current'];assert rig.ftp.contents[-1]==(rig.store/current['artifact_path']/'print.gcode.3mf').read_bytes()
+        phase('awaiting_confirmation')
+        rig.broker.send({'print':dict(command='project_file',sequence_id='wrong',result='success')})
+        time.sleep(.1);phase('awaiting_confirmation')
+        rig.broker.send({'print':dict(command='project_file',sequence_id=command['sequence_id'],result='success')})
+        phase('accepted');assert rig.api()['current']['state']=='preparing'
+        unrelated=copy.deepcopy(rig.full);unrelated['print'].update(gcode_state='RUNNING',subtask_name='not-our-job',gcode_file='other.gcode.3mf')
+        rig.broker.send(unrelated);time.sleep(.1);phase('accepted')
+        rig.report('RUNNING');phase('printing');rig.broker.actions.put('disconnect');phase('unknown')
+        until(lambda:len(rig.broker.requests)==2);assert len(rig.broker.prints)==1
+        rig.report('RUNNING');phase('printing');rig.report('FINISH');phase('finished')
+        rig.send(dict(type='discard',expected_job=job['id'],cleared=True))
+        rig.idle();job=rig.add();rig.ftp.actions.put('fail');rig.next(job);phase('upload_failed');assert len(rig.broker.prints)==1
+        rig.ftp.actions.put('wait');retry(job);assert rig.ftp.received.wait(10)
+        busy=copy.deepcopy(rig.full);busy['print']['gcode_state']='RUNNING';rig.broker.send(busy)
+        until(lambda:not rig.api()['printer']['ready_to_print']);rig.ftp.gate.set();phase('not_sent');assert len(rig.broker.prints)==1
+        rig.idle();retry(job);until(lambda:len(rig.broker.prints)==2)
+        rejected=rig.broker.prints[-1]
+        rig.broker.send({'print':dict(command='project_file',sequence_id=rejected['sequence_id'],result='fail')});phase('rejected')
+        retry(job);until(lambda:len(rig.broker.prints)==3);phase('unknown')
+        until(lambda:len(rig.broker.requests)==3);assert len(rig.broker.prints)==3
+        rig.idle();rig.send(dict(type='retry',expected_job=job['id'],cleared=False),409)
+        rig.send(dict(type='discard',expected_job=job['id'],cleared=True))
+        settings={k:v for k,v in rig.api('/api/printers/p1').items() if k not in ('id','status','machine','configuration_error')}
+        settings['ftps_port']=wrong.port;requests=len(rig.broker.requests)
+        rig.api('/api/printers/p1',settings,'PUT');until(lambda:len(rig.broker.requests)>requests);rig.idle()
+        job=rig.add();rig.next(job);phase('upload_failed')
+        assert wrong.tls_failures and not wrong.uploads and len(rig.broker.prints)==3
+    finally:
+        rig.close();wrong.close()
+    result=dict(certificate_version=version,execution_bytes_uploaded=True,implicit_tls_session_reused=True,passive_host_ignored=True,
+        selected_ams_mapping=True,upload_failure_no_command=True,state_change_during_upload_no_command=True,
+        ack_distinct_from_printing=True,matching_status_required=True,timeout_and_reconnect_no_replay=True,
+        explicit_recovery_required=True,wrong_ftp_certificate_refused=True,secrets_redacted=True)
+    (Path(sys.argv[2])/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
 
 
-if __name__ == '__main__':
-    main()
+if __name__=='__main__':main()

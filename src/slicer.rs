@@ -1,13 +1,13 @@
 use crate::{
     artifacts,
     plate_api::blocking,
-    plates::{Error, Plate, Result, Store},
+    plates::{Error, Result},
     profiles::{Profiles, Selection},
 };
 use axum::{
     Json, Router,
-    extract::{Path as UrlPath, Query, State},
-    routing::{get, post},
+    extract::{Query, State},
+    routing::get,
 };
 use std::{
     ffi::OsString,
@@ -62,67 +62,35 @@ impl Slicer {
         Ok(slicer)
     }
 
-    /// Arranges and slices a snapshot, publishing both artifacts only on success.
-    ///
+    /// Arrange and slice the frozen inputs and resolved profiles in an execution directory.
     /// # Errors
-    /// Rejects concurrent work, invalid settings, CLI failures and stale revisions.
-    pub async fn slice(&self, store: Store, id: String) -> Result<Plate> {
+    /// Rejects CLI failures, timeouts and incomplete or mismatched outputs.
+    pub(crate) async fn slice(
+        &self,
+        directory: PathBuf,
+        count: usize,
+        selection: Selection,
+        id: &str,
+    ) -> Result<()> {
         let _permit = self
             .slot
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Error::Conflict("OrcaSlicer is busy; retry after the current job"))?;
-        let profiles = self.profiles.clone();
-        let source = store.clone();
-        let (mut plate, selection, scratch) = blocking(move || {
-            let plate = source.get(&id)?;
-            let selection: Selection = serde_json::from_value(
-                plate
-                    .settings
-                    .get("slicer")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({})),
-            )
-            .map_err(|_| Error::Invalid("Invalid slicer settings"))?;
-            let scratch = tempfile::tempdir()?;
-            profiles.write(&selection, scratch.path())?;
-            for (index, model) in plate.models.iter().enumerate() {
-                std::fs::write(
-                    scratch.path().join(format!("{index}.stl")),
-                    source.read_file(&id, &model.path)?,
-                )?;
-            }
-            Ok((plate, selection, scratch))
-        })
-        .await?;
-        tracing::info!(plate = %plate.id, revision = %plate.revision, "arranging plate");
+            .acquire()
+            .await
+            .map_err(|_| Error::Unavailable("Slicer stopped"))?;
         self.run(
-            scratch.path(),
-            arrange_args(&selection.bed, plate.models.len()),
-            &plate.id,
+            &directory,
+            arrange_args(&selection.bed, count),
+            id,
             "arrange",
         )
         .await?;
-        let path = scratch.path().to_owned();
-        let count = plate.models.len();
+        let path = directory.clone();
         let settings = selection.clone();
         blocking(move || artifacts::validate(&path.join("project.3mf"), count, &settings, false))
             .await?;
-        tracing::info!(plate = %plate.id, "slicing saved project");
-        self.run(scratch.path(), slice_args(), &plate.id, "slice")
-            .await?;
-        plate.settings["slicer"] =
-            serde_json::to_value(&selection).map_err(std::io::Error::other)?;
+        self.run(&directory, slice_args(), id, "slice").await?;
         blocking(move || {
-            artifacts::validate(
-                &scratch.path().join("print.gcode.3mf"),
-                count,
-                &selection,
-                true,
-            )?;
-            let saved = store.save_artifacts(&plate, scratch.path())?;
-            tracing::info!(plate = %saved.id, revision = %saved.revision, "slice saved");
-            Ok(saved)
+            artifacts::validate(&directory.join("print.gcode.3mf"), count, &selection, true)
         })
         .await
     }
@@ -245,19 +213,17 @@ fn slice_args() -> Vec<OsString> {
     .into()
 }
 
-pub(crate) fn router(store: Store, slicer: Option<Slicer>) -> Router {
+pub(crate) fn router(slicer: Option<Slicer>) -> Router {
     Router::new()
         .route("/api/slicer/profiles", get(choices))
-        .route("/api/plates/{id}/slice", post(slice))
-        .with_state((store, slicer))
+        .with_state(slicer)
 }
 #[derive(serde::Deserialize)]
 struct ProfileQuery {
     machine: Option<String>,
 }
-
 async fn choices(
-    State((_, slicer)): State<(Store, Option<Slicer>)>,
+    State(slicer): State<Option<Slicer>>,
     Query(query): Query<ProfileQuery>,
 ) -> Result<Json<serde_json::Value>> {
     Ok(Json(
@@ -267,16 +233,6 @@ async fn choices(
             .choices_for(query.machine.as_deref().unwrap_or(crate::profiles::PRINTER))?,
     ))
 }
-async fn slice(
-    State((store, slicer)): State<(Store, Option<Slicer>)>,
-    UrlPath(id): UrlPath<String>,
-) -> Result<Json<Plate>> {
-    slicer
-        .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
-        .slice(store, id)
-        .await
-        .map(Json)
-}
 
 #[cfg(test)]
 mod tests {
@@ -284,10 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn cli_exit_timeout_and_busy_leave_the_saved_plate_readable() {
-        use crate::{
-            plates::{Input, ModelInput},
-            profiles::PRINTER,
-        };
+        use crate::profiles::PRINTER;
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let appdir = root.path().join("app");
@@ -307,85 +260,28 @@ mod tests {
         let slicer = Slicer::new(appdir.clone(), Duration::from_millis(100))
             .await
             .unwrap();
-        let store = Store::open(root.path().join("plates")).unwrap();
-        let before = store
-            .save(
-                None,
-                Input {
-                    name: "saved".into(),
-                    models: vec![ModelInput {
-                        name: "cube.stl".into(),
-                        source: None,
-                        data: include_bytes!("../tests/fixtures/cube.stl").to_vec(),
-                    }],
-                    settings: serde_json::json!({}),
-                },
-            )
-            .unwrap();
-        let permit = slicer.slot.acquire().await.unwrap();
-        assert!(matches!(
-            slicer.slice(store.clone(), before.id.clone()).await,
-            Err(Error::Conflict(_))
-        ));
-        drop(permit);
+        let directory = root.path().join("execution");
+        std::fs::create_dir(&directory).unwrap();
         std::fs::write(&binary, "#!/bin/sh\nexit 7\n").unwrap();
         assert!(matches!(
-            slicer.slice(store.clone(), before.id.clone()).await,
+            slicer
+                .slice(directory.clone(), 1, defaults.clone(), "test")
+                .await,
             Err(Error::Upstream(_))
         ));
         std::fs::write(&binary, "#!/bin/sh\nexec sleep 30\n").unwrap();
         assert!(matches!(
-            slicer.slice(store.clone(), before.id.clone()).await,
+            slicer
+                .slice(directory.clone(), 1, defaults.clone(), "test")
+                .await,
             Err(Error::Timeout)
         ));
         assert_eq!(slicer.slot.available_permits(), 1);
-        assert_eq!(store.get(&before.id).unwrap(), before);
         std::fs::write(&binary, "#!/bin/sh\nprintf 'OrcaSlicer-2.4.1:\\n'\n").unwrap();
         assert!(matches!(
             Slicer::new(appdir, Duration::from_secs(1)).await,
             Err(Error::Unavailable(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn disabled_slicer_and_cross_origin_requests_have_explicit_errors() {
-        use axum::{
-            body::Body,
-            http::{Request, StatusCode},
-        };
-        use tower::ServiceExt;
-        let root = tempfile::tempdir().unwrap();
-        let app = crate::app_with_store(Store::open(root.path()).unwrap());
-        for (method, path) in [
-            ("GET", "/api/slicer/profiles"),
-            ("POST", "/api/plates/missing/slice"),
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        }
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/plates/missing/slice")
-                    .header("Origin", "https://elsewhere.invalid")
-                    .header("Host", "localhost")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

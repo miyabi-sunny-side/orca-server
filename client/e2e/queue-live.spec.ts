@@ -11,19 +11,34 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   const peer = async () => (await request.get(control)).json();
   const command = async (action: Action) => {
     const q = await state();
-    const response = await request.post("/api/queue", { data: { generation: q.generation, request_id: q.request_id, action } });
+    const response = await request.post("/api/queue", { data: { epoch: q.epoch, generation: q.generation, request_id: q.request_id, action } });
     expect(response.status()).toBe(200); return response.json();
   };
   const report = async (name: string) => {
     await request.post(control, { data: { state: name } });
-    await expect.poll(async () => (await state()).current?.phase).toBe(name === "RUNNING" ? "printing" : "awaiting_removal");
+    await expect.poll(async () => (await state()).current?.state).toBe(name === "RUNNING" ? "printing" : "awaiting_removal");
   };
+  await page.goto('/plates/new');
+  await page.getByRole('checkbox').check();
+  await page.getByRole('button', { name: '構成を確認（1）' }).click();
+  await page.getByRole('textbox', { name: 'プレート名' }).fill('A · 机の配線整理・ケーブルホルダー');
+  await page.getByRole('spinbutton').fill('2');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'A · 机の配線整理・ケーブルホルダー' })).toBeVisible();
+  const materials = await (await request.get('/api/filaments')).json();
+  const slots = (await (await request.get('/api/printers/p1/ams')).json()).slots;
+  const specification = (slot: number) => ({ ams_slot_id: slots.find((s: any) => s.slot_index === slot).id,
+    filament_id: materials.find((f: any) => f.name === (slot === 3 ? 'PLA 青' : 'PLA 白')).id,
+    required_machine_profile_key: 'Bambu Lab P1S 0.4 nozzle', process_profile_key: '0.20mm Standard @BBL X1C', bed_type: 'Textured PEI Plate' });
   const plates: Plate[] = (await (await request.get("/api/plates")).json()).sort((a: Plate, b: Plate) => a.name.localeCompare(b.name));
   let displayTheme = "dark";
   const add = async (index: number, slot: number) => {
     await page.goto(`/plates/${plates[index].id}`);
     await page.getByRole("link", { name: "印刷キューへ" }).click();
-    await page.getByRole("combobox", { name: "使用するAMSスロット" }).selectOption(String(slot));
+    await page.getByRole("combobox", { name: "使用するAMSスロット" }).selectOption(specification(slot).ams_slot_id);
+    await page.getByRole('combobox', { name: '使用予定の材料' }).selectOption(specification(slot).filament_id);
     if (index === 0) await capture(`add-${displayTheme}`);
     await page.getByRole("button", { name: "キューに追加", exact: true }).click();
     await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
@@ -34,6 +49,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   const capture = async (name: string) => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await page.locator(".btn.primary").count()).toBeLessThanOrEqual(1);
+    await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: `${process.env.E2E_EVIDENCE_DIR}/${name}.png`, fullPage: true });
   };
   let replayVerified = false;
@@ -42,7 +58,15 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await page.setViewportSize({ width: 375, height: 812 });
     await page.emulateMedia({ colorScheme });
     const before = (await peer()).prints.length;
-    await add(0, 3); await add(1, 0);
+    await add(0, 0);
+    await page.getByRole('button', { name: '材料・印刷条件を変更' }).click();
+    await page.getByRole('combobox', { name: '使用予定の材料' }).selectOption(specification(3).filament_id);
+    await page.getByRole('combobox', { name: '使用するAMSスロット' }).selectOption(specification(3).ams_slot_id);
+    await expect(page.getByRole('button', { name: '待機設定を保存' })).toBeEnabled();
+    await capture(`edit-${colorScheme}`);
+    await page.getByRole('button', { name: '待機設定を保存' }).click();
+    await expect(page.getByRole('combobox', { name: '使用予定の材料' })).toHaveCount(0);
+    await add(1, 0);
     await page.getByRole("button", { name: `${plates[1].name}を前へ` }).click();
     await expect(page.getByRole("listitem").first()).toContainText(plates[1].name);
     await page.getByRole("button", { name: `${plates[1].name}を後へ` }).click();
@@ -68,7 +92,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     } else {
       const other = await state();
       const [response] = await Promise.all([
-        request.post("/api/queue", { data: { generation: other.generation, request_id: other.request_id, action: { type: "next", expected_job: other.waiting[0].id, cleared: true } } }),
+        request.post("/api/queue", { data: { epoch: other.epoch, generation: other.generation, request_id: other.request_id, action: { type: "next", expected_job: other.waiting[0].id, removed_job: other.current?.id ?? null, cleared: true } } }),
         next().evaluate((button: HTMLButtonElement) => { button.click(); button.click(); }),
       ]);
       expect([200, 409]).toContain(response.status());
@@ -122,8 +146,8 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   const stale = await state();
   await page.route("**/api/queue?*", route => route.request().method() === "GET" ? route.fulfill({ json: stale }) : route.continue());
   await confirm().check();
-  await command({ type: "add", plate_id: plates[0].id, revision: plates[0].revision, ams_slot: 3 });
-  await command({ type: "next", expected_job: stale.waiting[0].id, cleared: true });
+  await command({ type: "add", plate_id: plates[0].id, specification: specification(3) });
+  await command({ type: "next", expected_job: stale.waiting[0].id, removed_job: stale.current?.id ?? null, cleared: true });
   await expect.poll(async () => (await peer()).prints.length).toBe(6);
   await report("RUNNING"); await report("FINISH");
   await next().click();
@@ -155,17 +179,5 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   await expect(page.getByRole("button", { name: "取り外しを完了" })).toBeVisible();
   await confirm().check(); await page.getByRole("button", { name: "取り外しを完了" }).click();
   await expect(page.getByText("待機中のプレートはありません。プレートの詳細から追加できます。")).toBeVisible();
-  await page.goto(`/queue?plate=${plates[0].id}`);
-  await page.getByRole("combobox", { name: "使用するAMSスロット" }).selectOption("3");
-  await request.post(control, { data: { revise_plate: plates[0].id } });
-  await page.getByRole("button", { name: "キューに追加", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("状態が変わりました");
-  await expect(page.getByRole("heading", { name: `${plates[0].name}（更新）` })).toBeVisible();
-  expect((await state()).waiting).toHaveLength(0);
-  await capture("revised-plate");
-  await page.getByRole("button", { name: "キューに追加", exact: true }).click();
-  await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
-  await expect(page.getByRole("listitem")).toContainText(`${plates[0].name}（更新）`);
-  await page.getByRole("button", { name: `${plates[0].name}（更新）を削除` }).click();
-  writeFileSync(`${process.env.E2E_EVIDENCE_DIR}/result.json`, JSON.stringify({ realApi: true, isolatedMqttFtps: true, darkLightMobile: true, doubleClickOnce: true, concurrentClientOnce: true, lateReadIgnored: true, removalRequired: true, exactReplayAfterLostResponse: replayVerified, staleClientNoAdvance: true, orderAndRemove: true, failedUploadExplicitRetry: true, revisedPlateRequiresFreshClick: true, keyboardAnd200Percent: true, prints: (await peer()).prints.length }, null, 2));
+  writeFileSync(`${process.env.E2E_EVIDENCE_DIR}/result.json`, JSON.stringify({ realApi: true, isolatedMqttFtps: true, darkLightMobile: true, doubleClickOnce: true, concurrentClientOnce: true, lateReadIgnored: true, removalRequired: true, exactReplayAfterLostResponse: replayVerified, staleClientNoAdvance: true, orderAndRemove: true, failedUploadExplicitRetry: true, compositionSavedWithoutSlicing: true, queuedSettingsEditable: true, keyboardAnd200Percent: true, prints: (await peer()).prints.length }, null, 2));
 });

@@ -23,7 +23,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | `PORT` | `3000` | 待受ポート。1〜65535の整数。不正な値では起動しません。 |
 | `LOG_LEVEL` | `info` | `off`、`error`、`warn`、`info`、`debug`、`trace`。不正な値は`info`です。 |
 | `PLATES_DIR` | `data/plates` | プレートとSQLite台帳の保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
-| `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。未設定では取り込みAPIが503を返します。 |
+| `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。未設定ではモデル一覧と印刷時のSCAD取得を利用できません。 |
 | `ORCA_APPDIR` | ネイティブでは未設定、コンテナでは`/opt/orcaslicer` | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
 | `ORCA_TIMEOUT_SECS` | `300` | 各CLI工程の上限秒数。OrcaSlicerを設定する場合は1〜3600。 |
 
@@ -67,9 +67,9 @@ cargo build --locked
 python3 tests/browser_cli.py "$ORCA_APPDIR" /tmp/orca-browser-check
 ```
 
-一時保存先とscad-live互換のHTTP応答を用意し、STL選択・設定・保存・再検索・再取り込みを操作します。
+一時保存先とscad-live互換のHTTP応答を用意し、モデル選択・個数保存・待機設定の編集・印刷・取り外しを操作します。
 RustサーバーとOrcaSlicerは実際に実行します。スクリーンショットと操作結果は指定した出力先へ保存します。
-プリンターには接続しません。起動したサーバーと一時データは終了時に片付けます。
+MQTT/FTPSは隔離した接続先を使い、実プリンターには接続しません。起動したサーバーと一時データは終了時に片付けます。
 
 MQTT接続の隔離検証にはPython 3と`openssl`コマンドを使います。
 一時証明書のTLS接続先を用意し、購読・全状態要求・部分更新・再接続・証明書不一致・秘密値の非公開を確認します。
@@ -89,7 +89,8 @@ FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA
 `tests/fixtures/p1_print.gcode.3mf`はOrcaSlicer 2.4.2で生成した通信検証用ファイルです。
 生成元は同梱の20mm立方体STL 2個、プリンターはP1S 0.4mmです。
 工程は0.20mm Standard、材料はGeneric PLA High Speed、プレートはTextured PEI Plateです。
-キュー検証では投入後の元データ更新、A完了後の取り外し待ち、同時・重複操作、停止後の復旧、再起動も通します。
+キュー検証では準備時の最新データ固定、取り外し待ち、同時・重複操作、転送中AMS交換、開始前後の再起動とDB復元を通します。
+`print_fixture.py`のCLI代替は入力・状態遷移の検証用です。実際の配置・スライスは`tests/slicer_cli.py`とコンテナ検証で公式Orcaを実行します。
 CIでもMQTT・FTPS・キューの経路を検証します。実機や利用者のアクセスコードには接続しません。
 
 ## 構成
@@ -122,7 +123,8 @@ python3 tests/container.py orca-server /tmp/orca-container-check
 docker build --target sources --output type=local,dest=/tmp/orca-sources .
 ```
 
-コンテナ検証は一時volumeを作り、非rootの配置・スライス、再作成後の保持とキュー消失を確認します。
+コンテナ検証はLinuxのhostネットワークと専用の一時保存先を使います。非rootの配置・スライス、
+再作成後のプレート・アップロードSTL・キューの保持、不明な開始の自動再送がないことを確認します。
 `openssl`とPython 3、Dockerを使い、実プリンターへは接続しません。
 `sources` targetはOrcaSlicer本体と24種の依存アーカイブ、固定commitのwxWidgetsとsubmoduleをまとめます。
 Rust依存は`cargo vendor --locked`で取得し、別のソースアーカイブへまとめます。

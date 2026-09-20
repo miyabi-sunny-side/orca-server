@@ -1,7 +1,7 @@
 use crate::{
     database::{Database, Device, Settings},
     plates::{Error, Result, Store},
-    printer::{Config, Printer, StartRequest},
+    printer::{Config, Printer},
     profiles::{PRINTER, Profiles},
     queue,
     slicer::Slicer,
@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 struct Entry {
     device: Device,
     printer: Printer,
-    queue: queue::Service,
+    queue: Arc<queue::Service>,
     error: Option<&'static str>,
 }
 struct Registry {
@@ -30,6 +30,8 @@ struct Registry {
     fallback: Entry,
     store: Store,
     profiles: Option<Arc<Profiles>>,
+    slicer: Option<Slicer>,
+    source: Option<crate::scad::Source>,
 }
 
 fn select_id<'a>(ids: &'a [String], requested: Option<&str>) -> Result<Option<&'a str>> {
@@ -100,11 +102,14 @@ impl Registry {
         };
         let printer = Printer::new(config, Some((self.db.clone(), device.clone())))
             .map_err(Error::Invalid)?;
-        let queue = queue::Service::new(
+        let queue = Arc::new(queue::Service::new(
             self.store.clone(),
+            device.clone(),
             printer.clone(),
-            device.settings.machine_profile_key.clone(),
-        )?;
+            self.slicer.clone(),
+            self.source.clone(),
+        ));
+        queue.cleanup()?;
         Ok(Entry {
             device,
             printer,
@@ -124,7 +129,7 @@ impl Registry {
 impl Entry {
     async fn in_use(&self) -> bool {
         let status = self.printer.status().await;
-        self.queue.in_use().await
+        self.queue.in_use()
             || status
                 .start
                 .as_ref()
@@ -146,38 +151,40 @@ impl Entry {
 /// Open the persistent printer registry and reuse the Bambu LAN print paths per device.
 /// # Errors
 /// Rejects unreadable storage, unsupported schema versions or invalid initial environment settings.
-pub fn router(root: &FsPath, store: Store, slicer: Option<Slicer>) -> Result<Router> {
-    let db = Database::open(root, || {
-        Config::from_env()
-            .map_err(Error::Invalid)?
-            .map(|config| {
-                config.import().map(|settings| Device {
-                    id: "p1".into(),
-                    settings,
-                })
-            })
-            .transpose()
-    })?;
+pub fn router(
+    _root: &FsPath,
+    store: Store,
+    slicer: Option<Slicer>,
+    source: Option<crate::scad::Source>,
+) -> Result<Router> {
+    let db = store.db.clone();
     let disabled = Printer::new(None, None).map_err(Error::Invalid)?;
-    let fallback = Entry {
-        device: Device {
-            id: String::new(),
-            settings: Settings {
-                name: String::new(),
-                host: String::new(),
-                serial: String::new(),
-                access_code: String::new(),
-                tls_certificate: String::new(),
-                machine_profile_key: PRINTER.into(),
-                default_process_profile_key: crate::profiles::Selection::default().process,
-                bed_type: crate::profiles::BEDS[0].into(),
-                nozzle_material: "unknown".into(),
-                mqtt_port: 8883,
-                ftps_port: 990,
-                start_timeout_secs: 600,
-            },
+    let fallback_device = Device {
+        id: String::new(),
+        settings: Settings {
+            name: String::new(),
+            host: String::new(),
+            serial: String::new(),
+            access_code: String::new(),
+            tls_certificate: String::new(),
+            machine_profile_key: PRINTER.into(),
+            default_process_profile_key: crate::profiles::Selection::default().process,
+            bed_type: crate::profiles::BEDS[0].into(),
+            nozzle_material: "unknown".into(),
+            mqtt_port: 8883,
+            ftps_port: 990,
+            start_timeout_secs: 600,
         },
-        queue: queue::Service::new(store.clone(), disabled.clone(), PRINTER.into())?,
+    };
+    let fallback = Entry {
+        queue: Arc::new(queue::Service::new(
+            store.clone(),
+            fallback_device.clone(),
+            disabled.clone(),
+            slicer.clone(),
+            source.clone(),
+        )),
+        device: fallback_device,
         printer: disabled,
         error: None,
     };
@@ -186,7 +193,9 @@ pub fn router(root: &FsPath, store: Store, slicer: Option<Slicer>) -> Result<Rou
         entries: Mutex::new(BTreeMap::new()),
         fallback,
         store,
-        profiles: slicer.map(|s| s.profiles),
+        profiles: slicer.as_ref().map(|s| s.profiles.clone()),
+        slicer,
+        source,
     };
     for device in registry.db.list()? {
         let entry = registry.entry(device, false)?;
@@ -216,14 +225,6 @@ pub fn router(root: &FsPath, store: Store, slicer: Option<Slicer>) -> Result<Rou
             axum::routing::put(map_inventory),
         )
         .route("/api/printer/status", get(status))
-        .route(
-            "/api/plates/{id}/print",
-            post(start).layer(DefaultBodyLimit::max(4096)),
-        )
-        .route(
-            "/api/printer/start/{id}/resolve",
-            post(resolve).layer(DefaultBodyLimit::max(4096)),
-        )
         .route(
             "/api/queue",
             get(read_queue)
@@ -273,7 +274,7 @@ async fn create(
 ) -> Result<(StatusCode, Json<Value>)> {
     tokio::spawn(async move {
         let mut entries = registry.entries.lock().await;
-        if registry.fallback.queue.in_use().await {
+        if registry.fallback.queue.in_use() {
             return Err(Error::Conflict(
                 "Remove unassigned queue jobs before registering a printer",
             ));
@@ -313,7 +314,16 @@ async fn update(
         let mut comparison = settings.clone();
         comparison.name.clone_from(&old.device.settings.name);
         let changed = comparison != old.device.settings;
-        check_edit(old.in_use().await, changed, false)?;
+        let queue = old.queue.clone();
+        let _queue_guard = queue.lock.lock().await;
+        let status = old.printer.status().await;
+        let active = queue.active()
+            || status
+                .print
+                .state
+                .as_deref()
+                .is_some_and(|s| !matches!(s, "IDLE" | "FINISH"));
+        check_edit(active, changed, false)?;
         settings.validate()?;
         let device = Device {
             id: id.clone(),
@@ -343,6 +353,8 @@ async fn delete(
 ) -> Result<StatusCode> {
     tokio::spawn(async move {
         let mut entries = registry.entries.lock().await;
+        let queue = entries.get(&id).ok_or(Error::NotFound)?.queue.clone();
+        let _queue_guard = queue.lock.lock().await;
         check_edit(
             entries.get(&id).ok_or(Error::NotFound)?.in_use().await,
             false,
@@ -366,67 +378,32 @@ async fn status(
     entry.usable()?;
     Ok(Json(entry.printer.status().await))
 }
-async fn start(
-    State(registry): State<Arc<Registry>>,
-    Query(query): Query<Selected>,
-    Path(id): Path<String>,
-    Json(request): Json<StartRequest>,
-) -> Result<(StatusCode, Json<crate::print_start::Attempt>)> {
-    let entries = registry.entries.lock().await;
-    let entry = registry.selected(&entries, &query)?;
-    entry.usable()?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(
-            entry
-                .printer
-                .start(registry.store.clone(), id, request)
-                .await?,
-        ),
-    ))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Resolution {
-    checked_printer: bool,
-}
-async fn resolve(
-    State(registry): State<Arc<Registry>>,
-    Query(query): Query<Selected>,
-    Path(id): Path<String>,
-    Json(request): Json<Resolution>,
-) -> Result<Json<crate::print_start::Attempt>> {
-    let entries = registry.entries.lock().await;
-    Ok(Json(
-        registry
-            .selected(&entries, &query)?
-            .printer
-            .resolve(&id, request.checked_printer)
-            .await?,
-    ))
-}
 async fn read_queue(
     State(registry): State<Arc<Registry>>,
     Query(query): Query<Selected>,
 ) -> Result<Json<Value>> {
-    let entries = registry.entries.lock().await;
-    let entry = registry.selected(&entries, &query)?;
-    entry.usable()?;
-    Ok(Json(entry.queue.read().await))
+    let queue = {
+        let entries = registry.entries.lock().await;
+        let entry = registry.selected(&entries, &query)?;
+        entry.usable()?;
+        entry.queue.clone()
+    };
+    queue.read().await.map(Json)
 }
 async fn act_queue(
     State(registry): State<Arc<Registry>>,
     Query(query): Query<Selected>,
     Json(request): Json<queue::Command>,
 ) -> Result<Json<Value>> {
-    tokio::spawn(async move {
+    let queue = {
         let entries = registry.entries.lock().await;
         let entry = registry.selected(&entries, &query)?;
         entry.usable()?;
-        entry.queue.apply(request).await.map(Json)
-    })
-    .await
-    .map_err(|_| Error::Unavailable("Queue request interrupted; refresh the queue"))?
+        entry.queue.clone()
+    };
+    tokio::spawn(async move { queue.apply(request).await.map(Json) })
+        .await
+        .map_err(|_| Error::Unavailable("Queue request interrupted; refresh the queue"))?
 }
 
 async fn materials(

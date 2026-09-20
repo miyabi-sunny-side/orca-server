@@ -2,7 +2,6 @@ mod ams;
 mod artifacts;
 mod database;
 mod filament;
-mod layout;
 mod plate_api;
 pub mod plates;
 mod print_start;
@@ -38,8 +37,8 @@ pub fn app_with_slicer(
 ) -> Router {
     app()
         .merge(plate_api::router(store.clone()))
-        .merge(scad::router(store.clone(), source))
-        .merge(slicer::router(store, slicer))
+        .merge(scad::router(store, source))
+        .merge(slicer::router(slicer))
         .layer(axum::middleware::from_fn(plate_api::same_origin))
 }
 

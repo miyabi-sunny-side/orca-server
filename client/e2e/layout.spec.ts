@@ -4,29 +4,16 @@ test.beforeEach(async ({page})=>{await page.route("**/api/printers",route=>route
 
 const plates = Array.from({ length: 100 }, (_, i) => ({
   id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
-  revision: "revision-1",
+  version: 1,
   name:
     i % 3 === 0
       ? `机の配線整理・ケーブルホルダー ${i + 1}`
       : `小物ケース ${i + 1}`,
-  models: [{ name: "box.stl", source: "box.stl" }],
+  models: [{ id: "item", name: "box.stl", source: "box.stl", quantity: 1 }],
   settings: {},
   project: "project.3mf",
   print: "print.gcode.3mf",
 }));
-const profiles = {
-  printer: "Bambu Lab P1S 0.4 nozzle",
-  version: "2.4.2",
-  processes: ["0.20mm Standard @BBL X1C"],
-  filaments: ["Generic PLA @BBL X1C"],
-  beds: ["Textured PEI Plate"],
-  defaults: {
-    process: "0.20mm Standard @BBL X1C",
-    filament: "Generic PLA @BBL X1C",
-    bed: "Textured PEI Plate",
-  },
-};
-
 for (const width of [320, 375, 900]) {
   for (const colorScheme of ["dark", "light"] as const) {
     test(`${width}px ${colorScheme}: searchable list and theme`, async ({
@@ -156,59 +143,32 @@ test("loading and failed list recover through retry", async ({ page }) => {
   await expect(page.getByText("保存済みプレートはありません")).toBeVisible();
 });
 
-test("keyboard selection persists across filtering; failed slice retries or edits the same plate", async ({
-  page,
-}) => {
-  let imports = 0;
-  let slices = 0;
-  const bodies: { models: string[]; plate_id?: string }[] = [];
-  await page.route("**/api/slicer/profiles", (route) =>
-    route.fulfill({ json: profiles }),
-  );
-  await page.route("**/api/scad/models?*", (route) => {
+test("keyboard selection persists across filtering and failed saves retain edits", async ({ page }) => {
+  let saves = 0;
+  const bodies: { models: { source: string; quantity: number }[] }[] = [];
+  await page.route("**/api/scad/models?*", route => {
     const q = new URL(route.request().url()).searchParams.get("q") || "";
-    return route.fulfill({
-      json: ["box.stl", "holder.stl"].filter((name) => name.includes(q)),
-    });
+    return route.fulfill({ json: ["box.stl", "holder.stl"].filter(name => name.includes(q)) });
   });
-  await page.route("**/api/plates/import", (route) => {
-    imports++;
-    bodies.push(route.request().postDataJSON());
-    return route.fulfill({ status: 201, json: plates[0] });
-  });
-  await page.route("**/api/plates/*/slice", (route) => {
-    slices++;
-    return route.fulfill({ status: 502, json: { error: "exit" } });
+  await page.route("**/api/plates/import", route => {
+    saves++; bodies.push(route.request().postDataJSON());
+    return route.fulfill({ status: 400, json: { error: "bad composition" } });
   });
   await page.goto("/plates/new");
   await expect(page.getByRole("checkbox")).toHaveCount(2);
-  await page.getByRole("searchbox").focus();
-  await page.keyboard.press("ArrowDown");
-  await page.keyboard.press("Space");
+  await page.getByRole("searchbox").focus(); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Space");
   await expect(page.getByRole("checkbox", { name: "box.stl" })).toBeChecked();
-  await page.getByRole("searchbox").fill("holder");
-  await expect(page.getByRole("checkbox")).toHaveCount(1);
-  await page.getByRole("checkbox").check();
-  await page.getByRole("button", { name: "設定へ（2）" }).click();
-  await page.getByRole("textbox", { name: "プレート名" }).fill("小物入れ");
-  await page.getByRole("button", { name: "配置して保存" }).click();
-  await expect(page.getByRole("alert")).toContainText("失敗しました");
-  await page.getByRole("button", { name: "もう一度配置する" }).click();
-  await expect.poll(() => slices).toBe(2);
-  expect(imports).toBe(1);
-  await page.getByRole("button", { name: "選択へ戻る" }).click();
-  await page.getByRole("checkbox", { name: "holder.stl" }).uncheck();
-  await page.getByRole("button", { name: "設定へ（1）" }).click();
-  await expect(page.getByRole("textbox", { name: "プレート名" })).toHaveValue(
-    "小物入れ",
-  );
-  await page.getByRole("button", { name: "もう一度配置する" }).click();
-  await expect.poll(() => slices).toBe(3);
-  expect(imports).toBe(2);
-  expect(bodies[1]).toMatchObject({
-    plate_id: plates[0].id,
-    models: ["box.stl"],
-  });
+  await page.getByRole("searchbox").fill("holder"); await expect(page.getByRole("checkbox")).toHaveCount(1);
+  await page.getByRole("checkbox").check(); await page.getByRole("button", { name: "構成を確認（2）" }).click();
+  await page.getByLabel("プレート名", { exact: true }).fill("小物入れ");
+  await page.getByLabel("box.stl の個数").fill("3");
+  await page.getByRole("button", { name: "保存", exact: true }).click(); await expect(page.getByRole("alert")).toBeVisible();
+  await page.getByRole("button", { name: "モデル選択へ" }).click();
+  await page.getByRole("checkbox", { name: "holder.stl" }).uncheck(); await page.getByRole("button", { name: "構成を確認（1）" }).click();
+  await expect(page.getByLabel("プレート名", { exact: true })).toHaveValue("小物入れ");
+  await expect(page.getByLabel("box.stl の個数")).toHaveValue("3");
+  await page.getByRole("button", { name: "保存", exact: true }).click(); await expect.poll(() => saves).toBe(2);
+  expect(bodies[1].models).toEqual([{ name: "box.stl", source: "box.stl", quantity: 3 }]);
 });
 
 test("unconfigured services expose recovery without hiding the plate list", async ({
@@ -221,12 +181,12 @@ test("unconfigured services expose recovery without hiding the plate list", asyn
     route.fulfill({ status: 503, json: { error: "unset" } }),
   );
   await page.goto("/plates/new");
-  await expect(page.getByRole("alert")).toHaveCount(2);
+  await expect(page.getByRole("alert")).toHaveCount(1);
   await expect(
-    page.getByRole("button", { name: "設定へ（0）" }),
+    page.getByRole("button", { name: "構成を確認（0）" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "設定を再読込み" }),
+    page.getByRole("button", { name: "再試行" }),
   ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "プレート一覧へ" }),

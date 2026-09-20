@@ -1,159 +1,130 @@
-"""Exercise the queue against isolated FTPS/MQTT peers and restart the real server.
+"""Durable queue against isolated HTTP, SCAD, MQTT and FTPS peers.
 
 python3 tests/queue_printer.py BINARY OUTPUT_DIR
 """
 import concurrent.futures
 import copy
+import hashlib
 import json
-import os
 from pathlib import Path
-import socket
-import subprocess
+import shutil
+import sqlite3
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.request
 import uuid
-from printer_mqtt import SERIAL, SECRET, until
-from printer_start import ARTIFACT, PrintBroker, Ftps, REPO
+from print_fixture import Rig, FILAMENT
+from printer_mqtt import until
 
 
 def main():
-    binary = str(Path(sys.argv[1]).resolve())
-    output = Path(sys.argv[2]).resolve()
-    output.mkdir(parents=True,exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='orca-queue-test-') as directory:
-        tmp=Path(directory)
-        subprocess.run(['openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-days','1',
-                        '-subj','/CN=isolated-printer','-keyout',str(tmp/'key'),'-out',str(tmp/'cert')],
-                       check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        broker=PrintBroker(tmp/'cert',tmp/'key')
-        ftp=Ftps(tmp/'cert',tmp/'key')
-        plate_id, revision=str(uuid.uuid4()), str(uuid.uuid4())
-        store=tmp/'plates'; data=store/plate_id/'revisions'/revision; data.mkdir(parents=True)
-        for index in range(2): (data/f'{index}.stl').write_bytes((REPO/'tests/fixtures/cube.stl').read_bytes())
-        for name in ['project.3mf','print.gcode.3mf']: (data/name).write_bytes(ARTIFACT)
-        plate=dict(format_version=1,id=plate_id,revision=revision,name='Original plate',settings={'material':'before'},
-                   models=[dict(name=f'cube-{i}.stl',path=f'revisions/{revision}/{i}.stl',source=None) for i in range(2)],
-                   project=f'revisions/{revision}/project.3mf',print=f'revisions/{revision}/print.gcode.3mf')
-        metadata=store/plate_id/'plate.json'; metadata.write_text(json.dumps(plate))
-        full=json.loads((REPO/'tests/fixtures/p1_status.json').read_text())
-        full['print']['ams']['tray_exist_bits']='9'
-        full['print']['ams']['ams'][0]['tray'][3].update(tray_type='PLA',tray_color='00FFFFFF')
-        with socket.socket() as sock: sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
-        env={k:v for k,v in os.environ.items() if not k.startswith('P1_') and k not in ('ORCA_APPDIR','SCAD_LIVE_URL')}
-        env.update(PORT=str(port),PLATES_DIR=str(store),LOG_LEVEL='trace',P1_IP='127.0.0.1',P1_SERIAL=SERIAL,
-                   P1_ACCESS_CODE=SECRET,P1_TLS_CERT=str(tmp/'cert'),P1_MQTT_PORT=str(broker.port),
-                   P1_FTPS_PORT=str(ftp.port),P1_START_TIMEOUT_SECS='10')
-        def launch():
-            log=(output/'server.log').open('a')
-            return subprocess.Popen([binary],cwd=tmp,env=env,stdout=log,stderr=log),log
-        def stop(process,log): process.terminate(); process.wait(timeout=5); log.close()
-        def api(path='/api/queue',body=None,origin=None,expected=200):
-            headers={'Content-Type':'application/json'}
-            if origin: headers['Origin']=origin
-            req=urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=json.dumps(body).encode() if body is not None else None,headers=headers)
-            try: response=urllib.request.urlopen(req,timeout=5)
-            except urllib.error.HTTPError as error: response=error
-            with response:
-                raw=response.read(); assert SECRET.encode() not in raw
-                if expected is not None: assert response.code == expected,(response.code,raw)
-                return response.code,json.loads(raw)
-        def state(): return api()[1]
-        def command(action,base=None):
-            return dict(generation=(base if base is not None else state())['generation'],request_id=str(uuid.uuid4()),action=action)
-        def send(action,expected=200): return api(body=command(action),expected=expected)[1]
-        def add(slot=3): return send(dict(type='add',plate_id=plate_id,revision=revision,ams_slot=slot))
-        def report(command,state_name):
-            value=copy.deepcopy(full)
-            value['print'].update(gcode_state=state_name,subtask_name=command['subtask_name'],gcode_file=command['file'])
-            broker.send(value)
-        def phase(name): return until(lambda: state()['current'] and state()['current']['phase']==name)
-        process,log=launch()
-        try:
-            until(lambda: len(broker.requests)==1)
-            first=add(); a=first['waiting'][0]['id']
-            # Queueing does not require an online printer; sending does.
-            send(dict(type='next',expected_job=a,cleared=True),409)
-            broker.send(full); until(lambda: state()['printer']['ready_to_print'])
-            request=command(dict(type='add',plate_id=plate_id,revision=revision,ams_slot=0))
-            api(body=request); repeated=api(body=request)[1]
-            assert len(repeated['waiting'])==2
-            b=repeated['waiting'][1]['id']
-            c=add()['waiting'][-1]['id']
-            send(dict(type='move',job_id=c,index=0)); assert state()['waiting'][0]['id']==c
-            send(dict(type='remove',job_id=c)); assert [j['id'] for j in state()['waiting']]==[a,b]
-            api(body=command(dict(type='next',expected_job=a,cleared=True)),origin='https://foreign.invalid',expected=403)
-            send(dict(type='next',expected_job=a,cleared=False),409)
-            # Destroy the editable source artifacts after enqueue. Both jobs must still upload their frozen bytes.
-            for name in ['project.3mf','print.gcode.3mf']: (data/name).write_bytes(b'changed source')
-            edited=copy.deepcopy(plate); edited.update(name='Edited plate',settings={'material':'after'},print=None,project=None)
-            metadata.write_text(json.dumps(edited))
-            request_a=command(dict(type='next',expected_job=a,cleared=True))
-            api(body=request_a)
-            until(lambda: len(broker.prints)==1)
-            cmd_a=broker.prints[0]; assert cmd_a['ams_mapping']==[3]
-            report(cmd_a,'RUNNING'); phase('printing')
-            assert state()['current']['job']['name']=='Original plate'
-            send(dict(type='next',expected_job=b,cleared=True),409)
-            report(cmd_a,'FINISH'); phase('awaiting_removal')
-            time.sleep(.3); assert len(broker.prints)==1
-            api(body=request_a); assert len(broker.prints)==1
-            base=state()
-            next1=command(dict(type='next',expected_job=b,cleared=True),base)
-            next2=command(dict(type='next',expected_job=b,cleared=True),base)
-            with concurrent.futures.ThreadPoolExecutor(2) as pool:
-                replies=list(pool.map(lambda req:api(body=req,expected=None),[next1,next2]))
-            assert sorted(code for code,_ in replies)==[200,409]
-            accepted=next1 if replies[0][0]==200 else next2
-            until(lambda: len(broker.prints)==2)
-            cmd_b=broker.prints[1]; assert cmd_b['ams_mapping']==[0]
-            api(body=accepted); time.sleep(.2); assert len(broker.prints)==2
-            api(body=request_a,expected=409)
-            report(cmd_b,'RUNNING'); phase('printing')
-            broker.actions.put('disconnect'); phase('needs_attention')
-            send(dict(type='next',expected_job=b,cleared=True),409)
-            until(lambda: len(broker.requests)==2)
-            assert len(broker.prints)==2
-            send(dict(type='retry',expected_job=b,cleared=True),409)
-            report(cmd_b,'RUNNING'); phase('printing')
-            report(cmd_b,'IDLE'); phase('needs_attention')
-            send(dict(type='next',expected_job=b,cleared=True),409)
-            # A stopped print requires a checked retry, retains its frozen snapshot, and sends once.
-            send(dict(type='retry',expected_job=b,cleared=False),409)
-            retry=command(dict(type='retry',expected_job=b,cleared=True))
-            api(body=retry); until(lambda: len(broker.prints)==3)
-            api(body=retry); assert len(broker.prints)==3
-            cmd_retry=broker.prints[-1]
-            report(cmd_retry,'RUNNING'); phase('printing')
-            # Restart loses only the queue, keeps source plates, and cannot start while P1 is busy.
-            stop(process,log); process,log=launch()
-            until(lambda: len(broker.requests)==3)
-            empty=state(); assert empty['current'] is None and empty['waiting']==[] and not empty['printer']['ready_to_print']
-            assert api('/api/plates/'+plate_id)[1]['name']=='Edited plate'
-            for name in ['project.3mf','print.gcode.3mf']: (data/name).write_bytes(ARTIFACT)
-            metadata.write_text(json.dumps(plate))
-            new=add(); new_id=new['waiting'][0]['id']
-            api(body=accepted,expected=409)
-            send(dict(type='next',expected_job=new_id,cleared=True),409)
-            report(cmd_retry,'RUNNING'); until(lambda: state()['printer']['print']['state']=='RUNNING')
-            send(dict(type='next',expected_job=new_id,cleared=True),409)
-            assert len(broker.prints)==3
-            broker.send(full); until(lambda: state()['printer']['ready_to_print'])
-            ftp.actions.put('fail')
-            send(dict(type='next',expected_job=new_id,cleared=True)); phase('needs_attention')
-            assert len(broker.prints)==3
-            send(dict(type='discard',expected_job=new_id,cleared=False),409)
-            send(dict(type='discard',expected_job=new_id,cleared=True)); assert state()['current'] is None
-        finally:
-            stop(process,log); ftp.close(); broker.close()
-        for path in output.glob('*.log'): assert SECRET.encode() not in path.read_bytes()
-    result=dict(frozen_source_and_ams=True,reorder_remove=True,add_replay_once=True,
-                completion_waits_for_removal=True,disconnect_needs_attention_no_replay=True,concurrent_next_once=True,old_and_replayed_next_no_extra_print=True,
-                stopped_print_requires_recovery=True,explicit_retry_once=True,upload_failure_needs_attention=True,
-                restart_empty_source_preserved=True,restart_busy_or_unknown_no_start=True,origin_checked=True,secrets_redacted=True)
-    (output/'result.json').write_text(json.dumps(result,indent=2)); print(json.dumps(result))
+    rig=Rig(sys.argv[1],sys.argv[2]); results={}
+    try:
+        rig.launch();rig.seed()
+        first=rig.add();second=rig.add(0)
+        request=rig.command(dict(type='add',plate_id=rig.plate['id'],specification=rig.specification()))
+        rig.api(body=request);rig.api(body=request)
+        assert len(rig.api()['waiting'])==3
+        last=rig.api()['waiting'][-1]
+        rig.send(dict(type='move',job_id=last['id'],index=0));assert rig.api()['waiting'][0]['id']==last['id']
+        rig.send(dict(type='remove',job_id=last['id']))
+        # Materials and nozzle requirements remain planned intent, distinct from physical slots.
+        stale=rig.command(dict(type='edit',job_id=first['id'],specification=rig.specification()))
+        mismatch=rig.specification(material=rig.materials[0]['id'])
+        rig.send(dict(type='edit',job_id=first['id'],specification=mismatch))
+        rig.api(body=stale,expected=409);rig.next(first,409)
+        assert rig.api()['waiting'][0]['state']=='queued' and rig.api()['waiting'][0]['hold_reason']
+        machine='Bambu Lab P1S 0.2 nozzle'
+        rig.api(f'/api/filaments/{rig.materials[1]["id"]}/settings',dict(machine_profile_key=machine,base_profile_key=FILAMENT,overrides_json={}),expected=201)
+        mismatch=rig.specification();mismatch['required_machine_profile_key']=machine
+        rig.send(dict(type='edit',job_id=first['id'],specification=mismatch));rig.next(first,409)
+        assert 'nozzle' in rig.api()['waiting'][0]['hold_reason']
+        rig.send(dict(type='edit',job_id=first['id'],specification=rig.specification()))
+        results['waiting_material_and_nozzle_mismatch_stays_editable']=True
+        # Fresh bytes are selected at preparation, not enqueue; a failed source has no fallback.
+        original=rig.files['parts/cube.stl'];rig.files.clear()
+        rig.next(first);rig.phase('needs_attention');assert not rig.broker.prints
+        rig.files['parts/cube.stl']=original.replace(b'facet normal',b'facet  normal')
+        changed=hashlib.sha256(rig.files['parts/cube.stl']).hexdigest()
+        rig.ftp.actions.put('wait')
+        retry=rig.command(dict(type='retry',expected_job=first['id'],cleared=True))
+        rig.api(body=retry);assert rig.ftp.received.wait(10)
+        with sqlite3.connect(rig.store/'orca.sqlite3') as db:
+            row=db.execute('SELECT attempt_id,attempt_json,execution_json FROM print_jobs WHERE id=?',(first['id'],)).fetchone()
+            assert row[0] and json.loads(row[1])['phase']=='uploading'
+            assert json.loads(row[2])['profiles']['filament.json']['nozzle_temperature']==['215']
+        assert rig.traces()[-1]['inputs']==[changed,changed]
+        current=rig.api()['current'];path=rig.store/current['artifact_path']/'print.gcode.3mf'
+        assert rig.ftp.contents[-1]==path.read_bytes()
+        # Crash before the FTPS completion reply: the reserved attempt must never be resumed.
+        rig.stop(kill=True);rig.ftp.gate.set();rig.launch()
+        assert not rig.api()['printer']['synchronized'];rig.idle();rig.phase('needs_attention')
+        time.sleep(.2);assert not rig.broker.prints
+        rig.api(body=retry,expected=409)
+        results['latest_scad_and_overrides_frozen_before_upload']=True
+        results['crash_before_send_never_resumes_upload_or_start']=True
+        # Explicit recovery starts once; an HTTP replay cannot reserve another attempt.
+        retry=rig.command(dict(type='retry',expected_job=first['id'],cleared=True));rig.api(body=retry)
+        until(lambda:len(rig.broker.prints)==1);rig.api(body=retry);assert len(rig.broker.prints)==1
+        before_ack=rig.output/'before-ack.sqlite3'
+        with sqlite3.connect(rig.store/'orca.sqlite3') as source, sqlite3.connect(before_ack) as target:source.backup(target)
+        rig.stop(kill=True);rig.launch();rig.idle();rig.phase('needs_attention')
+        time.sleep(.2);assert len(rig.broker.prints)==1
+        # Even a ready printer does not establish that an unknown start never ran.
+        assert rig.api()['current']['state']=='needs_attention'
+        rig.report('RUNNING');rig.phase('printing');rig.report('FINISH');rig.phase('awaiting_removal')
+        # Restore an older DB snapshot after a completed physical print. No automatic replay.
+        rig.stop();shutil.copyfile(before_ack,rig.store/'orca.sqlite3');rig.launch();rig.idle();rig.phase('needs_attention')
+        assert len(rig.broker.prints)==1
+        rig.api(body=retry,expected=409)
+        rig.send(dict(type='discard',expected_job=first['id'],cleared=True))
+        assert rig.api()['current'] is None and len(rig.api()['waiting'])==1
+        assert not (rig.store/'jobs'/first['id']).exists()
+        results['restart_and_backup_restore_do_not_replay_uncertain_starts']=True
+        # Same-version concurrent Next: exactly one request reserves the next print.
+        q=rig.api();action=dict(type='next',expected_job=second['id'],removed_job=None,cleared=True)
+        one=rig.command(action,q);two=copy.deepcopy(one);two['request_id']=str(uuid.uuid4())
+        rig.api(body=one,expected=403,origin='https://elsewhere.invalid')
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            replies=list(pool.map(lambda request:rig.api(body=request,expected=None),[one,two]))
+        assert sorted(code for code,_ in replies)==[200,409]
+        accepted=one if replies[0][0]==200 else two
+        until(lambda:len(rig.broker.prints)==2);rig.api(body=accepted);assert len(rig.broker.prints)==2
+        assert rig.broker.prints[-1]['ams_mapping']==[0]
+        command=rig.broker.prints[-1]
+        rig.broker.send({'print':dict(command='project_file',sequence_id=command['sequence_id'],result='success')})
+        until(lambda:rig.api()['printer']['start']['phase']=='accepted')
+        rig.stop(kill=True);rig.launch();rig.idle();rig.phase('needs_attention')
+        assert len(rig.broker.prints)==2
+        rig.report('RUNNING');rig.phase('printing');rig.stop();rig.launch()
+        rig.report('RUNNING');rig.phase('printing');rig.report('FINISH');rig.phase('awaiting_removal')
+        rig.stop();rig.launch();rig.idle();rig.phase('awaiting_removal')
+        assert len(rig.broker.prints)==2
+        old_removal=rig.command(dict(type='discard',expected_job=second['id'],cleared=True))
+        rig.api(body=old_removal);rig.api(body=old_removal)
+        assert rig.api()['current'] is None
+        with sqlite3.connect(rig.store/'orca.sqlite3') as db:assert db.execute('SELECT count(*) FROM print_jobs').fetchone()[0]==0
+        results.update(concurrent_next_once=True,old_requests_rejected=True,accepted_running_and_removal_survive_restart=True,terminal_rows_and_artifacts_cleaned=True)
+        # Swap a physical tray while FTPS is paused. Its old material mapping must not authorize MQTT.
+        job=rig.add();rig.ftp.received.clear();rig.ftp.gate.clear();rig.ftp.actions.put('wait')
+        rig.next(job);assert rig.ftp.received.wait(10)
+        swapped=copy.deepcopy(rig.full);swapped['print']['ams']['ams'][0]['tray'][3]['tray_color']='000000FF'
+        rig.broker.send(swapped)
+        until(lambda:next(s for s in rig.api('/api/printers/p1/ams')['slots'] if s['slot_index']==3)['filament_id'] is None)
+        rig.ftp.gate.set();rig.phase('needs_attention');assert len(rig.broker.prints)==2
+        results['ams_swap_during_transfer_prevents_start']=True
+        # A crash after a terminal transaction but before file cleanup is recovered at startup.
+        rig.stop()
+        with sqlite3.connect(rig.store/'orca.sqlite3') as db:
+            db.execute("UPDATE print_jobs SET state='cancelled' WHERE id=?",(job['id'],))
+        assert (rig.store/'jobs'/job['id']).exists()
+        rig.launch()
+        assert not (rig.store/'jobs'/job['id']).exists()
+        with sqlite3.connect(rig.store/'orca.sqlite3') as db:
+            assert db.execute('SELECT count(*) FROM print_jobs').fetchone()[0]==0
+        results['terminal_cleanup_recovered_after_crash']=True
+        assert not rig.ftp.errors
+    finally:rig.close()
+    (Path(sys.argv[2])/'result.json').write_text(json.dumps(results,indent=2));print(json.dumps(results))
 
 
-if __name__=='__main__': main()
+if __name__=='__main__':main()

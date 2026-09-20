@@ -94,9 +94,10 @@
           <a class="plate-row" href={`/plates/${plate.id}`} onkeydown={move}>
             <strong>{plate.name}</strong>
             <span class="caption"
-              >{plate.models.length}モデル · {plate.print
-                ? "配置済み"
-                : "スライス未完了"}</span
+              >{plate.models.length}モデル · {plate.models.reduce(
+                (sum, model) => sum + model.quantity,
+                0,
+              )}個</span
             >
           </a>
         </li>

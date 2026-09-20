@@ -13,7 +13,7 @@ pub(crate) struct FilamentData {
     pub color: String,
     pub bambu_filament_id: Option<String>,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Filament {
     pub id: String,
     #[serde(flatten)]
@@ -79,7 +79,7 @@ pub(crate) struct SettingData {
     #[serde(default)]
     pub overrides_json: Overrides,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Setting {
     pub id: String,
     pub filament_id: String,

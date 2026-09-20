@@ -7,9 +7,7 @@ export default defineConfig({
     : process.env.E2E_REGISTRY_SETTINGS
       ? "**/registry-live.spec.ts"
       : process.env.E2E_BASE_URL
-        ? process.env.E2E_PRINTER_CONTROL
-          ? "**/queue-live.spec.ts"
-          : "**/live.spec.ts"
+        ? "**/queue-live.spec.ts"
         : "**/*.spec.ts",
   testIgnore: process.env.E2E_BASE_URL ? undefined : /live\.spec\.ts$/,
   use: {

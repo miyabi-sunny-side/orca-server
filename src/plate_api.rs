@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::plates::{Error, Input, MAX_UPLOAD, ModelInput, Plate, Result, Store};
+use crate::plates::{Edit, Error, Input, MAX_UPLOAD, ModelInput, Plate, Result, Store};
 
 // Browsers may send multipart POSTs across origins without a CORS preflight.
 // This is a browser-origin check; native API clients need no credential/header.
@@ -49,7 +49,6 @@ pub fn router(store: Store) -> Router {
         .route("/api/plates", get(list).post(create))
         .route("/api/plates/{id}", get(read).put(replace))
         .route("/api/plates/{id}/files/{*path}", get(file))
-        .route("/api/plates/{id}/layout", get(layout))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(store)
 }
@@ -105,41 +104,18 @@ async fn create(
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<Plate>)> {
     let input = form(multipart).await?;
-    let plate = blocking(move || store.save(None, input)).await?;
+    let plate = blocking(move || store.save(input)).await?;
     Ok((StatusCode::CREATED, Json(plate)))
 }
 
 async fn replace(
     State(store): State<Store>,
     Path(id): Path<String>,
-    multipart: Multipart,
+    Json(edit): Json<Edit>,
 ) -> Result<Json<Plate>> {
-    let input = form(multipart).await?;
-    blocking(move || store.save(Some(&id), input))
+    blocking(move || store.edit(Some(&id), edit))
         .await
         .map(Json)
-}
-
-async fn layout(
-    State(store): State<Store>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>> {
-    blocking(move || {
-        let plate = store.get(&id)?;
-        let project = plate.project.ok_or(Error::NotFound)?;
-        let bytes = store.read_file(&id, &project)?;
-        let models = crate::layout::layout(&bytes)?;
-        let bed = crate::layout::bed(&bytes)?;
-        if models.len() != plate.models.len()
-            || models.iter().any(|m| m.index >= plate.models.len())
-        {
-            return Err(Error::Invalid("Saved layout does not match the plate"));
-        }
-        Ok(Json(
-            json!({"revision":plate.revision, "models":models, "bed":bed}),
-        ))
-    })
-    .await
 }
 
 async fn file(
@@ -159,7 +135,6 @@ async fn file(
 
 async fn form(mut multipart: Multipart) -> Result<Input> {
     let mut name = None;
-    let mut settings = None;
     let mut models = Vec::new();
     while let Some(field) = multipart
         .next_field()
@@ -173,19 +148,6 @@ async fn form(mut multipart: Multipart) -> Result<Input> {
                         .text()
                         .await
                         .map_err(|_| Error::Invalid("Invalid name"))?,
-                );
-            }
-            "settings" if settings.is_none() => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|_| Error::Invalid("Invalid settings"))?;
-                if text.len() > 16 * 1024 {
-                    return Err(Error::Invalid("Settings exceed 16 KiB"));
-                }
-                settings = Some(
-                    serde_json::from_str(&text)
-                        .map_err(|_| Error::Invalid("Settings must be JSON"))?,
                 );
             }
             "models" if models.len() < 64 => {
@@ -210,6 +172,5 @@ async fn form(mut multipart: Multipart) -> Result<Input> {
     Ok(Input {
         name: name.ok_or(Error::Invalid("Missing plate name"))?,
         models,
-        settings: settings.unwrap_or_else(|| json!({})),
     })
 }

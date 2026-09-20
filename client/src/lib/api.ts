@@ -6,12 +6,14 @@ export type Selection = {
 };
 export type Plate = {
   id: string;
-  revision: string;
+  version: number;
   name: string;
-  models: { name: string; path: string; source: string | null }[];
-  settings: { slicer?: Selection; [key: string]: unknown };
-  project: string | null;
-  print: string | null;
+  models: {
+    id: string;
+    name: string;
+    source: string | null;
+    quantity: number;
+  }[];
 };
 export type Profiles = {
   version: string;
@@ -21,13 +23,6 @@ export type Profiles = {
   beds: string[];
   defaults: Selection;
 };
-export type Layout = {
-  revision: string;
-  models: ModelBounds[];
-  bed: [[number, number], [number, number]];
-};
-export type ModelBounds = { index: number; bounds: [number, number][] };
-
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -69,7 +64,7 @@ export async function request<T>(
       404: "材料・設定・AMSスロットが見つかりません。一覧から開き直してください。",
       409: path.includes("/ams")
         ? "AMSの観測状態が変わったか未確認です。状態を更新して材料を選び直してください。"
-        : "AMSからの参照、または同じ機種の設定が存在します。対応づけと登録済み設定を確認してください。",
+        : "AMS・印刷ジョブからの参照、または同じ機種の設定が存在します。割当・キュー・登録済み設定を確認してください。",
       422: "入力の形式を確認してください。温度は整数で指定します。",
       503: "材料の保存先またはプロファイルを利用できません。接続とサーバー設定を確認してください。",
     };

@@ -1,10 +1,9 @@
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     fs,
-    io::{self, Cursor, Read, Write},
+    io::{self, Cursor, Read},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
 };
 
 #[derive(Debug)]
@@ -38,267 +37,6 @@ impl std::error::Error for Error {}
 pub const MAX_UPLOAD: usize = 64 * 1024 * 1024;
 const MAX_METADATA: usize = 256 * 1024;
 
-#[derive(Clone, Debug)]
-pub struct Store {
-    root: PathBuf,
-    // ponytail: one shared store write lock; use per-plate locks if writes contend.
-    writes: Arc<Mutex<()>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Model {
-    pub name: String,
-    pub path: String,
-    pub source: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Plate {
-    pub format_version: u8,
-    pub id: String,
-    pub revision: String,
-    pub name: String,
-    pub models: Vec<Model>,
-    pub settings: Value,
-    pub project: Option<String>,
-    pub print: Option<String>,
-}
-
-pub struct ModelInput {
-    pub name: String,
-    pub source: Option<String>,
-    pub data: Vec<u8>,
-}
-pub struct Input {
-    pub name: String,
-    pub models: Vec<ModelInput>,
-    pub settings: Value,
-}
-
-impl Store {
-    pub(crate) fn save_artifacts(&self, plate: &Plate, directory: &Path) -> Result<Plate> {
-        let _guard = self
-            .writes
-            .lock()
-            .map_err(|_| io::Error::other("Storage lock poisoned"))?;
-        if self.get(&plate.id)?.revision != plate.revision {
-            return Err(Error::Conflict(
-                "Plate changed while slicing; retry the current revision",
-            ));
-        }
-        let models = plate
-            .models
-            .iter()
-            .map(|model| {
-                Ok(ModelInput {
-                    name: model.name.clone(),
-                    source: model.source.clone(),
-                    data: self.read_file(&plate.id, &model.path)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.write(
-            Some(&plate.id),
-            Input {
-                name: plate.name.clone(),
-                models,
-                settings: plate.settings.clone(),
-            },
-            Some(directory),
-        )
-    }
-    /// Opens the application-owned storage directory.
-    ///
-    /// # Errors
-    /// Returns an error if the directory cannot be created or resolved.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        fs::create_dir_all(root.as_ref())?;
-        Ok(Self {
-            root: fs::canonicalize(root)?,
-            writes: Arc::new(Mutex::new(())),
-        })
-    }
-
-    /// Saves a complete revision, retaining the last readable revision on failure.
-    ///
-    /// # Errors
-    /// Rejects invalid input, unknown IDs, and inaccessible storage.
-    pub fn save(&self, id: Option<&str>, input: Input) -> Result<Plate> {
-        let _guard = self
-            .writes
-            .lock()
-            .map_err(|_| io::Error::other("Storage lock poisoned"))?;
-        self.write(id, input, None)
-    }
-
-    fn write(&self, id: Option<&str>, input: Input, artifacts: Option<&Path>) -> Result<Plate> {
-        validate(&input)?;
-        let id = if let Some(id) = id {
-            self.get(id)?;
-            id.to_owned()
-        } else {
-            uuid::Uuid::new_v4().to_string()
-        };
-        let plate_dir = self.root.join(&id);
-        if !plate_dir.exists() {
-            fs::create_dir(&plate_dir)?;
-        }
-        self.checked(&id)?;
-        let revisions = plate_dir.join("revisions");
-        if !revisions.exists() {
-            fs::create_dir(&revisions)?;
-        }
-        self.checked(&format!("{id}/revisions"))?;
-        let revision = uuid::Uuid::new_v4().to_string();
-        let stage = tempfile::Builder::new()
-            .prefix(".pending-")
-            .tempdir_in(&revisions)?;
-        let mut models = Vec::new();
-        for (index, model) in input.models.into_iter().enumerate() {
-            let filename = format!("{index}.stl");
-            let mut file = fs::File::create(stage.path().join(&filename))?;
-            file.write_all(&model.data)?;
-            file.sync_all()?;
-            models.push(Model {
-                name: model.name,
-                source: model.source,
-                path: format!("revisions/{revision}/{filename}"),
-            });
-        }
-        if let Some(directory) = artifacts {
-            for filename in ["project.3mf", "print.gcode.3mf"] {
-                let bytes = read_limited(&directory.join(filename), MAX_UPLOAD)?;
-                let mut file = fs::File::create(stage.path().join(filename))?;
-                file.write_all(&bytes)?;
-                file.sync_all()?;
-            }
-        }
-        fs::File::open(stage.path())?.sync_all()?;
-        fs::rename(stage.path(), revisions.join(&revision))?;
-        fs::File::open(&revisions)?.sync_all()?;
-        let plate = Plate {
-            format_version: 1,
-            id,
-            revision: revision.clone(),
-            name: input.name.trim().into(),
-            models,
-            settings: input.settings,
-            project: artifacts.map(|_| format!("revisions/{revision}/project.3mf")),
-            print: artifacts.map(|_| format!("revisions/{revision}/print.gcode.3mf")),
-        };
-        let mut metadata = tempfile::NamedTempFile::new_in(&plate_dir)?;
-        serde_json::to_writer(&mut metadata, &plate).map_err(io::Error::other)?;
-        metadata.as_file().sync_all()?;
-        // Models are immutable. Only this reference is atomically replaced.
-        metadata
-            .persist(plate_dir.join("plate.json"))
-            .map_err(|e| e.error)?;
-        fs::File::open(&plate_dir)?.sync_all()?;
-        fs::File::open(&self.root)?.sync_all()?;
-        Ok(plate)
-    }
-
-    /// Reads and validates the current metadata without trusting its paths.
-    ///
-    /// # Errors
-    /// Rejects unknown IDs, corrupt metadata, and symlinks in stored paths.
-    pub fn get(&self, id: &str) -> Result<Plate> {
-        valid_id(id)?;
-        let data = read_limited(&self.checked(&format!("{id}/plate.json"))?, MAX_METADATA)?;
-        let plate: Plate = serde_json::from_slice(&data).map_err(io::Error::other)?;
-        valid_id(&plate.revision)?;
-        if plate.format_version != 1
-            || plate.id != id
-            || plate.models.is_empty()
-            || plate.models.len() > 64
-        {
-            return Err(Error::Invalid("Invalid saved plate metadata"));
-        }
-        for (index, model) in plate.models.iter().enumerate() {
-            if model.path != format!("revisions/{}/{index}.stl", plate.revision) {
-                return Err(Error::Invalid("Invalid saved model path"));
-            }
-        }
-        for (path, name) in [
-            (&plate.project, "project.3mf"),
-            (&plate.print, "print.gcode.3mf"),
-        ] {
-            if path
-                .as_ref()
-                .is_some_and(|path| *path != format!("revisions/{}/{name}", plate.revision))
-            {
-                return Err(Error::Invalid("Invalid saved artifact path"));
-            }
-        }
-        Ok(plate)
-    }
-
-    /// Lists readable plates, with fuzzy matches ordered before weaker matches.
-    ///
-    /// # Errors
-    /// Fails if the root cannot be listed. Individual corrupt entries are logged and skipped.
-    pub fn list(&self, query: &str) -> Result<Vec<Plate>> {
-        let query = query.trim();
-        let mut matches = Vec::new();
-        // ponytail: scan metadata per request; add an index only when this becomes slow.
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            let id = entry.file_name().to_string_lossy().into_owned();
-            if valid_id(&id).is_err() {
-                continue;
-            }
-            match self.get(&id) {
-                Ok(plate) => {
-                    let score = std::iter::once(plate.name.as_str())
-                        .chain(plate.models.iter().map(|m| m.name.as_str()))
-                        .filter_map(|text| crate::search::score(query, text))
-                        .max();
-                    if let Some(score) = score {
-                        matches.push((score, plate));
-                    }
-                }
-                Err(Error::NotFound) => {} // An incomplete first save is not published.
-                Err(error) => tracing::warn!(%id, %error, "skipping unreadable plate"),
-            }
-        }
-        matches.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.name.cmp(&b.1.name))
-                .then_with(|| a.1.id.cmp(&b.1.id))
-        });
-        Ok(matches.into_iter().map(|(_, plate)| plate).collect())
-    }
-
-    /// Reads a file explicitly referenced by the current plate.
-    ///
-    /// # Errors
-    /// Rejects traversal, unlisted files, symlinks, oversized or missing files.
-    pub fn read_file(&self, id: &str, path: &str) -> Result<Vec<u8>> {
-        let plate = self.get(id)?;
-        if !plate.models.iter().any(|model| model.path == path)
-            && plate.project.as_deref() != Some(path)
-            && plate.print.as_deref() != Some(path)
-        {
-            return Err(Error::NotFound);
-        }
-        read_limited(&self.checked(&format!("{id}/{path}"))?, MAX_UPLOAD)
-    }
-
-    fn checked(&self, relative: &str) -> Result<PathBuf> {
-        if !relative_path(relative) {
-            return Err(Error::Invalid("Invalid storage path"));
-        }
-        let mut path = self.root.clone();
-        for part in relative.split('/') {
-            path.push(part);
-            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
-                return Err(Error::Invalid("Storage symlinks are not supported"));
-            }
-        }
-        Ok(path)
-    }
-}
-
 fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
@@ -330,234 +68,506 @@ pub(crate) fn valid_model_name(name: &str) -> bool {
     relative_path(name) && name.len() <= 1024 && name.to_ascii_lowercase().ends_with(".stl")
 }
 
-pub(crate) fn validate_metadata(name: &str, settings: &Value) -> Result<()> {
+pub(crate) fn validate_stl(data: &[u8]) -> Result<()> {
+    if data.len() > MAX_UPLOAD {
+        return Err(Error::Invalid("Models exceed 64 MiB"));
+    }
+    let mut cursor = Cursor::new(data);
+    let reader =
+        stl_io::create_stl_reader(&mut cursor).map_err(|_| Error::Invalid("Invalid STL"))?;
+    let mut count = 0;
+    for triangle in reader {
+        let triangle = triangle.map_err(|_| Error::Invalid("Invalid STL"))?;
+        if triangle
+            .vertices
+            .iter()
+            .chain(std::iter::once(&triangle.normal))
+            .any(|v| (0..3).any(|i| !v[i].is_finite()))
+        {
+            return Err(Error::Invalid("STL coordinates must be finite"));
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Err(Error::Invalid("STL must contain triangles"));
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+pub struct Store {
+    pub(crate) root: PathBuf,
+    pub(crate) db: crate::database::Database,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Model {
+    pub id: String,
+    pub name: String,
+    pub source: Option<String>,
+    pub quantity: u16,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Plate {
+    pub id: String,
+    pub version: i64,
+    pub name: String,
+    pub models: Vec<Model>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemEdit {
+    pub id: Option<String>,
+    pub name: String,
+    pub source: Option<String>,
+    pub quantity: u16,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Edit {
+    pub name: String,
+    pub version: Option<i64>,
+    pub models: Vec<ItemEdit>,
+}
+pub struct ModelInput {
+    pub name: String,
+    pub source: Option<String>,
+    pub data: Vec<u8>,
+}
+pub struct Input {
+    pub name: String,
+    pub models: Vec<ModelInput>,
+}
+
+pub(crate) fn validate_metadata(name: &str) -> Result<()> {
     if name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
         return Err(Error::Invalid(
             "Name must contain 1–256 bytes without control characters",
         ));
     }
-    if !settings.is_object() || settings.to_string().len() > 16 * 1024 {
-        return Err(Error::Invalid(
-            "Settings must be a JSON object no larger than 16 KiB",
-        ));
+    Ok(())
+}
+fn validate_items(models: &[ItemEdit]) -> Result<()> {
+    let count: usize = models.iter().map(|m| usize::from(m.quantity)).sum();
+    if models.is_empty()
+        || models.len() > 64
+        || count > 64
+        || models.iter().any(|m| m.quantity == 0)
+    {
+        return Err(Error::Invalid("A plate must contain 1–64 model instances"));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for m in models {
+        if !valid_model_name(&m.name) || m.source.as_ref().is_some_and(|s| !valid_model_name(s)) {
+            return Err(Error::Invalid(
+                "Each model needs a relative STL name and source",
+            ));
+        }
+        if let Some(id) = &m.id {
+            valid_id(id)?;
+            if !ids.insert(id) {
+                return Err(Error::Invalid("Duplicate plate item"));
+            }
+        }
+        if m.id.is_none() && m.source.is_none() {
+            return Err(Error::Invalid(
+                "Upload the original STL before referring to it",
+            ));
+        }
     }
     Ok(())
 }
-
-fn validate(input: &Input) -> Result<()> {
-    validate_metadata(&input.name, &input.settings)?;
-    if input.models.is_empty() || input.models.len() > 64 {
-        return Err(Error::Invalid("A plate must contain 1–64 STL models"));
+impl Store {
+    /// Opens `SQLite` and atomically imports legacy plates once, preserving their files.
+    /// # Errors
+    /// Rejects invalid legacy data, unavailable storage and unsupported schema versions.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+        let db = crate::database::Database::open(root.as_ref(), || {
+            crate::printer::Config::from_env()
+                .map_err(Error::Invalid)?
+                .map(|config| {
+                    config.import().map(|settings| crate::database::Device {
+                        id: "p1".into(),
+                        settings,
+                    })
+                })
+                .transpose()
+        })?;
+        Ok(Self {
+            root: fs::canonicalize(root)?,
+            db,
+        })
     }
-    let mut total = 0usize;
-    for model in &input.models {
-        if !valid_model_name(&model.name) {
-            return Err(Error::Invalid("Each model needs a relative STL filename"));
+    /// Save uploaded STL originals or model references in `SQLite`.
+    /// # Errors
+    /// Rejects malformed STL, invalid metadata and unavailable storage.
+    pub fn save(&self, input: Input) -> Result<Plate> {
+        validate_metadata(&input.name)?;
+        if input.models.is_empty() || input.models.len() > 64 {
+            return Err(Error::Invalid("Select 1–64 STL models"));
         }
-        if model
-            .source
-            .as_ref()
-            .is_some_and(|s| s.len() > 2048 || s.chars().any(char::is_control))
-        {
-            return Err(Error::Invalid("Invalid model source"));
-        }
-        total = total.saturating_add(model.data.len());
+        let total: usize = input.models.iter().map(|m| m.data.len()).sum();
         if total > MAX_UPLOAD {
             return Err(Error::Invalid("Models exceed 64 MiB"));
         }
-        let mut cursor = Cursor::new(&model.data);
-        let reader =
-            stl_io::create_stl_reader(&mut cursor).map_err(|_| Error::Invalid("Invalid STL"))?;
-        let mut count = 0;
-        for triangle in reader {
-            let triangle = triangle.map_err(|_| Error::Invalid("Invalid STL"))?;
-            if triangle
-                .vertices
-                .iter()
-                .chain(std::iter::once(&triangle.normal))
-                .any(|v| (0..3).any(|i| !v[i].is_finite()))
-            {
-                return Err(Error::Invalid("STL coordinates must be finite"));
-            }
-            count += 1;
+        let mut models = Vec::new();
+        for m in input.models {
+            validate_stl(&m.data)?;
+            let item = ItemEdit {
+                id: Some(uuid::Uuid::new_v4().to_string()),
+                name: m.name,
+                source: m.source,
+                quantity: 1,
+            };
+            models.push((item, m.data));
         }
-        if count == 0 {
-            return Err(Error::Invalid("STL must contain triangles"));
+        validate_items(&models.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut c = self.db.connection()?;
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT INTO plates(id,name) VALUES (?1,?2)",
+            rusqlite::params![id, input.name.trim()],
+        )?;
+        for (position, (m, data)) in models.iter().enumerate() {
+            insert_item(
+                &tx,
+                &id,
+                position,
+                m,
+                if m.source.is_none() {
+                    Some(data.as_slice())
+                } else {
+                    None
+                },
+            )?;
+        }
+        let plate = load(&tx, &id)?;
+        tx.commit()?;
+        Ok(plate)
+    }
+    /// Create or edit a composition, rejecting stale versions and foreign upload references.
+    /// # Errors
+    /// Rejects unknown items, invalid quantities and concurrent edits.
+    pub fn edit(&self, id: Option<&str>, edit: Edit) -> Result<Plate> {
+        let Edit {
+            name,
+            version,
+            models,
+        } = edit;
+        validate_metadata(&name)?;
+        validate_items(&models)?;
+        let mut c = self.db.connection()?;
+        let tx = c.transaction()?;
+        let id = if let Some(id) = id {
+            valid_id(id)?;
+            if tx.execute(
+                "UPDATE plates SET name=?1,version=version+1 WHERE id=?2 AND version=?3",
+                rusqlite::params![name.trim(), id, version],
+            )? != 1
+            {
+                return Err(Error::Conflict("Plate changed; reload before saving"));
+            }
+            id.to_owned()
+        } else {
+            if version.is_some() {
+                return Err(Error::Invalid("New plates have no version"));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO plates(id,name) VALUES (?1,?2)",
+                rusqlite::params![id, name.trim()],
+            )?;
+            id
+        };
+        let mut inputs = Vec::new();
+        for m in &models {
+            let original =
+                if let Some(item_id) = &m.id {
+                    let stored: Option<(Option<String>,Option<Vec<u8>>)> = tx.query_row(
+                    "SELECT model_key,original FROM plate_items WHERE id=?1 AND plate_id=?2",
+                    rusqlite::params![item_id,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    let (source, original) =
+                        stored.ok_or(Error::Invalid("Item does not belong to this plate"))?;
+                    if source != m.source {
+                        return Err(Error::Invalid("Replace the reference as a new item"));
+                    }
+                    original
+                } else {
+                    None
+                };
+            inputs.push(original);
+        }
+        tx.execute("DELETE FROM plate_items WHERE plate_id=?1", [&id])?;
+        for (position, (m, original)) in models.iter().zip(inputs).enumerate() {
+            insert_item(&tx, &id, position, m, original.as_deref())?;
+        }
+        let plate = load(&tx, &id)?;
+        tx.commit()?;
+        Ok(plate)
+    }
+    /// Read a saved composition.
+    /// # Errors
+    /// Rejects invalid IDs, missing plates or unavailable storage.
+    pub fn get(&self, id: &str) -> Result<Plate> {
+        valid_id(id)?;
+        load(&*self.db.connection()?, id)
+    }
+    /// Search saved names and model names, ordered by fuzzy relevance.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn list(&self, query: &str) -> Result<Vec<Plate>> {
+        let c = self.db.connection()?;
+        let ids = c
+            .prepare("SELECT id FROM plates")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut matches = Vec::new();
+        for id in ids {
+            let plate = load(&c, &id)?;
+            if let Some(score) = std::iter::once(plate.name.as_str())
+                .chain(plate.models.iter().map(|m| m.name.as_str()))
+                .filter_map(|s| crate::search::score(query.trim(), s))
+                .max()
+            {
+                matches.push((score, plate));
+            }
+        }
+        matches.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.name.cmp(&b.1.name))
+                .then_with(|| a.1.id.cmp(&b.1.id))
+        });
+        Ok(matches.into_iter().map(|(_, p)| p).collect())
+    }
+    /// Download a directly uploaded original. SCAD originals belong to the upstream service.
+    /// # Errors
+    /// Rejects missing items and references without an uploaded original.
+    pub fn read_file(&self, id: &str, item: &str) -> Result<Vec<u8>> {
+        valid_id(id)?;
+        valid_id(item).map_err(|_| Error::NotFound)?;
+        self.db.connection()?.query_row("SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2 AND source_kind='upload'",rusqlite::params![id,item],|r|r.get(0)).optional()?.ok_or(Error::NotFound)
+    }
+}
+pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
+    let (name, version) = c
+        .query_row("SELECT name,version FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    let models=c.prepare("SELECT id,name,model_key,quantity FROM plate_items WHERE plate_id=?1 ORDER BY position")?
+        .query_map([id],|r|Ok(Model{id:r.get(0)?,name:r.get(1)?,source:r.get(2)?,quantity:r.get(3)?}))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    Ok(Plate {
+        id: id.into(),
+        name,
+        version,
+        models,
+    })
+}
+fn insert_item(
+    c: &rusqlite::Connection,
+    id: &str,
+    position: usize,
+    m: &ItemEdit,
+    original: Option<&[u8]>,
+) -> Result<()> {
+    c.execute("INSERT INTO plate_items(id,plate_id,position,name,source_kind,model_key,original,quantity) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        rusqlite::params![m.id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),id,i64::try_from(position).expect("64 items"),m.name,if m.source.is_some(){"scad"}else{"upload"},m.source,original,m.quantity])?;
+    Ok(())
+}
+
+// Only schema migration reads the old filesystem representation.
+pub(crate) fn migrate(c: &rusqlite::Connection, root: &Path) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Legacy {
+        format_version: u8,
+        id: String,
+        revision: String,
+        name: String,
+        models: Vec<LegacyModel>,
+    }
+    #[derive(Deserialize)]
+    struct LegacyModel {
+        name: String,
+        source: Option<String>,
+        path: String,
+    }
+    for entry in fs::read_dir(root)? {
+        let id = entry?.file_name().to_string_lossy().into_owned();
+        if valid_id(&id).is_err() {
+            continue;
+        }
+        let path = match checked(root, &format!("{id}/plate.json")) {
+            Ok(p) => p,
+            Err(Error::NotFound) => continue,
+            Err(e) => return Err(e),
+        };
+        let plate: Legacy = serde_json::from_slice(&read_limited(&path, MAX_METADATA)?)
+            .map_err(io::Error::other)?;
+        valid_id(&plate.revision)?;
+        validate_metadata(&plate.name)?;
+        if plate.id != id
+            || plate.format_version != 1
+            || plate.models.is_empty()
+            || plate.models.len() > 64
+        {
+            return Err(Error::Invalid("Invalid legacy plate"));
+        }
+        c.execute(
+            "INSERT INTO plates(id,name) VALUES (?1,?2)",
+            rusqlite::params![id, plate.name],
+        )?;
+        let mut total = 0;
+        for (position, m) in plate.models.into_iter().enumerate() {
+            if m.path != format!("revisions/{}/{position}.stl", plate.revision) {
+                return Err(Error::Invalid("Invalid legacy model path"));
+            }
+            let item = ItemEdit {
+                id: Some(uuid::Uuid::new_v4().to_string()),
+                name: m.name,
+                source: m.source,
+                quantity: 1,
+            };
+            validate_items(std::slice::from_ref(&item))?;
+            let original = if item.source.is_none() {
+                let data = read_limited(&checked(root, &format!("{id}/{}", m.path))?, MAX_UPLOAD)?;
+                total += data.len();
+                if total > MAX_UPLOAD {
+                    return Err(Error::Invalid("Legacy plate exceeds 64 MiB"));
+                }
+                validate_stl(&data)?;
+                Some(data)
+            } else {
+                None
+            };
+            insert_item(c, &id, position, &item, original.as_deref())?;
         }
     }
     Ok(())
+}
+fn checked(root: &Path, relative: &str) -> Result<PathBuf> {
+    if !relative_path(relative) {
+        return Err(Error::Invalid("Invalid storage path"));
+    }
+    let mut path = root.to_owned();
+    for part in relative.split('/') {
+        path.push(part);
+        if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            return Err(Error::Invalid("Storage symlinks are not supported"));
+        }
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use std::fs;
-
-    fn input(name: &str) -> Input {
-        Input {
+    fn edit(name: &str, quantity: u16) -> Edit {
+        Edit {
             name: name.into(),
-            models: vec![ModelInput {
-                name: "parts/box.stl".into(),
-                source: Some("parts/box.stl".into()),
-                data: include_bytes!("../tests/fixtures/triangle.stl").to_vec(),
+            version: None,
+            models: vec![ItemEdit {
+                id: None,
+                name: "part.stl".into(),
+                source: Some("parts/part.stl".into()),
+                quantity,
             }],
-            settings: json!({"material":"PLA"}),
         }
     }
-
     #[test]
-    fn publishes_artifacts_atomically_and_rejects_stale_slice_results() {
+    fn plate_storage_is_database_owned_and_does_not_freeze_scad_bytes() {
         let root = tempfile::tempdir().unwrap();
-        let outputs = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
-        let before = store.save(None, input("original")).unwrap();
-        fs::write(outputs.path().join("project.3mf"), "project").unwrap();
-        assert!(store.save_artifacts(&before, outputs.path()).is_err());
-        assert_eq!(store.get(&before.id).unwrap(), before);
-        fs::write(outputs.path().join("print.gcode.3mf"), "gcode").unwrap();
-        let after = store.save_artifacts(&before, outputs.path()).unwrap();
-        assert_ne!(before.revision, after.revision);
+        let plate = store.edit(None, edit("reference", 2)).unwrap();
+        let c = rusqlite::Connection::open(root.path().join("orca.sqlite3")).unwrap();
         assert_eq!(
-            store
-                .read_file(&after.id, after.project.as_ref().unwrap())
-                .unwrap(),
-            b"project"
+            c.query_row(
+                "SELECT count(*) FROM plate_items WHERE original IS NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
         );
+        assert!(!root.path().join(&plate.id).exists());
         assert_eq!(
-            store
-                .read_file(&after.id, after.print.as_ref().unwrap())
-                .unwrap(),
-            b"gcode"
+            Store::open(root.path()).unwrap().get(&plate.id).unwrap(),
+            plate
         );
-        assert_eq!(after.models[0].source, before.models[0].source);
-        let edited = store.save(Some(&before.id), input("edited")).unwrap();
-        assert!(
-            store
-                .clone()
-                .save_artifacts(&after, outputs.path())
-                .is_err()
-        );
-        assert_eq!(store.get(&before.id).unwrap(), edited);
-        assert!(edited.project.is_none());
+        assert_eq!(store.list("prt").unwrap(), vec![plate]);
     }
-
     #[test]
-    fn checks_binary_stl_finite_coordinates_and_upload_limits() {
-        let mut candidate = input("binary");
-        let mut data = vec![0u8; 134];
-        data[..5].copy_from_slice(b"solid");
-        data[80..84].copy_from_slice(&1u32.to_le_bytes());
-        let values = [0f32, 0., 1., 0., 0., 0., 1., 0., 0., 0., 1., 0.];
-        for (index, value) in values.into_iter().enumerate() {
-            data[84 + index * 4..88 + index * 4].copy_from_slice(&value.to_le_bytes());
-        }
-        candidate.models[0].data = data.clone();
-        assert!(validate(&candidate).is_ok());
-        data[96..100].copy_from_slice(&f32::NAN.to_le_bytes());
-        candidate.models[0].data = data;
-        assert!(validate(&candidate).is_err());
-        candidate.models[0].data = b"solid empty\nendsolid empty\n".to_vec();
-        assert!(validate(&candidate).is_err());
-        candidate.models[0].data = vec![0; MAX_UPLOAD + 1];
-        assert!(validate(&candidate).is_err());
-        candidate = input("source");
-        candidate.models[0].source = Some("bad\nsource".into());
-        assert!(validate(&candidate).is_err());
-        candidate = input("settings");
-        candidate.settings = json!({"oversized":"x".repeat(16 * 1024)});
-        assert!(validate(&candidate).is_err());
-    }
-
-    #[test]
-    fn saves_lists_searches_and_reopens_named_plates() {
+    fn edits_are_atomic_and_uploads_survive_a_database_only_restore() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
-        let first = store.save(None, input("机の箱")).unwrap();
-        let second = store.save(None, input("Spare holder")).unwrap();
-        assert_ne!(first.id, second.id);
-        let store = Store::open(root.path()).unwrap();
-        assert_eq!(store.get(&first.id).unwrap(), first);
-        assert_eq!(store.list("").unwrap().len(), 2);
-        assert_eq!(store.list("机箱").unwrap(), vec![first.clone()]);
-        assert_eq!(store.list("prt/bx").unwrap().len(), 2);
-        assert!(store.list("missing").unwrap().is_empty());
+        let bytes = include_bytes!("../tests/fixtures/triangle.stl").to_vec();
+        let plate = store
+            .save(Input {
+                name: "original".into(),
+                models: vec![ModelInput {
+                    name: "part.stl".into(),
+                    source: None,
+                    data: bytes.clone(),
+                }],
+            })
+            .unwrap();
+        let request = |quantity| Edit {
+            name: "edited".into(),
+            version: Some(plate.version),
+            models: vec![ItemEdit {
+                id: Some(plate.models[0].id.clone()),
+                name: "part.stl".into(),
+                source: None,
+                quantity,
+            }],
+        };
+        for qty in [0, 65] {
+            assert!(store.edit(Some(&plate.id), request(qty)).is_err());
+        }
+        assert_eq!(store.get(&plate.id).unwrap(), plate);
+        let saved = store.edit(Some(&plate.id), request(3)).unwrap();
+        assert!(store.edit(Some(&plate.id), request(1)).is_err());
+        let other = store.edit(None, edit("other", 1)).unwrap();
+        let mut theft = request(1);
+        theft.version = Some(other.version);
+        assert!(store.edit(Some(&other.id), theft).is_err());
+        assert_eq!(store.get(&plate.id).unwrap(), saved);
+        drop(store);
+        let restored = tempfile::tempdir().unwrap();
+        fs::copy(
+            root.path().join("orca.sqlite3"),
+            restored.path().join("orca.sqlite3"),
+        )
+        .unwrap();
+        let store = Store::open(restored.path()).unwrap();
+        assert_eq!(store.get(&plate.id).unwrap(), saved);
         assert_eq!(
-            store.read_file(&first.id, &first.models[0].path).unwrap(),
-            input("x").models[0].data
+            store.read_file(&plate.id, &plate.models[0].id).unwrap(),
+            bytes
         );
-    }
-
-    #[test]
-    fn invalid_inputs_and_failed_replacement_preserve_the_last_revision() {
-        let root = tempfile::tempdir().unwrap();
-        let store = Store::open(root.path()).unwrap();
-        let before = store.save(None, input("original")).unwrap();
-        for name in ["", "  ", "bad\nname"] {
-            assert!(store.save(Some(&before.id), input(name)).is_err());
-        }
-        for filename in [
-            "../outside.stl",
-            "/etc/model.stl",
-            "folder\\x.stl",
-            "bad.txt",
-        ] {
-            let mut candidate = input("invalid");
-            candidate.models[0].name = filename.into();
-            assert!(store.save(Some(&before.id), candidate).is_err());
-        }
-        let mut candidate = input("broken");
-        candidate.models[0].data = b"this is not an STL".to_vec();
-        assert!(store.save(Some(&before.id), candidate).is_err());
-        let mut candidate = input("empty");
-        candidate.models.clear();
-        assert!(store.save(Some(&before.id), candidate).is_err());
-        let mut candidate = input("settings");
-        candidate.settings = json!([]);
-        assert!(store.save(Some(&before.id), candidate).is_err());
-        // The destination is unusable, even for a root test runner.
-        let revisions = root.path().join(&before.id).join("revisions");
-        let backup = root.path().join("revisions-backup");
-        fs::rename(&revisions, &backup).unwrap();
-        fs::write(&revisions, "blocked").unwrap();
-        assert!(store.save(Some(&before.id), input("replacement")).is_err());
-        fs::remove_file(&revisions).unwrap();
-        fs::rename(backup, revisions).unwrap();
-        assert_eq!(store.get(&before.id).unwrap(), before);
-        let after = store.save(Some(&before.id), input("renamed")).unwrap();
-        assert_eq!(after.id, before.id);
-        assert_ne!(after.revision, before.revision);
-        assert_eq!(store.get(&before.id).unwrap(), after);
-    }
-
-    #[test]
-    fn traversal_corrupt_metadata_and_symlinks_cannot_escape_the_store() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let store = Store::open(root.path()).unwrap();
-        let plate = store.save(None, input("safe")).unwrap();
-        for id in ["../outside", "/etc", ".", "x/y"] {
-            assert!(store.get(id).is_err());
-            assert!(store.save(Some(id), input("bad")).is_err());
-        }
         assert!(store.read_file(&plate.id, "../../etc/passwd").is_err());
-        let file = root.path().join(&plate.id).join(&plate.models[0].path);
-        fs::write(outside.path().join("secret"), "private").unwrap();
-        fs::remove_file(&file).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret"), &file).unwrap();
-        assert!(store.read_file(&plate.id, &plate.models[0].path).is_err());
-        let metadata = root.path().join(&plate.id).join("plate.json");
-        let mut tampered = plate.clone();
-        tampered.models[0].path = "../../secret".into();
-        fs::write(&metadata, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        assert!(store.get(&plate.id).is_err());
-        fs::write(&metadata, "broken json").unwrap();
-        assert!(store.get(&plate.id).is_err());
-        assert!(store.list("").unwrap().is_empty());
-        let other_id = uuid::Uuid::new_v4().to_string();
-        std::os::unix::fs::symlink(outside.path(), root.path().join(&other_id)).unwrap();
-        assert!(store.get(&other_id).is_err());
-        assert!(store.save(Some(&other_id), input("bad")).is_err());
-        assert_eq!(fs::read(outside.path().join("secret")).unwrap(), b"private");
+    }
+    #[test]
+    fn rejects_invalid_compositions_and_stl_coordinates() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        for name in ["", " ", "bad\nname"] {
+            assert!(store.edit(None, edit(name, 1)).is_err());
+        }
+        for path in ["../part.stl", "/etc/part.stl", "bad.txt", "a\\b.stl"] {
+            let mut e = edit("x", 1);
+            e.models[0].source = Some(path.into());
+            assert!(store.edit(None, e).is_err());
+        }
+        let mut e = edit("x", 64);
+        e.models.push(e.models[0].clone());
+        assert!(store.edit(None, e).is_err());
+        let mut data = vec![0u8; 134];
+        data[80..84].copy_from_slice(&1u32.to_le_bytes());
+        assert!(validate_stl(&data).is_ok());
+        data[96..100].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(validate_stl(&data).is_err());
+        assert!(validate_stl(b"solid empty\nendsolid empty\n").is_err());
+        assert!(validate_stl(&vec![0; MAX_UPLOAD + 1]).is_err());
     }
 }

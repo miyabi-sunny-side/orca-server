@@ -2,10 +2,10 @@ use crate::{
     plates::{Error, Result},
     printer_state::Status,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Uploading,
@@ -20,21 +20,17 @@ pub enum Phase {
     Resolved,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: String,
     pub plate_id: String,
-    pub revision: String,
+    pub job_id: String,
     pub ams_slot: u8,
     pub phase: Phase,
-    pub message: Option<&'static str>,
-    #[serde(skip)]
+    pub message: Option<String>,
     pub material: String,
-    #[serde(skip)]
     sequence: String,
-    #[serde(skip)]
     sent_at: Option<u64>,
-    #[serde(skip)]
     observed_printing: bool,
 }
 
@@ -56,33 +52,12 @@ pub fn check_nozzle(status: &Status, diameter: &str, material: &str) -> Result<(
     Ok(())
 }
 
-pub fn check_ready(status: &Status, slot: u8, material: &str) -> Result<()> {
-    if !status.ready_to_print {
-        return Err(Error::Conflict("Printer is not ready"));
-    }
-    let tray = status
-        .ams
-        .as_ref()
-        .and_then(|ams| ams.units.iter().find(|unit| unit.id == slot / 4))
-        .and_then(|unit| unit.trays.iter().find(|tray| tray.id == slot % 4));
-    if slot >= 16
-        || !tray.is_some_and(|tray| {
-            tray.present == Some(true) && tray.material.as_deref() == Some(material)
-        })
-    {
-        return Err(Error::Conflict(
-            "Selected AMS tray is absent, unknown or has a different material",
-        ));
-    }
-    Ok(())
-}
-
 impl Attempt {
-    pub fn new(plate_id: String, revision: String, ams_slot: u8, material: String) -> Self {
+    pub fn new(plate_id: String, job_id: String, ams_slot: u8, material: String) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             plate_id,
-            revision,
+            job_id,
             ams_slot,
             phase: Phase::Uploading,
             message: None,
@@ -125,7 +100,7 @@ impl Attempt {
     }
     pub fn fail(&mut self, phase: Phase, message: &'static str) {
         self.phase = phase;
-        self.message = Some(message);
+        self.message = Some(message.into());
     }
     pub fn disconnected(&mut self) {
         if matches!(
@@ -325,18 +300,6 @@ mod tests {
         status.nozzle_material = Some("stainless_steel".into());
         assert!(check_nozzle(&status, "0.2", "hardened_steel").is_err());
         assert!(check_nozzle(&status, "0.2", "stainless_steel").is_ok());
-    }
-
-    #[test]
-    fn start_requires_fresh_idle_printer_and_present_selected_tray() {
-        let mut status = ready();
-        assert!(check_ready(&status, 0, "PLA").is_ok());
-        for slot in [1, 4, 16, 255] {
-            assert!(check_ready(&status, slot, "PLA").is_err());
-        }
-        assert!(check_ready(&status, 0, "PETG").is_err());
-        status.ready_to_print = false;
-        assert!(check_ready(&status, 0, "PLA").is_err());
     }
 
     #[test]
