@@ -33,6 +33,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 プレートの操作と保存形式は[プレートAPI](plates.md)を参照してください。
 
 複数プリンターの台帳・環境変数からの初回取り込み・状態取得・印刷APIは[プリンター接続](printer.md)を参照してください。
+[材料台帳・機種別設定・AMS対応API](filaments.md)も利用できます。
 未設定でもプレートの保存・閲覧は使えます。印刷予定の操作は[キューAPI](queue.md)を参照してください。
 
 ## 検証
@@ -81,6 +82,7 @@ python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 REGISTRY_BROWSER=1 python3 tests/printer_registry.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-registry-check
+FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-filament-check
 ```
 
 印刷開始の検証はFTPSのTLSセッション再利用・転送内容・AMS指定・拒否・通信断・重複操作も確認します。

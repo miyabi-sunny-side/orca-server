@@ -98,7 +98,8 @@ impl Registry {
             }
             Err(error) => return Err(error),
         };
-        let printer = Printer::new(config).map_err(Error::Invalid)?;
+        let printer = Printer::new(config, Some((self.db.clone(), device.clone())))
+            .map_err(Error::Invalid)?;
         let queue = queue::Service::new(
             self.store.clone(),
             printer.clone(),
@@ -157,7 +158,7 @@ pub fn router(root: &FsPath, store: Store, slicer: Option<Slicer>) -> Result<Rou
             })
             .transpose()
     })?;
-    let disabled = Printer::new(None).map_err(Error::Invalid)?;
+    let disabled = Printer::new(None, None).map_err(Error::Invalid)?;
     let fallback = Entry {
         device: Device {
             id: String::new(),
@@ -198,6 +199,22 @@ pub fn router(root: &FsPath, store: Store, slicer: Option<Slicer>) -> Result<Rou
         .route("/api/printers", get(list).post(create))
         .route("/api/printers/profiles", get(machines))
         .route("/api/printers/{id}", get(read).put(update).delete(delete))
+        .route("/api/filaments", get(materials).post(create_material))
+        .route(
+            "/api/filaments/{id}",
+            get(material).put(update_material).delete(delete_material),
+        )
+        .route("/api/filaments/{id}/profiles", get(material_profiles))
+        .route("/api/filaments/{id}/settings", post(create_setting))
+        .route(
+            "/api/filaments/{id}/settings/{sid}",
+            axum::routing::put(update_setting).delete(delete_setting),
+        )
+        .route("/api/printers/{id}/ams", get(inventory))
+        .route(
+            "/api/printers/{id}/ams/{slot}",
+            axum::routing::put(map_inventory),
+        )
         .route("/api/printer/status", get(status))
         .route(
             "/api/plates/{id}/print",
@@ -410,6 +427,281 @@ async fn act_queue(
     })
     .await
     .map_err(|_| Error::Unavailable("Queue request interrupted; refresh the queue"))?
+}
+
+async fn materials(
+    State(registry): State<Arc<Registry>>,
+) -> Result<Json<Vec<crate::filament::Filament>>> {
+    let db = registry.db.clone();
+    Ok(Json(
+        crate::plate_api::blocking(move || db.filaments()).await?,
+    ))
+}
+async fn material(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    let db = registry.db.clone();
+    let (f, settings) = crate::plate_api::blocking(move || {
+        let f = db
+            .filaments()?
+            .into_iter()
+            .find(|f| f.id == id)
+            .ok_or(Error::NotFound)?;
+        Ok((f, db.filament_settings(&id)?))
+    })
+    .await?;
+    let settings: Vec<_> = settings
+        .into_iter()
+        .map(|s| {
+            let resolved = registry
+                .profiles
+                .as_ref()
+                .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))
+                .and_then(|p| p.resolve_filament(&s.data, &f.data.material));
+            let mut value = json!(s);
+            if let Ok(profile) = resolved {
+                value["resolved"] = temperature_view(&profile);
+                value["error"] = Value::Null;
+            } else {
+                value["resolved"] = Value::Null;
+                value["error"] =
+                    json!("Base profile is unavailable or incompatible; select it again");
+            }
+            value
+        })
+        .collect();
+    Ok(Json(json!({"filament":f,"settings":settings})))
+}
+async fn create_material(
+    State(registry): State<Arc<Registry>>,
+    Json(data): Json<crate::filament::FilamentData>,
+) -> Result<(StatusCode, Json<crate::filament::Filament>)> {
+    let db = registry.db.clone();
+    let saved = crate::plate_api::blocking(move || {
+        let f = crate::filament::Filament {
+            id: uuid::Uuid::new_v4().to_string(),
+            data,
+        };
+        db.save_filament(&f)?;
+        Ok(f)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+async fn update_material(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(data): Json<crate::filament::FilamentData>,
+) -> Result<Json<crate::filament::Filament>> {
+    // Serialize edits with configuration changes, including settings validation.
+    let _entries = registry.entries.lock().await;
+    let db = registry.db.clone();
+    let profiles = registry.profiles.clone();
+    Ok(Json(
+        crate::plate_api::blocking(move || {
+            let old = db
+                .filaments()?
+                .into_iter()
+                .find(|f| f.id == id)
+                .ok_or(Error::NotFound)?;
+            if old.data.material != data.material {
+                let settings = db.filament_settings(&id)?;
+                for s in settings {
+                    profiles
+                        .as_ref()
+                        .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))?
+                        .resolve_filament(&s.data, &data.material)?;
+                }
+            }
+            let f = crate::filament::Filament { id, data };
+            db.save_filament(&f)?;
+            Ok(f)
+        })
+        .await?,
+    ))
+}
+async fn delete_material(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let db = registry.db.clone();
+    crate::plate_api::blocking(move || db.delete_filament(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+fn temperature_view(profile: &serde_json::Map<String, Value>) -> Value {
+    json!({"nozzle_temperature_initial_layer":profile.get("nozzle_temperature_initial_layer").and_then(|v|v.get(0)),
+        "nozzle_temperature":profile.get("nozzle_temperature").and_then(|v|v.get(0)),
+        "required_nozzle_hrc":profile.get("required_nozzle_HRC").and_then(|v|v.get(0))})
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MaterialProfiles {
+    machine: String,
+}
+async fn material_profiles(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Query(query): Query<MaterialProfiles>,
+) -> Result<Json<Value>> {
+    let db = registry.db.clone();
+    let f = crate::plate_api::blocking(move || {
+        db.filaments()?
+            .into_iter()
+            .find(|f| f.id == id)
+            .ok_or(Error::NotFound)
+    })
+    .await?;
+    let profiles = registry
+        .profiles
+        .as_ref()
+        .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))?;
+    let choices = profiles.choices_for(&query.machine)?;
+    let compatible: Vec<_> = choices["filaments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|key| {
+            let key = key.as_str()?;
+            let setting = crate::filament::SettingData {
+                machine_profile_key: query.machine.clone(),
+                base_profile_key: key.into(),
+                overrides_json: crate::filament::Overrides::default(),
+            };
+            let p = profiles.resolve_filament(&setting, &f.data.material).ok()?;
+            Some(json!({"key":key,"resolved":temperature_view(&p)}))
+        })
+        .collect();
+    Ok(Json(json!(compatible)))
+}
+async fn create_setting(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(data): Json<crate::filament::SettingData>,
+) -> Result<(StatusCode, Json<crate::filament::Setting>)> {
+    let saved = save_setting(&registry, id, uuid::Uuid::new_v4().to_string(), data, false).await?;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+async fn update_setting(
+    State(registry): State<Arc<Registry>>,
+    Path((id, sid)): Path<(String, String)>,
+    Json(data): Json<crate::filament::SettingData>,
+) -> Result<Json<crate::filament::Setting>> {
+    Ok(Json(save_setting(&registry, id, sid, data, true).await?))
+}
+async fn save_setting(
+    registry: &Registry,
+    id: String,
+    sid: String,
+    data: crate::filament::SettingData,
+    exists: bool,
+) -> Result<crate::filament::Setting> {
+    let _entries = registry.entries.lock().await;
+    let db = registry.db.clone();
+    let profiles = registry
+        .profiles
+        .clone()
+        .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))?;
+    crate::plate_api::blocking(move || {
+        let f = db
+            .filaments()?
+            .into_iter()
+            .find(|f| f.id == id)
+            .ok_or(Error::NotFound)?;
+        if exists && !db.filament_settings(&id)?.iter().any(|s| s.id == sid) {
+            return Err(Error::NotFound);
+        }
+        profiles.resolve_filament(&data, &f.data.material)?;
+        let s = crate::filament::Setting {
+            id: sid,
+            filament_id: id,
+            data,
+        };
+        db.save_setting(&s)?;
+        Ok(s)
+    })
+    .await
+}
+async fn delete_setting(
+    State(registry): State<Arc<Registry>>,
+    Path((id, sid)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    let db = registry.db.clone();
+    crate::plate_api::blocking(move || db.delete_setting(&id, &sid)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn inventory(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    let entries = registry.entries.lock().await;
+    let entry = entries.get(&id).ok_or(Error::NotFound)?;
+    let (current, slots) = entry.printer.ams_inventory(None).await?;
+    let db = registry.db.clone();
+    let details = crate::plate_api::blocking(move || {
+        let mut details = BTreeMap::new();
+        for f in db.filaments()? {
+            let settings = db.filament_settings(&f.id)?;
+            details.insert(f.id.clone(), (f, settings));
+        }
+        Ok(details)
+    })
+    .await?;
+    let slots: Vec<_> = slots
+        .into_iter()
+        .map(|slot| {
+            let mut value = json!(slot);
+            value["current"] = json!(current && slot.reported.present.is_some());
+            value["nozzle_fit"] = json!("unknown");
+            value["setting"] = Value::Null;
+            if let Some((f, settings)) = slot.filament_id.as_ref().and_then(|id| details.get(id)) {
+                value["filament"] = json!(f);
+                if let Some(s) = settings.iter().find(|s| {
+                    s.data.machine_profile_key == entry.device.settings.machine_profile_key
+                }) {
+                    value["setting"] = json!(s);
+                    if let Some(p) = &registry.profiles
+                        && let Ok(resolved) = p.resolve_filament(&s.data, &f.data.material)
+                    {
+                        value["setting"]["resolved"] = temperature_view(&resolved);
+                        let diameter = p.machine(&s.data.machine_profile_key).ok().and_then(|m| {
+                            m.get("nozzle_diameter")?
+                                .get(0)?
+                                .as_str()
+                                .map(str::to_owned)
+                        });
+                        let hrc = resolved
+                            .get("required_nozzle_HRC")
+                            .and_then(|v| v.get(0))
+                            .and_then(Value::as_str)
+                            .and_then(|v| v.parse().ok());
+                        value["nozzle_fit"] = json!(crate::filament::nozzle_fit(
+                            &f.data.material,
+                            diameter.as_deref().unwrap_or(""),
+                            &entry.device.settings.nozzle_material,
+                            hrc
+                        ));
+                    }
+                }
+            } else {
+                value["filament"] = Value::Null;
+            }
+            value
+        })
+        .collect();
+    Ok(Json(
+        json!({"printer_id":id,"current":current,"slots":slots}),
+    ))
+}
+async fn map_inventory(
+    State(registry): State<Arc<Registry>>,
+    Path((id, slot)): Path<(String, String)>,
+    Json(mapping): Json<crate::ams::Mapping>,
+) -> Result<StatusCode> {
+    let entries = registry.entries.lock().await;
+    let entry = entries.get(&id).ok_or(Error::NotFound)?;
+    entry.printer.ams_inventory(Some((slot, mapping))).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

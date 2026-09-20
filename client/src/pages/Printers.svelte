@@ -189,6 +189,7 @@
               設定したプロファイルまたは接続情報を確認してください。
             </p>{/if}
           <div class="actions">
+            <a class="btn" href={`/printers/${printer.id}/ams`}>AMSの材料</a>
             <a class="btn" href={`/queue?printer_id=${printer.id}`}
               >印刷キュー</a
             ><a href={`/printers/${printer.id}`}>設定を編集</a>

@@ -74,7 +74,7 @@ pub(crate) struct Database {
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
         if error.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
-            Error::Conflict("Printer serial is already registered or settings violate the schema")
+            Error::Conflict("The record is referenced, duplicated or violates the schema")
         } else {
             tracing::error!(code=?error.sqlite_error_code(), "SQLite operation failed");
             Error::Unavailable("Database operation failed; check storage and server logs")
@@ -124,17 +124,116 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1 => {}
+            1 | 2 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
                 ));
             }
         }
+        if version < 2 {
+            tx.execute_batch("CREATE TABLE filaments (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, vendor TEXT NOT NULL,
+                material TEXT NOT NULL, color TEXT NOT NULL, bambu_filament_id TEXT
+            );
+            CREATE TABLE filament_settings (
+                id TEXT PRIMARY KEY, filament_id TEXT NOT NULL REFERENCES filaments(id) ON DELETE CASCADE,
+                machine_profile_key TEXT NOT NULL, base_profile_key TEXT NOT NULL,
+                overrides_json TEXT NOT NULL, UNIQUE(filament_id,machine_profile_key)
+            );
+            CREATE TABLE ams_slots (
+                id TEXT PRIMARY KEY, printer_id TEXT NOT NULL REFERENCES printers(id) ON DELETE CASCADE,
+                ams_id INTEGER NOT NULL, slot_index INTEGER NOT NULL,
+                filament_id TEXT REFERENCES filaments(id), mapping_source TEXT NOT NULL DEFAULT 'unassigned',
+                reported_tag_uid TEXT, reported_profile_id TEXT, reported_type TEXT, reported_color TEXT,
+                reported_brand TEXT, reported_temp_min INTEGER, reported_temp_max INTEGER,
+                present INTEGER, remaining_percent INTEGER, detect_on_insert INTEGER, detect_on_power_up INTEGER,
+                last_seen_at INTEGER, revision INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(printer_id,ams_id,slot_index),
+                CHECK(ams_id BETWEEN 0 AND 255), CHECK(slot_index BETWEEN 0 AND 3),
+                CHECK(mapping_source IN ('unassigned','manual','automatic'))
+            );
+            PRAGMA user_version=2;").map_err(Error::from)?;
+        }
         tx.commit().map_err(Error::from)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+    pub(crate) fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.connection
+            .lock()
+            .map_err(|_| Error::Unavailable("Database lock failed"))
+    }
+    pub(crate) fn filaments(&self) -> Result<Vec<crate::filament::Filament>> {
+        load_filaments(&*self.connection()?)
+    }
+
+    pub(crate) fn save_filament(&self, f: &crate::filament::Filament) -> Result<()> {
+        f.data.validate()?;
+        let mut c = self.connection()?;
+        let tx = c.transaction()?;
+        tx.execute("INSERT INTO filaments(id,name,vendor,material,color,bambu_filament_id) VALUES (?1,?2,?3,?4,?5,?6)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name,vendor=excluded.vendor,material=excluded.material,color=excluded.color,bambu_filament_id=excluded.bambu_filament_id",
+            params![f.id,f.data.name,f.data.vendor,f.data.material,f.data.color,f.data.bambu_filament_id])?;
+        crate::ams::invalidate_automatic(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn delete_filament(&self, id: &str) -> Result<()> {
+        if self
+            .connection()?
+            .execute("DELETE FROM filaments WHERE id=?1", [id])?
+            == 0
+        {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+    pub(crate) fn filament_settings(
+        &self,
+        filament_id: &str,
+    ) -> Result<Vec<crate::filament::Setting>> {
+        use crate::filament::{Setting, SettingData};
+        let connection = self.connection()?;
+        let mut q=connection.prepare("SELECT id,filament_id,machine_profile_key,base_profile_key,overrides_json FROM filament_settings WHERE filament_id=?1 ORDER BY machine_profile_key")?;
+        Ok(q.query_map([filament_id], |r| {
+            let raw: String = r.get(4)?;
+            let overrides_json = serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            Ok(Setting {
+                id: r.get(0)?,
+                filament_id: r.get(1)?,
+                data: SettingData {
+                    machine_profile_key: r.get(2)?,
+                    base_profile_key: r.get(3)?,
+                    overrides_json,
+                },
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?)
+    }
+    pub(crate) fn save_setting(&self, s: &crate::filament::Setting) -> Result<()> {
+        s.data.overrides_json.validate()?;
+        self.connection()?.execute("INSERT INTO filament_settings(id,filament_id,machine_profile_key,base_profile_key,overrides_json) VALUES (?1,?2,?3,?4,?5)
+            ON CONFLICT(id) DO UPDATE SET machine_profile_key=excluded.machine_profile_key,base_profile_key=excluded.base_profile_key,overrides_json=excluded.overrides_json",
+            params![s.id,s.filament_id,s.data.machine_profile_key,s.data.base_profile_key,serde_json::to_string(&s.data.overrides_json).expect("temperatures serialize")])?;
+        Ok(())
+    }
+    pub(crate) fn delete_setting(&self, filament_id: &str, id: &str) -> Result<()> {
+        if self.connection()?.execute(
+            "DELETE FROM filament_settings WHERE id=?1 AND filament_id=?2",
+            params![id, filament_id],
+        )? == 0
+        {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
     pub fn list(&self) -> Result<Vec<Device>> {
         let connection = self
@@ -167,12 +266,16 @@ impl Database {
             .map_err(Error::from)
     }
     pub fn save(&self, device: &Device) -> Result<()> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::Unavailable("Database lock failed"))?;
-        save(&connection, device)
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let s = &device.settings;
+        tx.execute("DELETE FROM ams_slots WHERE printer_id IN (SELECT id FROM printers WHERE id=?1 AND (host!=?2 OR serial!=?3 OR mqtt_port!=?4 OR access_code!=?5 OR tls_certificate!=?6))",
+            params![device.id,s.host,s.serial,s.mqtt_port,s.access_code,s.tls_certificate])?;
+        save(&tx, device)?;
+        tx.commit()?;
+        Ok(())
     }
+
     pub fn delete(&self, id: &str) -> Result<()> {
         let changed = self
             .connection
@@ -198,6 +301,25 @@ fn save(connection: &Connection, device: &Device) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn load_filaments(connection: &Connection) -> Result<Vec<crate::filament::Filament>> {
+    use crate::filament::{Filament, FilamentData};
+    let mut q = connection.prepare(
+        "SELECT id,name,vendor,material,color,bambu_filament_id FROM filaments ORDER BY name,id",
+    )?;
+    Ok(q.query_map([], |r| {
+        Ok(Filament {
+            id: r.get(0)?,
+            data: FilamentData {
+                name: r.get(1)?,
+                vendor: r.get(2)?,
+                material: r.get(3)?,
+                color: r.get(4)?,
+                bambu_filament_id: r.get(5)?,
+            },
+        })
+    })?
+    .collect::<std::result::Result<_, _>>()?)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +341,179 @@ mod tests {
                 start_timeout_secs: 600,
             },
         }
+    }
+    #[test]
+    fn new_ambiguous_catalog_entry_invalidates_automatic_mapping_without_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        let mut f = crate::filament::Filament {
+            id: "black".into(),
+            data: crate::filament::FilamentData {
+                name: "Matte black".into(),
+                vendor: "Bambu Lab".into(),
+                material: "PLA".into(),
+                color: "000000FF".into(),
+                bambu_filament_id: Some("GFA01".into()),
+            },
+        };
+        db.save_filament(&f).unwrap();
+        let mut state = crate::printer_state::State::new(true);
+        state.connected();
+        state.apply(br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,"ams":{"tray_exist_bits":"1","ams":[{"id":"0","tray":[{"id":"0","tray_type":"PLA","tray_info_idx":"GFA01","tag_uid":"1234","tray_color":"000000FF"}]}]}}}"#,1);
+        db.observe_ams(&device(), &state.status(1)).unwrap();
+        let slot = db.ams_slots("stable-id").unwrap().remove(0);
+        assert_eq!(slot.filament_id.as_deref(), Some("black"));
+        f.id = "another".into();
+        db.save_filament(&f).unwrap();
+        let changed = db.ams_slots("stable-id").unwrap().remove(0);
+        assert!(changed.filament_id.is_none());
+        assert!(changed.revision > slot.revision);
+    }
+    #[test]
+    fn version_one_migration_preserves_printers_and_rolls_back_failed_ddl() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        db.connection().unwrap().execute_batch("DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;PRAGMA user_version=1;").unwrap();
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("no import during migration")).unwrap();
+        assert_eq!(db.list().unwrap()[0].id, "stable-id");
+        assert!(db.filaments().unwrap().is_empty());
+        let c = db.connection().unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        c.execute_batch("DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;CREATE TABLE ams_slots(conflict TEXT);PRAGMA user_version=1;").unwrap();
+        drop(c);
+        drop(db);
+        assert!(Database::open(dir.path(), || panic!("no import")).is_err());
+        let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='filaments'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.query_row("SELECT id FROM printers", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "stable-id"
+        );
+    }
+    #[test]
+    fn connection_changes_invalidate_inventory_and_reject_old_observers() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = device();
+        let db = Database::open(dir.path(), || Ok(Some(d.clone()))).unwrap();
+        let mut state = crate::printer_state::State::new(true);
+        state.connected();
+        state.apply(br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,"ams":{"tray_exist_bits":"1","ams":[{"id":"0","tray":[{"id":"0","tray_type":"PLA","tray_color":"FFFFFFFF"}]}]}}}"#,1);
+        db.observe_ams(&d, &state.status(1)).unwrap();
+        let mut edited = d.clone();
+        edited.settings.name = "Renamed".into();
+        db.save(&edited).unwrap();
+        assert_eq!(db.ams_slots(&d.id).unwrap().len(), 1);
+        db.observe_ams(&d, &state.status(1)).unwrap();
+        edited.settings.host = "127.0.0.2".into();
+        db.save(&edited).unwrap();
+        assert!(db.ams_slots(&d.id).unwrap().is_empty());
+        assert!(db.observe_ams(&d, &state.status(1)).is_err());
+        db.observe_ams(&edited, &state.status(1)).unwrap();
+        assert_eq!(db.ams_slots(&d.id).unwrap().len(), 1);
+    }
+    #[test]
+    fn observed_slots_keep_manual_materials_until_identity_changes() {
+        use crate::printer_state::State;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        let f = crate::filament::Filament {
+            id: "gf".into(),
+            data: crate::filament::FilamentData {
+                name: "Glass PETG".into(),
+                vendor: "Third party".into(),
+                material: "PETG-GF".into(),
+                color: "FFFFFFFF".into(),
+                bambu_filament_id: None,
+            },
+        };
+        db.save_filament(&f).unwrap();
+        let mut state = State::new(true);
+        state.connected();
+        state.apply(br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,"ams":{"tray_exist_bits":"1","ams":[{"id":"0","tray":[{"id":"0","tray_type":"PETG","tray_color":"FFFFFFFF","remain":-1}]}]}}}"#,1);
+        db.observe_ams(&device(), &state.status(1)).unwrap();
+        let slot = db.ams_slots("stable-id").unwrap().remove(0);
+        db.map_slot("stable-id", &slot.id, slot.revision, Some("gf"))
+            .unwrap();
+        assert!(db.delete_filament("gf").is_err());
+        state.apply(br#"{"print":{"command":"push_status","msg":1,"ams":{"ams":[{"id":"0","tray":[{"id":"0","remain":40}]}]}}}"#,2);
+        db.observe_ams(&device(), &state.status(2)).unwrap();
+        let slot = db.ams_slots("stable-id").unwrap().remove(0);
+        assert_eq!(slot.filament_id.as_deref(), Some("gf"));
+        assert_eq!(slot.mapping_source, "manual");
+        assert_eq!(slot.reported.material.as_deref(), Some("PETG"));
+        state.apply(br#"{"print":{"command":"push_status","msg":1,"ams":{"ams":[{"id":"0","tray":[{"id":"0","tray_color":"000000FF"}]}]}}}"#,3);
+        db.observe_ams(&device(), &state.status(3)).unwrap();
+        assert!(
+            db.map_slot("stable-id", &slot.id, slot.revision, Some("gf"))
+                .is_err()
+        );
+        let changed = db.ams_slots("stable-id").unwrap().remove(0);
+        assert!(changed.filament_id.is_none());
+        assert!(changed.revision > slot.revision);
+        db.delete_filament("gf").unwrap();
+    }
+    #[test]
+    fn materials_and_machine_settings_persist_and_protect_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        let f = crate::filament::Filament {
+            id: "material-1".into(),
+            data: crate::filament::FilamentData {
+                name: "My glass PETG".into(),
+                vendor: "Third party".into(),
+                material: "PETG-GF".into(),
+                color: "FFFFFFFF".into(),
+                bambu_filament_id: None,
+            },
+        };
+        db.save_filament(&f).unwrap();
+        let setting = crate::filament::Setting {
+            id: "setting-1".into(),
+            filament_id: f.id.clone(),
+            data: crate::filament::SettingData {
+                machine_profile_key: crate::profiles::PRINTER.into(),
+                base_profile_key: "Generic PETG @BBL X1C".into(),
+                overrides_json: crate::filament::Overrides {
+                    nozzle_temperature_initial_layer: Some(250),
+                    nozzle_temperature: Some(240),
+                },
+            },
+        };
+        db.save_setting(&setting).unwrap();
+        let mut duplicate = setting.clone();
+        duplicate.id = "duplicate".into();
+        assert!(db.save_setting(&duplicate).is_err());
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("no reimport")).unwrap();
+        assert_eq!(db.filaments().unwrap()[0].data.material, "PETG-GF");
+        assert_eq!(
+            db.filament_settings(&f.id).unwrap()[0]
+                .data
+                .overrides_json
+                .nozzle_temperature,
+            Some(240)
+        );
+        db.delete_filament(&f.id).unwrap();
+        assert!(db.filament_settings(&f.id).unwrap().is_empty());
     }
     #[test]
     fn invalid_registry_metadata_cannot_be_saved_as_usable_configuration() {

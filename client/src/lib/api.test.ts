@@ -62,3 +62,16 @@ it("keeps queue conflicts distinguishable from an unknown network result", async
     message: expect.stringContaining("キュー"),
   });
 });
+
+it("explains material references and stale AMS mappings in the correct context", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("conflict", { status: 409 })),
+  );
+  await expect(
+    request("/api/filaments/a", { method: "DELETE" }),
+  ).rejects.toThrow("参照");
+  await expect(
+    request("/api/printers/p/ams/s", { method: "PUT" }),
+  ).rejects.toThrow("AMS");
+});

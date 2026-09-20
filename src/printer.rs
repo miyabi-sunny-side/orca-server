@@ -383,6 +383,7 @@ pub struct Printer {
     config: Option<Config>,
     starts: mpsc::Sender<(String, u64)>,
     _observation: Option<Arc<Observation>>,
+    inventory: Option<(crate::database::Database, crate::database::Device)>,
 }
 
 #[derive(serde::Deserialize)]
@@ -396,7 +397,10 @@ impl Printer {
     /// Start the configured observation loop. Missing settings disable printing.
     /// # Errors
     /// Rejects an invalid pinned certificate.
-    pub fn new(config: Option<Config>) -> std::result::Result<Self, &'static str> {
+    pub(crate) fn new(
+        config: Option<Config>,
+        inventory: Option<(crate::database::Database, crate::database::Device)>,
+    ) -> std::result::Result<Self, &'static str> {
         let state = Arc::new(Mutex::new(State::new(config.is_some())));
         let (starts, receiver) = mpsc::channel(1);
         let observation = if let Some(config) = &config {
@@ -406,6 +410,7 @@ impl Printer {
                     config.clone(),
                     state.clone(),
                     receiver,
+                    inventory.clone(),
                 ))
                 .abort_handle(),
             )))
@@ -417,11 +422,40 @@ impl Printer {
             config,
             starts,
             _observation: observation,
+            inventory,
         })
     }
 
     pub async fn status(&self) -> crate::printer_state::Status {
         self.state.lock().await.status(now())
+    }
+
+    pub(crate) async fn ams_inventory(
+        &self,
+        mapping: Option<(String, crate::ams::Mapping)>,
+    ) -> Result<(bool, Vec<crate::ams::AmsSlot>)> {
+        let state = self.state.lock().await;
+        let status = state.status(now());
+        let current = status.synchronized;
+        if mapping
+            .as_ref()
+            .is_some_and(|(_, m)| m.filament_id.is_some())
+            && !current
+        {
+            return Err(Error::Conflict(
+                "Wait for a complete, current printer report before mapping",
+            ));
+        }
+        let (db, device) = self.inventory.clone().ok_or(Error::NotFound)?;
+        let slots = crate::plate_api::blocking(move || {
+            db.observe_ams(&device, &status)?;
+            if let Some((id, m)) = mapping {
+                db.map_slot(&device.id, &id, m.revision, m.filament_id.as_deref())?;
+            }
+            db.ams_slots(&device.id)
+        })
+        .await?;
+        Ok((current, slots))
     }
 
     /// Release an unknown request after the operator has inspected a ready printer.
@@ -567,6 +601,7 @@ async fn run(
     config: Config,
     state: Arc<Mutex<State>>,
     mut starts: mpsc::Receiver<(String, u64)>,
+    inventory: Option<(crate::database::Database, crate::database::Device)>,
 ) {
     let serial = &config.serial;
     let start_timeout = config.start_timeout;
@@ -595,8 +630,14 @@ async fn run(
                     }
                     Ok(Event::Incoming(Incoming::Publish(message))) if subscribed && message.topic == report && !message.retain => {
                         let mut state = state.lock().await;
-                        state.apply(&message.payload, now());
+                        let applied=state.apply(&message.payload, now());
                         let status = state.status(now());
+                        if applied && let Some((db,device))=&inventory {
+                            let db=db.clone();let device=device.clone();let observed=state.status(now());
+                            if crate::plate_api::blocking(move || db.observe_ams(&device,&observed)).await.is_err() {
+                                tracing::warn!("AMS observation could not be saved; inventory reads will retry");
+                            }
+                        }
                         if let Ok(value) = serde_json::from_slice(&message.payload)
                             && let Some(start) = &mut state.start { start.observe(&value, &status); }
                     }

@@ -60,6 +60,25 @@ export async function request<T>(
         : "キューを操作できませんでした。プレートやプリンターの状態を確認してください。";
     throw new ApiError(response.status, message);
   }
+  if (
+    path.startsWith("/api/filaments") ||
+    /^\/api\/printers\/[^/]+\/ams(?:\/|$)/.test(path)
+  ) {
+    const messages: Record<number, string> = {
+      400: "材料の種別・色・温度と、機種に対応する基本プロファイルを確認してください。",
+      404: "材料・設定・AMSスロットが見つかりません。一覧から開き直してください。",
+      409: path.includes("/ams")
+        ? "AMSの観測状態が変わったか未確認です。状態を更新して材料を選び直してください。"
+        : "AMSからの参照、または同じ機種の設定が存在します。対応づけと登録済み設定を確認してください。",
+      422: "入力の形式を確認してください。温度は整数で指定します。",
+      503: "材料の保存先またはプロファイルを利用できません。接続とサーバー設定を確認してください。",
+    };
+    throw new ApiError(
+      response.status,
+      messages[response.status] ??
+        "材料を操作できませんでした。再試行してください。",
+    );
+  }
   if (path.startsWith("/api/printers")) {
     const message: Record<number, string> = {
       400: "接続情報、証明書、機種と工程の組み合わせを確認してください。",
@@ -115,4 +134,62 @@ export type Printer = {
     nozzle_diameter: string | null;
     nozzle_material: string | null;
   };
+};
+
+export type Filament = {
+  id: string;
+  name: string;
+  vendor: string;
+  material: string;
+  color: string;
+  bambu_filament_id: string | null;
+};
+export type FilamentTemperatures = {
+  nozzle_temperature_initial_layer: string | null;
+  nozzle_temperature: string | null;
+  required_nozzle_hrc: string | null;
+};
+export type FilamentSetting = {
+  id: string;
+  filament_id: string;
+  machine_profile_key: string;
+  base_profile_key: string;
+  overrides_json: {
+    nozzle_temperature_initial_layer?: number;
+    nozzle_temperature?: number;
+  };
+  resolved?: FilamentTemperatures | null;
+  error?: string | null;
+};
+export type FilamentProfile = { key: string; resolved: FilamentTemperatures };
+export type AmsSlot = {
+  id: string;
+  ams_id: number;
+  slot_index: number;
+  filament_id: string | null;
+  mapping_source: string;
+  revision: number;
+  current: boolean;
+  detect_on_insert: boolean | null;
+  detect_on_power_up: boolean | null;
+  filament: Filament | null;
+  setting: FilamentSetting | null;
+  nozzle_fit: string;
+  reported: {
+    present: boolean | null;
+    material: string | null;
+    brand: string | null;
+    color: string | null;
+    profile_id: string | null;
+    tag_uid: string | null;
+    temperature_min: number | null;
+    temperature_max: number | null;
+    remaining_percent: number | null;
+    last_seen_at: number | null;
+  };
+};
+export type AmsInventory = {
+  printer_id: string;
+  current: boolean;
+  slots: AmsSlot[];
 };

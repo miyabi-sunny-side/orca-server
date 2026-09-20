@@ -135,6 +135,50 @@ impl Profiles {
         Ok(())
     }
 
+    pub(crate) fn resolve_filament(
+        &self,
+        setting: &crate::filament::SettingData,
+        material: &str,
+    ) -> Result<Map<String, Value>> {
+        setting.overrides_json.validate()?;
+        self.machine(&setting.machine_profile_key)?;
+        let mut profile = selectable(
+            &self.filament,
+            &setting.base_profile_key,
+            &setting.machine_profile_key,
+        )?;
+        let base = profile
+            .get("filament_type")
+            .and_then(|v| v.get(0))
+            .and_then(Value::as_str)
+            .ok_or(Error::Invalid("Base profile has no material type"))?;
+        if material != base
+            && material
+                .strip_suffix("-CF")
+                .or_else(|| material.strip_suffix("-GF"))
+                != Some(base)
+        {
+            return Err(Error::Invalid(
+                "Base profile material differs from the catalog material",
+            ));
+        }
+        for (key, value) in [
+            (
+                "nozzle_temperature_initial_layer",
+                setting.overrides_json.nozzle_temperature_initial_layer,
+            ),
+            (
+                "nozzle_temperature",
+                setting.overrides_json.nozzle_temperature,
+            ),
+        ] {
+            if let Some(value) = value {
+                profile.insert(key.into(), serde_json::json!([value.to_string()]));
+            }
+        }
+        Ok(profile)
+    }
+
     pub fn write(&self, selection: &Selection, directory: &Path) -> Result<()> {
         if !BEDS.contains(&selection.bed.as_str()) {
             return Err(Error::Invalid("Unknown bed type"));
@@ -209,6 +253,47 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn material_settings_resolve_only_compatible_profiles_and_typed_deltas() {
+        let profiles = Profiles {
+            machine: BTreeMap::from([(
+                PRINTER.into(),
+                json!({"instantiation":"true","nozzle_diameter":["0.4"]}),
+            )]),
+            process: BTreeMap::new(),
+            filament: BTreeMap::from([
+                (
+                    "base".into(),
+                    json!({"instantiation":"false","filament_type":["PETG"],"nozzle_temperature_initial_layer":["255"],"nozzle_temperature":["255"],"required_nozzle_HRC":["0"]}),
+                ),
+                (
+                    "petg".into(),
+                    json!({"inherits":"base","instantiation":"true","compatible_printers":[PRINTER]}),
+                ),
+            ]),
+        };
+        let mut setting = crate::filament::SettingData {
+            machine_profile_key: PRINTER.into(),
+            base_profile_key: "petg".into(),
+            overrides_json: crate::filament::Overrides::default(),
+        };
+        assert_eq!(
+            profiles.resolve_filament(&setting, "PETG-GF").unwrap()["nozzle_temperature"],
+            json!(["255"])
+        );
+        setting.overrides_json.nozzle_temperature_initial_layer = Some(250);
+        setting.overrides_json.nozzle_temperature = Some(240);
+        let resolved = profiles.resolve_filament(&setting, "PETG-GF").unwrap();
+        assert_eq!(resolved["nozzle_temperature_initial_layer"], json!(["250"]));
+        assert_eq!(resolved["nozzle_temperature"], json!(["240"]));
+        assert_eq!(resolved["required_nozzle_HRC"], json!(["0"]));
+        assert!(profiles.resolve_filament(&setting, "PLA").is_err());
+        setting.machine_profile_key = "Bambu Lab P1S 0.2 nozzle".into();
+        assert!(profiles.resolve_filament(&setting, "PETG-GF").is_err());
+        setting.machine_profile_key = PRINTER.into();
+        setting.base_profile_key = "base".into();
+        assert!(profiles.resolve_filament(&setting, "PETG").is_err());
+    }
     #[test]
     fn machine_choices_and_defaults_never_cross_nozzle_profiles() {
         let a1 = "Bambu Lab A1 mini 0.2 nozzle";

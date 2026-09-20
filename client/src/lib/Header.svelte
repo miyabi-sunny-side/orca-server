@@ -57,6 +57,7 @@
           テーマ設定
         </button>
         <a class="menu-item" href="/printers">プリンター</a>
+        <a class="menu-item" href="/filaments">フィラメント</a>
         <a class="menu-item" href="/queue">印刷キュー</a>
         <a class="menu-item" href="/about">ライセンスとソース</a>
       </nav>

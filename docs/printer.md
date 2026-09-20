@@ -24,7 +24,7 @@ P1SへMQTT/TLSで接続し、印刷状態・進捗・エラー番号・AMSトレ
 
 ## SQLiteと初回取り込み
 
-`<PLATES_DIR>/orca.sqlite3`の`printers`テーブルへ設定を保存します。現在のschema versionは1で、
+`<PLATES_DIR>/orca.sqlite3`の`printers`テーブルへ設定を保存します。現在のschema versionは2で、
 SQLiteの`PRAGMA user_version`で管理します。初期化と環境変数からの取り込みは同じtransactionで確定します。
 失敗すれば未完了の初期化を取り消します。新しいschemaを古い実行ファイルで開く場合は、書き換えずに起動を拒否します。
 
@@ -191,9 +191,11 @@ curl --fail http://127.0.0.1:3000/api/printer/status
 `ready_to_print`は機器側の状態条件を表し、造形物を除去したかどうかは判定しません。
 
 AMSの各unitは`id`、`humidity`、`trays`を持ちます。湿度は機器が返す段階値で、百分率ではありません。
-trayは`id`、`present`、`material`、`color`、`remaining_percent`を持ちます。
+trayは`id`、`present`、`material`、`color`、`remaining_percent`のほか、材料ID・銘柄・タグ・温度範囲・最終観測時刻を持ちます。
+台帳との対応と永続化は[材料管理ガイド](filaments.md)を参照してください。
 在席状態が不明なら`present`は`null`、空のトレイでは材料情報を解除します。色はRRGGBBAAです。
-対象は従来AMSのunit 0〜3、各tray 0〜3です。未報告のIDを推測で選択可能にしません。
+AMS IDは0〜255を保持し、各trayは0〜3です。在席ビットで確認できるのは従来AMSのunit 0〜3です。
+未確認のIDは印刷用の選択肢へ加えません。
 `current_tray`は`unit × 4 + tray`、254は外部スプール、255は選択なしです。
 
 部分更新では未報告の値を保持し、トレイはIDごとに更新します。全状態の受信では以前の値をリセットします。

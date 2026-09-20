@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub const MAX_AGE_SECS: u64 = 60;
@@ -14,13 +14,19 @@ pub struct PrintStatus {
     pub name: Option<String>,
 }
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Tray {
     pub id: u8,
     pub present: Option<bool>,
     pub material: Option<String>,
     pub color: Option<String>,
     pub remaining_percent: Option<u8>,
+    pub profile_id: Option<String>,
+    pub brand: Option<String>,
+    pub tag_uid: Option<String>,
+    pub temperature_min: Option<u16>,
+    pub temperature_max: Option<u16>,
+    pub last_seen_at: Option<u64>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -32,6 +38,8 @@ pub struct Unit {
 
 #[derive(Clone, Default, Serialize)]
 pub struct AmsStatus {
+    pub detect_on_insert: Option<bool>,
+    pub detect_on_power_up: Option<bool>,
     pub current_tray: Option<u16>,
     pub units: Vec<Unit>,
 }
@@ -149,7 +157,7 @@ impl State {
         update(&mut self.print.name, report, "subtask_name", string);
         if let Some(ams) = report.get("ams") {
             if let Some(ams) = ams.as_object() {
-                self.update_ams(ams);
+                self.update_ams(ams, now);
             } else {
                 self.ams = None;
                 self.tray_bits = None;
@@ -189,8 +197,20 @@ impl State {
         }
     }
 
-    fn update_ams(&mut self, report: &Map<String, Value>) {
+    fn update_ams(&mut self, report: &Map<String, Value>, now: u64) {
         let ams = self.ams.get_or_insert_with(AmsStatus::default);
+        update(
+            &mut ams.detect_on_insert,
+            report,
+            "insert_flag",
+            Value::as_bool,
+        );
+        update(
+            &mut ams.detect_on_power_up,
+            report,
+            "power_on_flag",
+            Value::as_bool,
+        );
         update(&mut ams.current_tray, report, "tray_now", |v| {
             number(v)
                 .filter(|&v| v < 16 || v == 254 || v == 255)
@@ -202,7 +222,10 @@ impl State {
                 ams.units.clear();
             }
             for raw in units {
-                let Some(id) = raw.get("id").and_then(slot) else {
+                let Some(id) = raw
+                    .get("id")
+                    .and_then(|v| number(v).and_then(|n| u8::try_from(n).ok()))
+                else {
                     continue;
                 };
                 let Some(raw) = raw.as_object() else {
@@ -242,7 +265,7 @@ impl State {
                             if !report.contains_key("tray_exist_bits")
                                 && let Some(mask) = &mut self.tray_bits
                             {
-                                *mask &= !(1 << (unit.id * 4 + id));
+                                *mask &= !tray_bit(unit.id, id).unwrap_or(0);
                             }
                             *tray = Tray {
                                 id,
@@ -250,15 +273,7 @@ impl State {
                                 ..Tray::default()
                             };
                         }
-                        update(&mut tray.material, raw, "tray_type", string);
-                        update(&mut tray.color, raw, "tray_color", |v| {
-                            v.as_str()
-                                .filter(|s| {
-                                    s.len() == 8 && s.bytes().all(|b| b.is_ascii_hexdigit())
-                                })
-                                .map(str::to_owned)
-                        });
-                        update(&mut tray.remaining_percent, raw, "remain", percent);
+                        tray.update(raw, now);
                     }
                     unit.trays.sort_by_key(|tray| tray.id);
                 }
@@ -266,26 +281,70 @@ impl State {
         }
         if let Some(value) = report.get("ams_exist_bits") {
             if let Some(mask) = bits(value) {
-                ams.units.retain(|unit| mask & (1 << unit.id) != 0);
+                ams.units.retain(|unit| {
+                    1u16.checked_shl(u32::from(unit.id))
+                        .is_none_or(|bit| mask & bit != 0)
+                });
             } else {
                 ams.units.clear();
             }
         }
-        for unit in &mut ams.units {
+        ams.update_presence(self.tray_bits, now);
+        ams.units.sort_by_key(|unit| unit.id);
+    }
+}
+
+impl AmsStatus {
+    fn update_presence(&mut self, bits: Option<u16>, now: u64) {
+        for unit in &mut self.units {
             for tray in &mut unit.trays {
-                if let Some(mask) = self.tray_bits {
-                    tray.present = Some(mask & (1 << (unit.id * 4 + tray.id)) != 0);
+                if let Some((mask, bit)) = bits.zip(tray_bit(unit.id, tray.id)) {
+                    let present = mask & bit != 0;
+                    if tray.present != Some(present) {
+                        tray.last_seen_at = Some(now);
+                    }
+                    tray.present = Some(present);
                     if tray.present == Some(false) {
                         *tray = Tray {
                             id: tray.id,
                             present: Some(false),
+                            last_seen_at: tray.last_seen_at,
                             ..Tray::default()
                         };
                     }
                 }
             }
         }
-        ams.units.sort_by_key(|unit| unit.id);
+    }
+}
+
+impl Tray {
+    fn update(&mut self, raw: &Map<String, Value>, now: u64) {
+        update(&mut self.material, raw, "tray_type", string);
+        update(&mut self.profile_id, raw, "tray_info_idx", string);
+        update(&mut self.brand, raw, "tray_sub_brands", string);
+        update(&mut self.tag_uid, raw, "tag_uid", |v| {
+            string(v).filter(|s| s.chars().any(|c| c != '0'))
+        });
+        update(
+            &mut self.temperature_min,
+            raw,
+            "nozzle_temp_min",
+            temperature,
+        );
+        update(
+            &mut self.temperature_max,
+            raw,
+            "nozzle_temp_max",
+            temperature,
+        );
+        update(&mut self.color, raw, "tray_color", |v| {
+            v.as_str()
+                .filter(|s| s.len() == 8 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(str::to_owned)
+        });
+        update(&mut self.remaining_percent, raw, "remain", percent);
+        self.last_seen_at = Some(now);
     }
 }
 
@@ -301,6 +360,14 @@ fn update<T>(
 }
 fn number(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| value.as_str()?.parse().ok())
+}
+fn tray_bit(unit: u8, tray: u8) -> Option<u16> {
+    1u16.checked_shl(u32::from(unit) * 4 + u32::from(tray))
+}
+fn temperature(value: &Value) -> Option<u16> {
+    number(value)
+        .filter(|v| (1..=500).contains(v))
+        .and_then(|v| u16::try_from(v).ok())
 }
 fn percent(value: &Value) -> Option<u8> {
     number(value)
@@ -326,6 +393,72 @@ fn string(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn ams_identity_and_temperatures_merge_without_inventing_unknown_values() {
+        let mut state = State::new(true);
+        state.connected();
+        assert!(push(
+            &mut state,
+            json!({"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,
+            "ams":{"insert_flag":true,"power_on_flag":true,"tray_exist_bits":"3","ams":[{"id":"0","tray":[
+                {"id":"0","tray_type":"PLA","tray_sub_brands":"PLA Matte","tray_info_idx":"GFA01","tray_color":"000000FF","tag_uid":"0123456789AB","nozzle_temp_min":"190","nozzle_temp_max":"230","remain":-1},
+                {"id":"1","tray_type":"PETG","tray_info_idx":"PTEST001","tray_color":"FFFFFFFF","tag_uid":"000000000000","nozzle_temp_min":"220","nozzle_temp_max":"260","remain":60}
+            ]}]}}),
+            10
+        ));
+        let ams = state.status(10).ams.unwrap();
+        assert_eq!(ams.detect_on_insert, Some(true));
+        assert_eq!(ams.detect_on_power_up, Some(true));
+        let tray = &ams.units[0].trays[0];
+        assert_eq!(tray.profile_id.as_deref(), Some("GFA01"));
+        assert_eq!(tray.brand.as_deref(), Some("PLA Matte"));
+        assert_eq!(tray.tag_uid.as_deref(), Some("0123456789AB"));
+        assert_eq!(tray.temperature_min, Some(190));
+        assert_eq!(tray.temperature_max, Some(230));
+        assert_eq!(tray.remaining_percent, None);
+        assert_eq!(ams.units[0].trays[1].tag_uid, None);
+        push(
+            &mut state,
+            json!({"command":"push_status","msg":1,"ams":{"ams":[{"id":"0","tray":[{"id":"0","remain":50}]}]}}),
+            11,
+        );
+        let tray = &state.status(11).ams.unwrap().units[0].trays[0];
+        assert_eq!(tray.tag_uid.as_deref(), Some("0123456789AB"));
+        assert_eq!(tray.temperature_max, Some(230));
+        assert_eq!(tray.remaining_percent, Some(50));
+        push(
+            &mut state,
+            json!({"command":"push_status","msg":1,"ams":{"ams":[{"id":"0","tray":[{"id":"0"}]}]}}),
+            12,
+        );
+        let tray = &state.status(12).ams.unwrap().units[0].trays[0];
+        assert_eq!(tray.present, Some(false));
+        assert!(
+            tray.tag_uid.is_none() && tray.profile_id.is_none() && tray.temperature_max.is_none()
+        );
+        state.disconnected();
+        assert!(!state.status(13).synchronized);
+        state.connected();
+        assert!(state.status(14).ams.is_none());
+    }
+
+    #[test]
+    fn ams_unit_identity_is_not_a_global_four_slot_index() {
+        let mut state = State::new(true);
+        state.connected();
+        push(
+            &mut state,
+            json!({"command":"push_status","gcode_state":"IDLE","print_error":0,
+            "ams":{"ams":[{"id":"0","tray":[{"id":"0","tray_type":"PLA"}]},{"id":"128","tray":[{"id":"0","tray_type":"PETG"}]}]}}),
+            1,
+        );
+        let ams = state.status(1).ams.unwrap();
+        assert_eq!(ams.units.len(), 2);
+        assert_eq!(ams.units[1].id, 128);
+        assert_eq!(ams.units[1].trays[0].material.as_deref(), Some("PETG"));
+        assert_eq!(ams.units[1].trays[0].present, None);
+    }
 
     fn push(state: &mut State, value: Value, now: u64) -> bool {
         state.apply(
