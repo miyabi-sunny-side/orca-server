@@ -71,6 +71,13 @@ enum Action {
     },
 }
 
+#[derive(Serialize)]
+struct Availability {
+    next: bool,
+    retry: bool,
+    discard: bool,
+}
+
 #[derive(Default, Serialize)]
 struct Queue {
     generation: u64,
@@ -128,12 +135,45 @@ impl Queue {
             .ok_or(Error::Conflict("Waiting job is no longer available"))?;
         Ok(self.waiting.remove(index))
     }
-    fn begin(&mut self, expected: &str, cleared: bool, ready: bool, retry: bool) -> Result<Job> {
+    fn check_next(&self, expected: &str, cleared: bool, ready: bool) -> Result<()> {
         if !cleared || !ready {
             return Err(Error::Conflict(
                 "Confirm the cleared build plate and wait for a ready printer",
             ));
         }
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|c| c.phase != JobPhase::AwaitingRemoval)
+        {
+            return Err(Error::Conflict(
+                "Current print is active or needs attention",
+            ));
+        }
+        if self.waiting.first().is_none_or(|job| job.id != expected) {
+            return Err(Error::Conflict(
+                "Expected next job is no longer at the head",
+            ));
+        }
+        Ok(())
+    }
+    fn availability(&self, ready: bool) -> Availability {
+        Availability {
+            next: self
+                .waiting
+                .first()
+                .is_some_and(|job| self.check_next(&job.id, true, ready).is_ok()),
+            retry: self
+                .current
+                .as_ref()
+                .is_some_and(|c| self.check_recovery(&c.job.id, true, ready, true).is_ok()),
+            discard: self
+                .current
+                .as_ref()
+                .is_some_and(|c| self.check_recovery(&c.job.id, true, ready, false).is_ok()),
+        }
+    }
+    fn begin(&mut self, expected: &str, cleared: bool, ready: bool, retry: bool) -> Result<Job> {
         let job = if retry {
             self.check_recovery(expected, cleared, ready, true)?;
             self.current
@@ -142,20 +182,7 @@ impl Queue {
                 .job
                 .clone()
         } else {
-            if self
-                .current
-                .as_ref()
-                .is_some_and(|c| c.phase != JobPhase::AwaitingRemoval)
-            {
-                return Err(Error::Conflict(
-                    "Current print is active or needs attention",
-                ));
-            }
-            if self.waiting.first().is_none_or(|job| job.id != expected) {
-                return Err(Error::Conflict(
-                    "Expected next job is no longer at the head",
-                ));
-            }
+            self.check_next(expected, cleared, ready)?;
             self.waiting.remove(0)
         };
         self.current = Some(Current {
@@ -311,7 +338,7 @@ pub fn router(
 }
 
 fn view(queue: &Queue, printer: &Status) -> serde_json::Value {
-    serde_json::json!({"generation":queue.generation,"current":queue.current,"waiting":queue.waiting,"printer":printer})
+    serde_json::json!({"request_id":uuid::Uuid::new_v4().to_string(),"allowed":queue.availability(printer.ready_to_print),"generation":queue.generation,"current":queue.current,"waiting":queue.waiting,"printer":printer})
 }
 fn cleanup(job: &Job) {
     if std::fs::remove_dir_all(&job.directory).is_err() {
@@ -481,6 +508,33 @@ mod tests {
         state.connected();
         state.apply(include_bytes!("../tests/fixtures/p1_status.json"), 10);
         state.status(10)
+    }
+
+    #[test]
+    fn availability_tracks_current_job_and_printer_readiness() {
+        let mut q = Queue::default();
+        assert!(!q.availability(true).next);
+        q.add(job("A")).unwrap();
+        q.add(job("B")).unwrap();
+        assert!(q.availability(true).next);
+        assert!(!q.availability(false).next);
+        q.begin("A", true, true, false).unwrap();
+        assert!(!q.availability(true).next);
+        assert!(!q.availability(true).retry);
+        assert!(!q.availability(true).discard);
+        q.failed("Inspect the printer");
+        assert!(!q.availability(true).next);
+        assert!(q.availability(true).retry);
+        assert!(q.availability(true).discard);
+        assert!(!q.availability(false).retry);
+        assert!(!q.availability(false).discard);
+        q.current.as_mut().unwrap().phase = JobPhase::AwaitingRemoval;
+        assert!(q.availability(true).next);
+        assert!(!q.availability(true).retry);
+        assert!(q.availability(true).discard);
+        q.remove("B").unwrap();
+        assert!(!q.availability(true).next);
+        assert!(q.availability(true).discard);
     }
 
     #[test]

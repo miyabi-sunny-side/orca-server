@@ -75,6 +75,9 @@ jobs:
       - name: Verify queue snapshots and manual next-print flow
         run: python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 
+      - name: Verify mobile queue against isolated printer
+        run: python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
+
       - name: Smoke-test embedded UI from an isolated directory
         shell: bash
         run: |

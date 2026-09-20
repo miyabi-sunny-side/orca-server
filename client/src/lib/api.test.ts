@@ -41,3 +41,24 @@ it("explains recoverable failures without treating HTTP errors as success", asyn
   await expect(request("/api/plates/id/slice")).rejects.toThrow("時間の上限");
   await expect(request("/api/plates")).rejects.toThrow("接続できません");
 });
+
+it("keeps queue conflicts distinguishable from an unknown network result", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "Queue changed" }), {
+          status: 409,
+        }),
+      )
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 })),
+  );
+  await expect(request("/api/queue", { method: "POST" })).rejects.toMatchObject(
+    { status: 409, message: expect.stringContaining("キュー") },
+  );
+  await expect(request("/api/queue")).rejects.toMatchObject({
+    status: 503,
+    message: expect.stringContaining("キュー"),
+  });
+});

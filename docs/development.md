@@ -77,6 +77,7 @@ MQTT接続の隔離検証にはPython 3と`openssl`コマンドを使います�
 python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
 python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
+python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 ```
 
 印刷開始の検証はFTPSのTLSセッション再利用・転送内容・AMS指定・拒否・通信断・重複操作も確認します。

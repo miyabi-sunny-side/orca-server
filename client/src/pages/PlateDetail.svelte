@@ -98,6 +98,10 @@
       <h1 class="plate-name">{plate.name}</h1>
       <span class="caption">{plate.print ? "配置済み" : "スライス未完了"}</span>
     </div>
+    {#if plate.print}<div class="actions">
+        <a class="btn primary" href={`/queue?plate=${plate.id}`}>印刷キューへ</a
+        >
+      </div>{/if}
     {#if busy}<p class="state" role="status">
         <span class="spinner" aria-hidden="true"></span>{busy}
       </p>{/if}
@@ -173,7 +177,7 @@
     </details>
     <div class="actions">
       {#if plate.print}<a
-          class="btn primary"
+          class="btn"
           href={`/api/plates/${plate.id}/files/${plate.print}`}
           download={`${plate.name}.gcode.3mf`}>印刷データを取得</a
         >{/if}

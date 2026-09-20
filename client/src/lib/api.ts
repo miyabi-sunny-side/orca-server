@@ -19,6 +19,15 @@ export type Profiles = {
 export type Layout = { revision: string; models: ModelBounds[] };
 export type ModelBounds = { index: number; bounds: [number, number][] };
 
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export async function request<T>(
   path: string,
   options?: RequestInit,
@@ -34,6 +43,13 @@ export async function request<T>(
   }
   if (response.ok) return response.json();
   const data = await response.json().catch(() => ({}));
+  if (path === "/api/queue") {
+    const message =
+      response.status === 409
+        ? "プレート・キュー・プリンターの状態が変わりました。内容を確認して操作し直してください。"
+        : "キューを操作できませんでした。プレートやプリンターの状態を確認してください。";
+    throw new ApiError(response.status, message);
+  }
   if (String(data.error).includes("fit together")) {
     throw new Error(
       "モデルが1枚のプレートに収まりません。選択するモデルを減らしてください。",
