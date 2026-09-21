@@ -216,13 +216,6 @@
             href={`/filaments/${slot.filament.id}`}>材料の設定へ</a
           >
         </p>{/if}
-      {#if slot.filament}<p>
-          {slot.nozzle_fit === "supported"
-            ? "既知のノズル条件に適合"
-            : slot.nozzle_fit === "unsupported"
-              ? "ノズルの条件に非対応"
-              : "ノズル適合は未確認"}
-        </p>{/if}
       <dl>
         <dt>機器が認識する補充先</dt>
         <dd>

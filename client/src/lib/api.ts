@@ -190,7 +190,6 @@ export type AmsSlot = {
   detect_on_power_up: boolean | null;
   filament: Filament | null;
   setting: FilamentSetting | null;
-  nozzle_fit: string;
   reported: {
     present: boolean | null;
     material: string | null;

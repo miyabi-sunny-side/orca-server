@@ -929,7 +929,6 @@ async fn inventory(
         .map(|slot| {
             let mut value = json!(slot);
             value["current"] = json!(current && slot.reported.present.is_some());
-            value["nozzle_fit"] = json!("unknown");
             value["setting"] = Value::Null;
             value["priority_group"] = json!([]);
             value["backup_peers"] = json!(
@@ -956,23 +955,6 @@ async fn inventory(
                                 .map(|s| json!({"id":s.id,"revision":s.revision}))
                                 .collect::<Vec<_>>()
                         );
-                        let diameter = p.machine(&s.data.machine_profile_key).ok().and_then(|m| {
-                            m.get("nozzle_diameter")?
-                                .get(0)?
-                                .as_str()
-                                .map(str::to_owned)
-                        });
-                        let hrc = resolved
-                            .get("required_nozzle_HRC")
-                            .and_then(|v| v.get(0))
-                            .and_then(Value::as_str)
-                            .and_then(|v| v.parse().ok());
-                        value["nozzle_fit"] = json!(crate::filament::nozzle_fit(
-                            &f.data.material,
-                            diameter.as_deref().unwrap_or(""),
-                            &entry.device.settings.nozzle_material,
-                            hrc
-                        ));
                     }
                 }
             } else {

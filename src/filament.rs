@@ -134,37 +134,6 @@ pub(crate) fn same_identity(a: &Tray, b: &Tray) -> bool {
         && a.temperature_max == b.temperature_max
 }
 
-pub(crate) fn nozzle_fit(
-    material: &str,
-    diameter: &str,
-    nozzle_material: &str,
-    required_hrc: Option<u16>,
-) -> &'static str {
-    let abrasive = material.ends_with("-CF") || material.ends_with("-GF");
-    let Some(diameter) = diameter
-        .parse::<f64>()
-        .ok()
-        .filter(|d| d.is_finite() && *d > 0.)
-    else {
-        return "unknown";
-    };
-    if abrasive && diameter < 0.4 {
-        return "unsupported";
-    }
-    if nozzle_material == "unknown" {
-        return "unknown";
-    }
-    if (abrasive || required_hrc.is_some_and(|v| v > 20)) && nozzle_material != "hardened_steel" {
-        return "unsupported";
-    }
-    if required_hrc.is_some_and(|v| v > 55) {
-        return "unsupported";
-    }
-    if (abrasive && diameter < 0.6) || required_hrc.is_none() {
-        return "unknown";
-    }
-    "supported"
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,34 +239,5 @@ mod tests {
                 assert!(parsed.map_or(true, |p| p.validate().is_err()));
             }
         }
-    }
-    #[test]
-    fn abrasive_material_needs_a_suitable_known_nozzle() {
-        assert_eq!(
-            nozzle_fit("PETG-GF", "0.2", "hardened_steel", Some(0)),
-            "unsupported"
-        );
-        assert_eq!(
-            nozzle_fit("PETG-GF", "0.4", "stainless_steel", Some(0)),
-            "unsupported"
-        );
-        assert_eq!(nozzle_fit("PETG-GF", "0.4", "unknown", Some(0)), "unknown");
-        assert_eq!(
-            nozzle_fit("PETG-GF", "0.6", "hardened_steel", Some(40)),
-            "supported"
-        );
-        assert_eq!(
-            nozzle_fit("PLA", "0.2", "stainless_steel", Some(0)),
-            "supported"
-        );
-        assert_eq!(nozzle_fit("PLA", "0.4", "unknown", None), "unknown");
-        assert_eq!(
-            nozzle_fit("PLA", "0.4", "hardened_steel", Some(60)),
-            "unsupported"
-        );
-        assert_eq!(
-            nozzle_fit("PETG-GF", "0.4", "hardened_steel", Some(0)),
-            "unknown"
-        );
     }
 }

@@ -38,7 +38,7 @@ def fake_slicer(root):
         (profiles/'filament'/f'{i}.json').write_text(json.dumps(dict(name=name, instantiation='true', compatible_printers=machines,
             filament_type=[material], nozzle_temperature=['220'], nozzle_temperature_initial_layer=['220'], required_nozzle_HRC=['0'])))
     script = '''#!/usr/bin/env python3
-import hashlib, io, json, pathlib, sys, zipfile
+import hashlib, io, json, pathlib, sys, zipfile, xml.etree.ElementTree as ET
 if '--help' in sys.argv:
     print('OrcaSlicer-2.4.2:'); raise SystemExit()
 root=pathlib.Path.cwd()
@@ -54,6 +54,10 @@ with zipfile.ZipFile(ARTIFACT) as source, zipfile.ZipFile(output,'w',zipfile.ZIP
             settings.update(printer_settings_id=profiles['printer']['name'],print_settings_id=profiles['process']['name'],filament_settings_id=[profiles['filament']['name']])
             for key in ['filament_type','nozzle_temperature','nozzle_temperature_initial_layer']: settings[key]=profiles['filament'][key]
             data=json.dumps(settings).encode()
+        if entry.filename=='Metadata/slice_info.config':
+            metadata=ET.fromstring(data)
+            metadata.find('plate/filament').set('type',profiles['filament']['filament_type'][0])
+            data=ET.tostring(metadata)
         target.writestr(entry.filename,data)
 '''.replace('TRACE', repr(str(root/'cli.jsonl'))).replace('ARTIFACT', repr(str(REPO/'tests/fixtures/p1_print.gcode.3mf')))
     (app/'AppRun').write_text(script); (app/'AppRun').chmod(0o700)

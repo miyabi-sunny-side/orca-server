@@ -73,6 +73,7 @@ test('material CRUD, temperatures, manual mapping and stale observations',async(
   await expect(selector).toContainText('ガラス繊維入りPETG');
   await first.getByRole('button',{name:'AMS 0 スロット 1の詳細',exact:true}).click();
   await expect(first.getByText('設定温度: 初層 250℃ / 通常 240℃')).toBeVisible();
+  await expect(first.getByText(/ノズル.*(非対応|未確認|適合)/)).toHaveCount(0);
   for(const scheme of ['dark','light'] as const){
     await page.emulateMedia({colorScheme:scheme});
     for(const width of [320,375,900]){

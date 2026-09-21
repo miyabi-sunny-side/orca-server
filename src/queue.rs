@@ -202,22 +202,6 @@ fn available(
         .as_str()
         .ok_or(Error::Invalid("Invalid nozzle profile"))?;
     crate::print_start::check_nozzle(status, diameter, &device.settings.nozzle_material)?;
-    let hrc = resolved.profiles["filament.json"]
-        .get("required_nozzle_HRC")
-        .and_then(|v| v.get(0))
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse().ok());
-    if crate::filament::nozzle_fit(
-        &resolved.filament.data.material,
-        diameter,
-        &device.settings.nozzle_material,
-        hrc,
-    ) == "unsupported"
-    {
-        return Err(Error::Conflict(
-            "Material is incompatible with the registered nozzle",
-        ));
-    }
     let (ams,slot,assigned,present,revision):(u16,u8,Option<String>,Option<bool>,i64)=c.query_row("SELECT ams_id,slot_index,filament_id,present,revision FROM ams_slots WHERE printer_id=?1 AND id=?2",params![device.id,s.ams_slot_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
     if assigned.is_none()
         || present != Some(true)

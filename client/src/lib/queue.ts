@@ -127,8 +127,6 @@ export const failureText: Record<string, string> = {
     "AMSの現在の材料が使用予定と異なるか、装填を確認できません。",
   "Selected AMS slot is not confirmed present":
     "AMSスロットの装填を確認できません。",
-  "Material is incompatible with the registered nozzle":
-    "材料が登録したノズルの径・材質に対応していません。",
   "Server restarted; inspect the printer before another start":
     "再起動前の開始結果を確認できません。本体を確認してください。自動再送はしません。",
   "scad-live returned an unsuccessful response":

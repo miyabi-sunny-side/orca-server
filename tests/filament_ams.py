@@ -59,7 +59,7 @@ def main():
             profiles=api('/api/slicer/profiles');machine=profiles['printer'];ids=[]
             for i,b in enumerate(brokers):
                 saved=api('/api/printers',dict(name=f'材料確認 {i}',host='127.0.0.1',serial=b.serial,access_code=SECRET,tls_certificate=pem,
-                    machine_profile_key=machine,default_process_profile_key=profiles['defaults']['process'],bed_type=profiles['defaults']['bed'],nozzle_material='hardened_steel',mqtt_port=b.port,ftps_port=1),expected=201)
+                    machine_profile_key=machine,default_process_profile_key=profiles['defaults']['process'],bed_type=profiles['defaults']['bed'],nozzle_material='stainless_steel',mqtt_port=b.port,ftps_port=1),expected=201)
                 ids.append(saved['id'])
             materials=[]
             for name,vendor,kind,color,bid in [('ガラス繊維入りPETG','Third party','PETG-GF','FFFFFFFF',None),('PLA Matte 黒','Bambu Lab','PLA','000000FF','GFA01'),('PLA Matte 白','Bambu Lab','PLA','FFFFFFFF','GFA01'),('透明ブルーPETG','Third party','PETG','00AAFFFF',None)]:
@@ -87,7 +87,7 @@ def main():
             mapping(slots[0],gf['id']);mapping(slots[3],petg['id'])
             slots=inventory()['slots'];assert slots[0]['filament']['material']=='PETG-GF' and slots[0]['reported']['material']=='PETG'
             assert slots[0]['setting']['resolved']['nozzle_temperature_initial_layer']=='250'
-            assert slots[0]['setting']['resolved']['nozzle_temperature']=='240' and slots[0]['nozzle_fit']=='unknown'
+            assert slots[0]['setting']['resolved']['nozzle_temperature']=='240'
             assert slots[3]['reported']['temperature_max']==260 and slots[3]['setting']['resolved']['nozzle_temperature']=='220'
             assert inventory(1)['slots'][0]['filament_id'] is None
             api(f'/api/filaments/{gf["id"]}',method='DELETE',expected=409)
