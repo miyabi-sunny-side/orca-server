@@ -1,3 +1,4 @@
+const emptyDefaults={"default_printer_id":null,"conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null},"reason":"printer"};
 import { test, expect } from '@playwright/test';
 import { readFileSync, mkdirSync } from 'node:fs';
 const cube=readFileSync('../tests/fixtures/cube.stl'),triangle=readFileSync('../tests/fixtures/triangle.stl');
@@ -79,6 +80,7 @@ test('touch selection and quantity entry remain usable without a hover panel',as
   const page=await context.newPage();let reads=0;
   await page.route('**/api/**',route=>{
     const path=new URL(route.request().url()).pathname;
+    if(path==='/api/default-settings')return route.fulfill({json:emptyDefaults});
     if(path==='/api/scad/model')reads++;
     return route.fulfill({json:path==='/api/scad/models'?names:[]});
   });
@@ -97,6 +99,7 @@ test('editing an uploaded model previews its owned bytes without a SCAD connecti
   const plate={id,version:1,name:'保存済みアップロード',models:[{id:'upload',name:'upload.stl',source:null,quantity:5}]};
   await page.route('**/api/**',route=>{
     const path=new URL(route.request().url()).pathname;
+    if(path==='/api/default-settings')return route.fulfill({json:emptyDefaults});
     if(path===`/api/plates/${id}`)return route.fulfill({json:plate});
     if(path===`/api/plates/${id}/models/upload`)return route.fulfill({contentType:'application/octet-stream',body:cube});
     if(path==='/api/scad/model')publicReads++;

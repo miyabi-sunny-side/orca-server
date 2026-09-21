@@ -75,3 +75,13 @@ it("explains material references and stale AMS mappings in the correct context",
     request("/api/printers/p/ams/s", { method: "PUT" }),
   ).rejects.toThrow("AMS");
 });
+
+it("default selection failures identify the missing printer", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("missing", { status: 404 })),
+  );
+  await expect(
+    request("/api/default-settings", { method: "PUT" }),
+  ).rejects.toThrow("プリンターが見つかりません");
+});

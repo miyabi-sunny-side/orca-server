@@ -7,7 +7,7 @@ use crate::{
     slicer::Slicer,
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     routing::{get, post},
@@ -23,7 +23,7 @@ struct Entry {
     queue: Arc<queue::Service>,
     error: Option<&'static str>,
 }
-struct Registry {
+pub(crate) struct Registry {
     db: Database,
     // ponytail: one lock protects registry changes and print/queue admission for a handful of printers.
     entries: Mutex<BTreeMap<String, Entry>>,
@@ -148,7 +148,7 @@ impl Entry {
     }
 }
 
-/// Open the persistent printer registry and reuse the Bambu LAN print paths per device.
+/// Build the application with its persistent registry and per-device Bambu LAN paths.
 /// # Errors
 /// Rejects unreadable storage, unsupported schema versions or invalid initial environment settings.
 pub fn router(
@@ -157,6 +157,7 @@ pub fn router(
     slicer: Option<Slicer>,
     source: Option<crate::scad::Source>,
 ) -> Result<Router> {
+    let api = crate::app_with_slicer(store.clone(), source.clone(), slicer.clone());
     let db = store.db.clone();
     let disabled = Printer::new(None, None).map_err(Error::Invalid)?;
     let fallback_device = Device {
@@ -204,7 +205,12 @@ pub fn router(
             .get_mut()
             .insert(entry.device.id.clone(), entry);
     }
-    Ok(Router::new()
+    let registry = Arc::new(registry);
+    let routes = Router::new()
+        .route(
+            "/api/default-settings",
+            get(read_defaults).put(update_defaults),
+        )
         .route("/api/printers", get(list).post(create))
         .route("/api/printers/profiles", get(machines))
         .route("/api/printers/{id}", get(read).put(update).delete(delete))
@@ -243,7 +249,134 @@ pub fn router(
         )
         .layer(DefaultBodyLimit::max(80 * 1024))
         .layer(axum::middleware::from_fn(crate::plate_api::same_origin))
-        .with_state(Arc::new(registry)))
+        .with_state(registry.clone());
+    Ok(api.merge(routes).layer(Extension(registry)))
+}
+#[derive(serde::Serialize)]
+struct Defaults {
+    default_printer_id: Option<String>,
+    conditions: crate::plates::Conditions,
+    reason: Option<&'static str>,
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultQuery {
+    machine: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultChoice {
+    default_printer_id: Option<String>,
+}
+async fn read_defaults(
+    State(registry): State<Arc<Registry>>,
+    Query(query): Query<DefaultQuery>,
+) -> Result<Json<Defaults>> {
+    registry.defaults(query.machine.as_deref()).await.map(Json)
+}
+async fn update_defaults(
+    State(registry): State<Arc<Registry>>,
+    Json(choice): Json<DefaultChoice>,
+) -> Result<StatusCode> {
+    let _entries = registry.entries.lock().await;
+    let db = registry.db.clone();
+    crate::plate_api::blocking(move || {
+        db.set_default_printer(choice.default_printer_id.as_deref())
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+impl Registry {
+    async fn defaults(&self, machine: Option<&str>) -> Result<Defaults> {
+        let entries = self.entries.lock().await;
+        let mut result = Defaults {
+            default_printer_id: self.db.default_printer()?,
+            conditions: crate::plates::Conditions::default(),
+            reason: None,
+        };
+        let Some(entry) = result
+            .default_printer_id
+            .as_ref()
+            .and_then(|id| entries.get(id))
+        else {
+            result.reason = Some(if entries.is_empty() {
+                "printer"
+            } else {
+                "printer_selection"
+            });
+            return Ok(result);
+        };
+        let settings = &entry.device.settings;
+        let machine = machine.unwrap_or(&settings.machine_profile_key);
+        let Some(profiles) = self
+            .profiles
+            .as_ref()
+            .filter(|p| p.machine(machine).is_ok())
+        else {
+            result.reason = Some("profiles");
+            return Ok(result);
+        };
+        result.conditions.required_machine_profile_key = Some(machine.into());
+        result.conditions.bed_type = Some(settings.bed_type.clone());
+        if profiles
+            .validate_process(machine, &settings.default_process_profile_key)
+            .is_ok()
+        {
+            result.conditions.process_profile_key =
+                Some(settings.default_process_profile_key.clone());
+        }
+        let (current, slots) = entry.printer.ams_inventory(None).await?;
+        if !current {
+            result.reason = Some("ams_sync");
+            return Ok(result);
+        }
+        let filaments = self.db.filaments()?;
+        for slot in slots {
+            if slot.reported.present != Some(true) || slot.load_order.is_none() {
+                continue;
+            }
+            let Some(filament) = slot
+                .filament_id
+                .and_then(|id| filaments.iter().find(|f| f.id == id))
+            else {
+                continue;
+            };
+            if self.db.filament_settings(&filament.id)?.iter().any(|s| {
+                s.data.machine_profile_key == machine
+                    && profiles
+                        .resolve_filament(&s.data, &filament.data.material)
+                        .is_ok()
+            }) {
+                result.conditions.filament_id = Some(filament.id.clone());
+                break;
+            }
+        }
+        result.reason = if result.conditions.filament_id.is_none() {
+            Some("material")
+        } else if result.conditions.process_profile_key.is_none() {
+            Some("process")
+        } else {
+            None
+        };
+        Ok(result)
+    }
+    pub(crate) async fn fill_creation(&self, value: &mut crate::plates::Conditions) -> Result<()> {
+        let defaults = self
+            .defaults(value.required_machine_profile_key.as_deref())
+            .await?
+            .conditions;
+        value.required_machine_profile_key = value
+            .required_machine_profile_key
+            .take()
+            .or(defaults.required_machine_profile_key);
+        value.filament_id = value.filament_id.take().or(defaults.filament_id);
+        value.process_profile_key = value
+            .process_profile_key
+            .take()
+            .or(defaults.process_profile_key);
+        value.bed_type = value.bed_type.take().or(defaults.bed_type);
+        Ok(())
+    }
 }
 fn product_routes() -> Router<Arc<Registry>> {
     Router::new()
@@ -356,7 +489,13 @@ async fn update(
         }
         let mut comparison = settings.clone();
         comparison.name.clone_from(&old.device.settings.name);
-        let changed = comparison != old.device.settings;
+        comparison
+            .default_process_profile_key
+            .clone_from(&old.device.settings.default_process_profile_key);
+        comparison
+            .bed_type
+            .clone_from(&old.device.settings.bed_type);
+        let changed = comparison != old.device.settings || old.error.is_some();
         let queue = old.queue.clone();
         let _queue_guard = queue.lock.lock().await;
         let status = old.printer.status().await;
@@ -367,7 +506,7 @@ async fn update(
                 .as_deref()
                 .is_some_and(|s| !matches!(s, "IDLE" | "FINISH"));
         check_edit(active, changed, false)?;
-        settings.validate()?;
+        registry.config(&settings)?;
         let device = Device {
             id: id.clone(),
             settings,

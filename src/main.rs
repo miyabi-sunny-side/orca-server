@@ -38,15 +38,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let registry =
-        orca_server::registry::router(&root, plates.clone(), slicer.clone(), source.clone())?;
+    let registry = orca_server::registry::router(&root, plates, slicer, source)?;
     info!(%bind_addr, "server listening");
-    axum::serve(
-        listener,
-        orca_server::with_mcp(orca_server::app_with_slicer(plates, source, slicer).merge(registry)),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    axum::serve(listener, orca_server::with_mcp(registry))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     info!("server stopped");
     Ok(())

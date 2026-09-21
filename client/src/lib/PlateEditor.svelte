@@ -1,9 +1,14 @@
 <script lang="ts">
   import HoverPreview from "./HoverPreview.svelte";
   import PlateConditions from "./PlateConditions.svelte";
-  import { emptyConditions } from "./plate";
+  import { emptyConditions, initialConditions } from "./plate";
   import { onMount } from "svelte";
-  import { request, type Plate } from "./api";
+  import {
+    request,
+    type Plate,
+    type PlateConditions as Conditions,
+    type DefaultSettings,
+  } from "./api";
   let {
     initial,
     saved,
@@ -18,6 +23,29 @@
   };
   let root = $state<HTMLDivElement>();
   let conditions = $state({ ...emptyConditions });
+  let defaults = $state<DefaultSettings>();
+  let defaultsError = $state("");
+  let defaultsReading = $state(true);
+  const edited = new Set<keyof Conditions>();
+  async function loadDefaults() {
+    const query = conditions.required_machine_profile_key
+      ? `?machine=${encodeURIComponent(conditions.required_machine_profile_key)}`
+      : "";
+    try {
+      const result = await request<DefaultSettings>(
+        `/api/default-settings${query}`,
+        { signal: controller.signal },
+      );
+      if (!controller.signal.aborted) {
+        conditions = initialConditions(conditions, result.conditions, edited);
+        defaults = result;
+      }
+    } catch (e) {
+      if (!controller.signal.aborted) defaultsError = (e as Error).message;
+    } finally {
+      if (!controller.signal.aborted) defaultsReading = false;
+    }
+  }
   let step = $state(1),
     name = $state(""),
     selected = $state<Item[]>([]);
@@ -41,6 +69,7 @@
       selected = initial.models.map((m) => ({ ...m }));
       step = 2;
     }
+    void loadDefaults();
     return () => controller.abort();
   });
   $effect(() => {
@@ -215,7 +244,13 @@
         <p class="caption">
           合計 {total} 個 / 最大64個。SCADモデルは印刷準備の開始時に最新データを取得します。
         </p>
-        <PlateConditions bind:value={conditions} />
+        <PlateConditions
+          bind:value={conditions}
+          {defaults}
+          {defaultsReading}
+          {defaultsError}
+          changed={(key) => edited.add(key)}
+        />
       </fieldset>
       {#if error}<div class="notice">
           <p role="alert">{error}</p>
@@ -228,7 +263,8 @@
         <button
           class="btn primary"
           type="submit"
-          disabled={busy || !selected.length || total > 64}>保存</button
+          disabled={busy || defaultsReading || !selected.length || total > 64}
+          >保存</button
         ><button
           class="btn"
           type="button"

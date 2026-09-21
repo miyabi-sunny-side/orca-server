@@ -1,3 +1,4 @@
+const emptyDefaults={"default_printer_id":null,"conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null},"reason":"printer"};
 import { test, expect } from '@playwright/test';
 
 test('a plate saves model references and quantities with nullable print conditions', async ({ page }) => {
@@ -5,6 +6,7 @@ test('a plate saves model references and quantities with nullable print conditio
   const plate = { id: '11111111-1111-4111-8111-111111111111', version: 1, name: '机の箱', models: [{ id: 'item-reference', name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] };
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
+    if(path==='/api/default-settings')return route.fulfill({json:emptyDefaults});
     if (path === '/api/scad/models') return route.fulfill({ json: ['parts/box.stl', 'parts/lid.stl'] });
     if (path === '/api/plates/import') { saved = route.request().postDataJSON(); return route.fulfill({ status: 201, json: plate }); }
     if (path === '/api/plates/11111111-1111-4111-8111-111111111111') return route.fulfill({ json: plate });

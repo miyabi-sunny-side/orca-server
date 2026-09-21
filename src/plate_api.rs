@@ -1,5 +1,5 @@
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{StatusCode, header},
     middleware::Next,
@@ -101,9 +101,13 @@ async fn read(State(store): State<Store>, Path(id): Path<String>) -> Result<Json
 
 async fn create(
     State(store): State<Store>,
+    registry: Option<Extension<std::sync::Arc<crate::registry::Registry>>>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<Plate>)> {
-    let input = form(multipart).await?;
+    let mut input = form(multipart).await?;
+    if let Some(Extension(registry)) = registry {
+        registry.fill_creation(&mut input.conditions).await?;
+    }
     let plate = blocking(move || store.save(input)).await?;
     Ok((StatusCode::CREATED, Json(plate)))
 }

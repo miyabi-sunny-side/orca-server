@@ -3,6 +3,7 @@
   import {
     request,
     type Printer,
+    type DefaultSettings,
     type Profiles,
     type Machine,
   } from "../lib/api";
@@ -11,6 +12,8 @@
   const id = part === "new" ? "" : part;
   let printers = $state<Printer[]>([]);
   let machines = $state<Machine[]>([]);
+  let defaultId = $state("");
+  let defaultSaved = $state(false);
   let profiles = $state<Profiles>();
   let loading = $state(true);
   let busy = $state(false);
@@ -74,10 +77,16 @@
           }
         }
         await loadProfiles();
-      } else
-        printers = await request<Printer[]>("/api/printers", {
-          signal: controller.signal,
-        });
+      } else {
+        const [devices, defaults] = await Promise.all([
+          request<Printer[]>("/api/printers", { signal: controller.signal }),
+          request<DefaultSettings>("/api/default-settings", {
+            signal: controller.signal,
+          }),
+        ]);
+        printers = devices;
+        defaultId = defaults.default_printer_id ?? "";
+      }
     } catch (cause) {
       if (!controller.signal.aborted) error = (cause as Error).message;
     } finally {
@@ -116,6 +125,26 @@
       window.location.assign("/printers");
     } catch (cause) {
       error = (cause as Error).message;
+      busy = false;
+    }
+  }
+  async function chooseDefault(event: Event) {
+    const chosen = (event.currentTarget as HTMLSelectElement).value;
+    busy = true;
+    error = "";
+    defaultSaved = false;
+    try {
+      await request("/api/default-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ default_printer_id: chosen }),
+      });
+      defaultId = chosen;
+      defaultSaved = true;
+    } catch (cause) {
+      error = (cause as Error).message;
+      (event.target as HTMLSelectElement).value = defaultId;
+    } finally {
       busy = false;
     }
   }
@@ -166,6 +195,27 @@
     {#if printers.length === 0}<p class="state">
         プリンターを追加すると、接続状態の確認と印刷ができます。
       </p>{/if}
+    {#if printers.length}
+      <label class="field"
+        ><span>新規プレートの初期値に使うプリンター</span>
+        <select
+          value={defaultId}
+          disabled={busy}
+          onchange={(event) => void chooseDefault(event)}
+        >
+          <option value="" disabled>選択してください</option>
+          {#each printers as printer}<option value={printer.id}
+              >{printer.name}</option
+            >{/each}
+        </select>
+      </label>
+      <p class="caption">
+        この機器の設定とAMS材料を初期入力に使います。保存済みの条件は変わりません。
+      </p>
+      {#if defaultSaved}<p role="status">
+          初期値に使うプリンターを保存しました。
+        </p>{/if}
+    {/if}
     <ul class="plate-list">
       {#each printers as printer (printer.id)}<li class="printer-card">
           <a class="printer-title" href={`/printers/${printer.id}`}
@@ -248,6 +298,10 @@
               onclick={() => void loadProfiles()}>プロファイルを再読込み</button
             >
           </div>{/if}
+        <h2>新規プレートの初期値</h2>
+        <p class="caption">
+          印刷中も変更できます。保存済みの条件や進行中の印刷には反映しません。
+        </p>
         <label class="field"
           ><span>既定の工程</span><select
             bind:value={settings.default_process_profile_key}

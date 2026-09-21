@@ -253,7 +253,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Create or replace a saved plate. Omit id for create; for update read first and supply current plate.version and ALL models. Preserve uploaded model IDs. SCAD source must exist. Unspecified conditions become null; never invent them. Does not enqueue or start printing. On an uncertain response, use plate_list/get before any new create."
+        description = "Create or replace a saved plate. Omit id for create; for update read first and supply current plate.version and ALL models. Preserve uploaded model IDs. SCAD source must exist. On create, omitted/null conditions use the saved printer defaults and first usable material in its synchronized AMS; explicit values win. On update, omitted/null fields clear conditions; send values to preserve them. Never invent conditions. Does not enqueue or start printing. On an uncertain response, use plate_list/get before any new create."
     )]
     async fn plate_save(&self, Parameters(a): Parameters<PlateSave>) -> CallToolResult {
         let result = if let Some(id) = a.id {

@@ -1,3 +1,4 @@
+const emptyDefaults={"default_printer_id":null,"conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null},"reason":"printer"};
 import { test, expect } from '@playwright/test';
 import { readFileSync, mkdirSync } from 'node:fs';
 const cube = readFileSync('../tests/fixtures/cube.stl');
@@ -14,6 +15,7 @@ test('real WebGL distinguishes models, ignores stale reads and survives errors a
   const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
   await page.route('**/api/**',async route=>{
     const path=new URL(route.request().url()).pathname;
+    if(path==='/api/default-settings')return route.fulfill({json:emptyDefaults});
     if(path===`/api/plates/${id}`)return route.fulfill({json:plate});
     if(path.includes('/models/')){
       if(mode==='missing')return route.fulfill({status:404});
@@ -80,7 +82,7 @@ test('WebGL unavailable keeps composition editing usable',async({page})=>{
       return String(type).startsWith('webgl')?null:(original as any).call(this,type,...args);
     } as any;
   });
-  await page.route('**/api/**',route=>route.fulfill({json:new URL(route.request().url()).pathname===`/api/plates/${id}`?plate:[]}));
+  await page.route('**/api/**',route=>route.fulfill({json:new URL(route.request().url()).pathname==='/api/default-settings'?emptyDefaults:new URL(route.request().url()).pathname===`/api/plates/${id}`?plate:[]}));
   await page.goto(`/plates/${id}`);
   await expect(page.getByRole('alert')).toContainText('WebGL');
   await page.getByRole('button',{name:'構成を編集',exact:true}).click();
@@ -92,6 +94,7 @@ test('sticky search retains selected models across scrolling, filtering and savi
   await page.setViewportSize({width:320,height:812});
   await page.route('**/api/**',route=>{
     const url=new URL(route.request().url());
+    if(url.pathname==='/api/default-settings')return route.fulfill({json:emptyDefaults});
     if(url.pathname==='/api/scad/models')return route.fulfill({json:names.filter(n=>n.includes(url.searchParams.get('q')??''))});
     if(url.pathname==='/api/plates/import'){saved=route.request().postDataJSON();return route.fulfill({status:201,json:{...plate,...saved}});}
     if(url.pathname===`/api/plates/${id}`)return route.fulfill({json:{...plate,...saved}});

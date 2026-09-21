@@ -10,6 +10,18 @@ export type PlateConditions = {
   process_profile_key: string | null;
   bed_type: string | null;
 };
+export type DefaultSettings = {
+  default_printer_id: string | null;
+  conditions: PlateConditions;
+  reason:
+    | "printer"
+    | "printer_selection"
+    | "profiles"
+    | "process"
+    | "ams_sync"
+    | "material"
+    | null;
+};
 export type Plate = {
   conditions: PlateConditions;
   id: string;
@@ -84,7 +96,10 @@ export async function request<T>(
         "材料を操作できませんでした。再試行してください。",
     );
   }
-  if (path.startsWith("/api/printers")) {
+  if (
+    path.startsWith("/api/printers") ||
+    path.split("?")[0] === "/api/default-settings"
+  ) {
     const message: Record<number, string> = {
       400: "接続情報、証明書、機種と工程の組み合わせを確認してください。",
       404: "プリンターが見つかりません。一覧から開き直してください。",

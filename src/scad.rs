@@ -1,6 +1,6 @@
 use crate::plates::{Error, Result, valid_model_name};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -110,9 +110,13 @@ async fn list_models(
 
 async fn import(
     State(state): State<ImportState>,
+    registry: Option<Extension<std::sync::Arc<crate::registry::Registry>>>,
     payload: std::result::Result<Json<crate::plates::Edit>, JsonRejection>,
 ) -> Result<(StatusCode, Json<crate::plates::Plate>)> {
-    let Json(payload) = payload.map_err(|_| Error::Invalid("Invalid composition"))?;
+    let Json(mut payload) = payload.map_err(|_| Error::Invalid("Invalid composition"))?;
+    if let Some(Extension(registry)) = registry {
+        registry.fill_creation(&mut payload.conditions).await?;
+    }
     let plate = save_composition(state, None, payload).await?;
     Ok((StatusCode::CREATED, Json(plate)))
 }

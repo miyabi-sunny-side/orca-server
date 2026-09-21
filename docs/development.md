@@ -83,6 +83,7 @@ python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
+DEFAULTS_BROWSER=1 python3 tests/plate_defaults.py target/debug/orca-server /tmp/orca-defaults-check
 PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
 REGISTRY_BROWSER=1 python3 tests/printer_registry.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-registry-check
 FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-filament-check
@@ -92,6 +93,7 @@ FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA
 `tests/fixtures/p1_print.gcode.3mf`はOrcaSlicer 2.4.2で生成した通信検証用ファイルです。
 生成元は同梱の20mm立方体STL 2個、プリンターはP1S 0.4mmです。
 工程は0.20mm Standard、材料はGeneric PLA High Speed、プレートはTextured PEI Plateです。
+初期値の検証ではSQLite移行・再起動・既定機選択、同期済みAMSの先頭、REST/MCPの一致、遅い取得と手動選択、印刷中の入力保全を確認します。
 プレート条件の検証ではnullable保存、所持機からの候補選択、実機別の装填照合、直接追加を確認します。
 キュー検証では準備時の最新データ固定、取り外し待ち、同時・重複操作、転送中AMS交換、開始前後の再起動とDB復元を通します。
 `print_fixture.py`のCLI代替は入力・状態遷移の検証用です。実際の配置・スライスは`tests/slicer_cli.py`とコンテナ検証で公式Orcaを実行します。

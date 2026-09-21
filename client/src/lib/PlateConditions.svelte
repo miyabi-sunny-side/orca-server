@@ -3,13 +3,36 @@
   import {
     request,
     type PlateConditions,
+    type DefaultSettings,
     type Printer,
     type Filament,
     type Profiles,
     type FilamentSetting,
   } from "./api";
   import { machineChoices } from "./plate";
-  let { value = $bindable() }: { value: PlateConditions } = $props();
+  let {
+    value = $bindable(),
+    defaults,
+    defaultsReading,
+    defaultsError,
+    changed,
+  }: {
+    value: PlateConditions;
+    defaults?: DefaultSettings;
+    defaultsReading: boolean;
+    defaultsError: string;
+    changed: (key: keyof PlateConditions) => void;
+  } = $props();
+  const reasons = {
+    printer: "プリンターを登録すると初期値を使えます。",
+    printer_selection: "初期値に使うプリンターを選んでください。",
+    profiles: "プリンターの機種・ノズルとプロファイルを確認してください。",
+    process: "この機種に対応する既定の工程を選んでください。",
+    ams_sync:
+      "AMSの現在の装填を確認できません。プリンターとの接続を確認してください。",
+    material: "AMSに、この機種で使える割当済みの材料がありません。",
+  };
+  const missing = $derived(Object.values(value).some((v) => v === null));
   let printers = $state<Printer[]>([]),
     filaments = $state<Filament[]>([]),
     profiles = $state<Profiles>();
@@ -83,12 +106,37 @@
 
 <fieldset class="conditions">
   <legend>印刷条件</legend>
-  <p class="caption">
-    未設定でも保存できます。キューへ追加する前に4項目を設定してください。
-  </p>
+  {#if defaultsReading}<p class="caption" role="status">
+      初期値を読み込んでいます…
+    </p>
+  {:else if defaultsError}<p class="notice" role="alert">
+      初期値を取得できませんでした。{defaultsError}
+      <a href="/printers">プリンター設定へ</a>
+    </p>
+  {:else if missing}
+    <p class="notice">
+      {defaults?.reason
+        ? reasons[defaults.reason]
+        : "不足している印刷条件を選んでください。"}
+      <a
+        href={defaults?.default_printer_id &&
+        (defaults.reason === "ams_sync" || defaults.reason === "material")
+          ? `/printers/${defaults.default_printer_id}/ams`
+          : "/printers"}>設定を確認</a
+      >
+    </p>
+    <p class="caption">
+      未設定でも保存できます。印刷キューへ追加する前に不足項目を設定してください。
+    </p>
+  {:else}<p class="caption">
+      必要な項目だけ変更できます。次回以降の初期値は<a href="/printers"
+        >プリンター設定</a
+      >で変更します。
+    </p>{/if}
   <label class="field"
     ><span>要求する機種・ノズル</span><select
       bind:value={value.required_machine_profile_key}
+      onchange={() => changed("required_machine_profile_key")}
       disabled={loading}
     >
       <option value={null}>未設定</option>
@@ -107,6 +155,7 @@
   <label class="field"
     ><span>フィラメント</span><select
       bind:value={value.filament_id}
+      onchange={() => changed("filament_id")}
       disabled={loading}
     >
       <option value={null}>未設定</option>
@@ -121,6 +170,7 @@
   <label class="field"
     ><span>工程（品質）</span><select
       bind:value={value.process_profile_key}
+      onchange={() => changed("process_profile_key")}
       disabled={reading}
     >
       <option value={null}>未設定</option>
@@ -136,6 +186,7 @@
   <label class="field"
     ><span>ビルドプレート</span><select
       bind:value={value.bed_type}
+      onchange={() => changed("bed_type")}
       disabled={reading}
     >
       <option value={null}>未設定</option>

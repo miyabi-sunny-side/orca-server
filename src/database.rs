@@ -138,7 +138,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=6 => {}
+            1..=7 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -206,6 +206,10 @@ impl Database {
         if version < 6 {
             crate::plates::migrate_conditions(&tx)?;
         }
+        if version < 7 {
+            migrate_defaults(&tx)?;
+        }
+        reconcile_defaults(&tx)?;
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
         connection.pragma_update(None, "foreign_keys", true)?;
@@ -313,24 +317,63 @@ impl Database {
         let s = &device.settings;
         tx.execute("DELETE FROM ams_slots WHERE printer_id IN (SELECT id FROM printers WHERE id=?1 AND (host!=?2 OR serial!=?3 OR mqtt_port!=?4 OR access_code!=?5 OR tls_certificate!=?6))",
             params![device.id,s.host,s.serial,s.mqtt_port,s.access_code,s.tls_certificate])?;
-        tx.execute("UPDATE printers SET queue_generation=queue_generation+1,queue_request=NULL WHERE id=?1 AND (host!=?2 OR serial!=?3 OR access_code!=?4 OR tls_certificate!=?5 OR machine_profile_key!=?6 OR default_process_profile_key!=?7 OR bed_type!=?8 OR nozzle_material!=?9 OR mqtt_port!=?10 OR ftps_port!=?11 OR start_timeout_secs!=?12)",params![device.id,s.host,s.serial,s.access_code,s.tls_certificate,s.machine_profile_key,s.default_process_profile_key,s.bed_type,s.nozzle_material,s.mqtt_port,s.ftps_port,s.start_timeout_secs])?;
+        tx.execute("UPDATE printers SET queue_generation=queue_generation+1,queue_request=NULL WHERE id=?1 AND (host!=?2 OR serial!=?3 OR access_code!=?4 OR tls_certificate!=?5 OR machine_profile_key!=?6 OR nozzle_material!=?7 OR mqtt_port!=?8 OR ftps_port!=?9 OR start_timeout_secs!=?10)",params![device.id,s.host,s.serial,s.access_code,s.tls_certificate,s.machine_profile_key,s.nozzle_material,s.mqtt_port,s.ftps_port,s.start_timeout_secs])?;
         save(&tx, device)?;
+        reconcile_defaults(&tx)?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
-        let changed = self
-            .connection
-            .lock()
-            .map_err(|_| Error::Unavailable("Database lock failed"))?
-            .execute("DELETE FROM printers WHERE id=?1", [id])
-            .map_err(Error::from)?;
-        if changed == 0 {
+        let mut c = self.connection()?;
+        let tx = c.transaction()?;
+        if tx.execute("DELETE FROM printers WHERE id=?1", [id])? == 0 {
             return Err(Error::NotFound);
         }
+        reconcile_defaults(&tx)?;
+        tx.commit()?;
         Ok(())
     }
+    pub(crate) fn default_printer(&self) -> Result<Option<String>> {
+        Ok(self.connection()?.query_row(
+            "SELECT default_printer_id FROM default_settings WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+    pub(crate) fn set_default_printer(&self, id: Option<&str>) -> Result<()> {
+        let mut c = self.connection()?;
+        let tx = c.transaction()?;
+        if let Some(id) = id
+            && !tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM printers WHERE id=?1)",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            return Err(Error::NotFound);
+        }
+        tx.execute(
+            "UPDATE default_settings SET default_printer_id=?1 WHERE id=1",
+            [id],
+        )?;
+        reconcile_defaults(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+fn migrate_defaults(c: &Connection) -> Result<()> {
+    c.execute_batch(
+        "CREATE TABLE default_settings (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                default_printer_id TEXT REFERENCES printers(id) ON DELETE SET NULL
+            ); INSERT INTO default_settings VALUES (1,NULL); PRAGMA user_version=7;",
+    )?;
+    Ok(())
+}
+fn reconcile_defaults(c: &Connection) -> Result<()> {
+    c.execute("UPDATE default_settings SET default_printer_id=(SELECT id FROM printers) WHERE id=1 AND default_printer_id IS NULL AND (SELECT count(*) FROM printers)=1", [])?;
+    Ok(())
 }
 fn save(connection: &Connection, device: &Device) -> Result<()> {
     let s = &device.settings;
@@ -386,6 +429,48 @@ mod tests {
         }
     }
     #[test]
+    fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        db.connection().unwrap().execute_batch("DROP TABLE default_settings; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
+        assert_eq!(db.default_printer().unwrap().as_deref(), Some("stable-id"));
+        let c = db.connection().unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT required_machine_profile_key FROM plates WHERE id='legacy'",
+                [],
+                |r| r.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+            None
+        );
+        drop(c);
+        let mut second = device();
+        second.id = "second".into();
+        second.settings.serial = "SECOND".into();
+        db.save(&second).unwrap();
+        db.set_default_printer(Some("second")).unwrap();
+        assert!(db.set_default_printer(Some("missing")).is_err());
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
+        assert_eq!(db.default_printer().unwrap().as_deref(), Some("second"));
+        db.delete("second").unwrap();
+        assert_eq!(db.default_printer().unwrap().as_deref(), Some("stable-id"));
+        db.delete("stable-id").unwrap();
+        assert_eq!(db.default_printer().unwrap(), None);
+        db.save(&device()).unwrap();
+        db.save(&second).unwrap();
+        db.connection()
+            .unwrap()
+            .execute_batch("DROP TABLE default_settings; PRAGMA user_version=6;")
+            .unwrap();
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
+        assert_eq!(db.default_printer().unwrap(), None);
+    }
+    #[test]
     fn migration_imports_references_and_uploads_once_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
@@ -418,7 +503,7 @@ mod tests {
                     |r| r.get::<_, i64>(0)
                 )
                 .unwrap(),
-                8
+                9
             );
             assert_eq!(
                 c.query_row("SELECT name FROM plates WHERE id=?1", [&id], |r| r
@@ -682,7 +767,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            6
+            7
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

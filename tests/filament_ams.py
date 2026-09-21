@@ -128,7 +128,7 @@ def main():
             resolved=api(f'/api/filaments/{gf["id"]}')['settings'][0]['resolved'];assert resolved['nozzle_temperature']=='240'
             for b in brokers:until(lambda:len(b.requests)>=2);b.send(full)
             until(lambda:inventory()['current']);assert inventory()['slots'][1]['filament_id']==black['id']
-            with sqlite3.connect(tmp/'plates/orca.sqlite3') as c:assert c.execute('PRAGMA user_version').fetchone()==(6,)
+            with sqlite3.connect(tmp/'plates/orca.sqlite3') as c:assert c.execute('PRAGMA user_version').fetchone()==(7,)
             (output/'verified.json').write_text(json.dumps(dict(schema=5,printers=2,filaments=4,initial_layer=250,normal=240,matte_black_white=True,missed_swap_invalidates=True,restart_unconfirmed=True,isolated_commands='status-only'),indent=2))
         finally:
             if process and process.poll() is None:stop()

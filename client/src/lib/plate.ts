@@ -22,3 +22,23 @@ export const emptyConditions: PlateConditions = {
   process_profile_key: null,
   bed_type: null,
 };
+
+export function initialConditions(
+  value: PlateConditions,
+  defaults: PlateConditions,
+  edited: Set<keyof PlateConditions>,
+): PlateConditions {
+  const result = { ...value };
+  for (const key of Object.keys(emptyConditions) as (keyof PlateConditions)[]) {
+    if (
+      result[key] === null &&
+      !edited.has(key) &&
+      (key === "required_machine_profile_key" ||
+        key === "bed_type" ||
+        result.required_machine_profile_key ===
+          defaults.required_machine_profile_key)
+    )
+      result[key] = defaults[key];
+  }
+  return result;
+}

@@ -55,8 +55,7 @@ async fn client_saves_references_and_shares_the_rest_validation() {
     let root = tempfile::tempdir().unwrap();
     let store = orca_server::plates::Store::open(root.path()).unwrap();
     let scad = orca_server::scad::Source::new(&source.base).unwrap();
-    let api = orca_server::app_with_source(store.clone(), Some(scad.clone()))
-        .merge(orca_server::registry::router(root.path(), store, None, Some(scad)).unwrap());
+    let api = orca_server::registry::router(root.path(), store, None, Some(scad)).unwrap();
     let server = serve(orca_server::with_mcp(api)).await;
     let client = ()
         .serve(StreamableHttpClientTransport::from_uri(format!(
@@ -65,6 +64,10 @@ async fn client_saves_references_and_shares_the_rest_validation() {
         )))
         .await
         .unwrap();
+    assert_eq!(
+        read(&server.base, "/api/default-settings").await["reason"],
+        "printer"
+    );
     let tools = client.list_all_tools().await.unwrap();
     assert!(tools.iter().any(|tool| tool.name == "plate_save"));
     assert!(
@@ -337,7 +340,11 @@ async fn shared_materials_ams_and_admission() {
     let admission = json!({"printer_id":"p1","plate_id":plate_id});
     assert_eq!(
         call(&client, "plate_admission", admission.clone(), false).await["data"]["allowed"],
-        false
+        true
+    );
+    assert_eq!(
+        plate["conditions"],
+        read(&base, "/api/default-settings").await["conditions"]
     );
     edit["version"] = plate["version"].clone();
     edit["conditions"] = json!({"required_machine_profile_key":machine,"filament_id":yellow["id"],"process_profile_key":process,"bed_type":"Textured PEI Plate"});
@@ -430,5 +437,49 @@ async fn shared_materials_ams_and_admission() {
         read(&base, "/api/queue?printer_id=p1").await["waiting"],
         json!([])
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Run through tests/plate_defaults.py against disposable peers"]
+async fn creation_defaults_match_rest() {
+    let base = std::env::var("MCP_FIXTURE_URL").expect("isolated fixture URL");
+    assert!(base.starts_with("http://127.0.0.1:"));
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "{base}/mcp"
+        )))
+        .await
+        .unwrap();
+    let defaults = read(&base, "/api/default-settings").await["conditions"].clone();
+    assert!(defaults.as_object().unwrap().values().all(|v| !v.is_null()));
+    let mut edit = json!({"name":"MCP defaults","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":1}]});
+    for nulls in [false, true] {
+        if nulls {
+            edit["conditions"] = json!({"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null});
+        }
+        let plate = call(&client, "plate_save", json!({"plate":edit}), false).await["data"].clone();
+        assert_eq!(plate["conditions"], defaults);
+        let id = plate["id"].as_str().unwrap();
+        assert_eq!(read(&base, &format!("/api/plates/{id}")).await, plate);
+        let mut update = edit.clone();
+        update["version"] = plate["version"].clone();
+        update["models"] = plate["models"].clone();
+        let cleared = call(
+            &client,
+            "plate_save",
+            json!({"id":id,"plate":update}),
+            false,
+        )
+        .await["data"]
+            .clone();
+        assert!(
+            cleared["conditions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(Value::is_null)
+        );
+    }
     client.cancel().await.unwrap();
 }
