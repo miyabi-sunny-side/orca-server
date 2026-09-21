@@ -174,6 +174,10 @@ export type AmsSlot = {
   filament_id: string | null;
   mapping_source: string;
   revision: number;
+  load_order: number | null;
+  priority_order: number;
+  priority_group: { id: string; revision: number }[];
+  backup_peers: number[] | null;
   current: boolean;
   detect_on_insert: boolean | null;
   detect_on_power_up: boolean | null;
@@ -197,4 +201,9 @@ export type AmsInventory = {
   printer_id: string;
   current: boolean;
   slots: AmsSlot[];
+  auto_refill: {
+    supported: boolean | null;
+    enabled: boolean | null;
+    groups: number[] | null;
+  };
 };

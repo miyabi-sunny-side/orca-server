@@ -102,6 +102,18 @@ fn private_connection(root: &Path) -> Result<Connection> {
         .map_err(Error::from)?;
     Ok(connection)
 }
+fn check_references(c: &Connection) -> Result<()> {
+    if c.prepare("PRAGMA foreign_key_check")?
+        .query([])?
+        .next()?
+        .is_some()
+    {
+        return Err(Error::Unavailable(
+            "Database migration found broken references; restore or repair the saved database",
+        ));
+    }
+    Ok(())
+}
 impl Database {
     pub fn open(root: &Path, initial: impl FnOnce() -> Result<Option<Device>>) -> Result<Self> {
         let mut connection = private_connection(root)?;
@@ -126,7 +138,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=4 => {}
+            1..=5 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -188,16 +200,10 @@ impl Database {
         if version < 4 {
             crate::products::migrate(&tx)?;
         }
-        if tx
-            .prepare("PRAGMA foreign_key_check")?
-            .query([])?
-            .next()?
-            .is_some()
-        {
-            return Err(Error::Unavailable(
-                "Database migration found broken references; restore or repair the saved database",
-            ));
+        if version < 5 {
+            crate::ams::migrate(&tx)?;
         }
+        check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
@@ -662,7 +668,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

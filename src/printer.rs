@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use x509_cert::der::{Decode, Encode};
 
 #[derive(Debug)]
@@ -377,11 +377,19 @@ impl Drop for Observation {
     }
 }
 
+enum Request {
+    Start(String, u64),
+    AutoRefill {
+        enabled: bool,
+        epoch: u64,
+        response: oneshot::Sender<Result<()>>,
+    },
+}
 #[derive(Clone)]
 pub struct Printer {
     state: Arc<Mutex<State>>,
     config: Option<Config>,
-    starts: mpsc::Sender<(String, u64)>,
+    starts: mpsc::Sender<Request>,
     _observation: Option<Arc<Observation>>,
     inventory: Option<(crate::database::Database, crate::database::Device)>,
 }
@@ -431,15 +439,15 @@ impl Printer {
 
     pub(crate) async fn ams_inventory(
         &self,
-        mapping: Option<(String, crate::ams::Mapping)>,
+        change: Option<crate::ams::Change>,
     ) -> Result<(bool, Vec<crate::ams::AmsSlot>)> {
         let state = self.state.lock().await;
         let status = state.status(now());
         let current = status.synchronized;
-        if mapping
-            .as_ref()
-            .is_some_and(|(_, m)| m.filament_id.is_some())
-            && !current
+        if change.as_ref().is_some_and(|c| match c {
+            crate::ams::Change::Mapping(_, m) => m.filament_id.is_some(),
+            crate::ams::Change::Priority(_) => true,
+        }) && !current
         {
             return Err(Error::Conflict(
                 "Wait for a complete, current printer report before mapping",
@@ -448,13 +456,65 @@ impl Printer {
         let (db, device) = self.inventory.clone().ok_or(Error::NotFound)?;
         let slots = crate::plate_api::blocking(move || {
             db.observe_ams(&device, &status)?;
-            if let Some((id, m)) = mapping {
-                db.map_slot(&device.id, &id, m.revision, m.filament_id.as_deref())?;
+            match change {
+                Some(crate::ams::Change::Mapping(id, m)) => {
+                    db.map_slot(&device.id, &id, m.revision, m.filament_id.as_deref())?;
+                }
+                Some(crate::ams::Change::Priority(p)) => db.prioritize_slots(
+                    &device.id,
+                    &p.filament_id,
+                    &device.settings.machine_profile_key,
+                    &p.order,
+                )?,
+                None => {}
             }
             db.ams_slots(&device.id)
         })
         .await?;
         Ok((current, slots))
+    }
+
+    pub(crate) async fn resolve_material(
+        &self,
+        filament: String,
+    ) -> Result<Vec<crate::ams::AmsSlot>> {
+        let state = self.state.lock().await;
+        let status = state.status(now());
+        if !status.synchronized {
+            return Err(Error::Conflict("Wait for a current printer report"));
+        }
+        let (db, device) = self.inventory.clone().ok_or(Error::NotFound)?;
+        crate::plate_api::blocking(move || {
+            db.observe_ams(&device, &status)?;
+            db.resolve_slots(&device.id, &filament, &device.settings.machine_profile_key)
+        })
+        .await
+    }
+    pub(crate) async fn set_auto_refill(&self, enabled: bool) -> Result<()> {
+        let state = self.state.lock().await;
+        let status = state.status(now());
+        if !status.synchronized || status.auto_refill.supported != Some(true) {
+            return Err(Error::Conflict(
+                "Auto refill support is not confirmed by the current printer",
+            ));
+        }
+        let (response, receiver) = oneshot::channel();
+        self.starts
+            .try_send(Request::AutoRefill {
+                enabled,
+                epoch: state.epoch,
+                response,
+            })
+            .map_err(|_| Error::Conflict("Printer command is busy"))?;
+        drop(state);
+        tokio::time::timeout(Duration::from_secs(3), receiver)
+            .await
+            .map_err(|_| {
+                Error::Unavailable(
+                    "Setting request timed out; inspect the reported state before retrying",
+                )
+            })?
+            .map_err(|_| Error::Unavailable("Printer connection closed"))?
     }
 
     pub(crate) async fn forget_retired(&self) -> Result<()> {
@@ -511,7 +571,11 @@ impl Printer {
                     Phase::UploadFailed,
                     "FTPS transfer failed or timed out; no start command was sent",
                 );
-            } else if printer.starts.try_send((transfer.id, epoch)).is_err() {
+            } else if printer
+                .starts
+                .try_send(Request::Start(transfer.id, epoch))
+                .is_err()
+            {
                 start.fail(
                     Phase::NotSent,
                     "Printer command channel unavailable; no start command was sent",
@@ -590,15 +654,22 @@ fn request_snapshot(
     )
 }
 
+fn queue_refill(client: &AsyncClient, topic: &str, enabled: bool) -> Result<()> {
+    let sequence = (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string();
+    let payload = serde_json::json!({"print":{"command":"print_option","sequence_id":sequence,"auto_switch_filament":enabled}});
+    client
+        .try_publish(topic, QoS::AtMostOnce, false, payload.to_string())
+        .map_err(|_| Error::Unavailable("Setting request was not queued"))
+}
+
 async fn run(
     options: MqttOptions,
     config: Config,
     state: Arc<Mutex<State>>,
-    mut starts: mpsc::Receiver<(String, u64)>,
+    mut starts: mpsc::Receiver<Request>,
     inventory: Option<(crate::database::Database, crate::database::Device)>,
 ) {
     let serial = &config.serial;
-    let start_timeout = config.start_timeout;
     let report = format!("device/{serial}/report");
     let request = format!("device/{serial}/request");
     loop {
@@ -639,9 +710,21 @@ async fn run(
                     Ok(_) => {},
                     Err(_) => break, // Never log library errors or packets: they may contain credentials.
                 },
-                Some((id, epoch)) = starts.recv() => {
+                Some(command) = starts.recv() => {
                     let mut state = state.lock().await;
-                    let status = state.status(now());
+                    let status=state.status(now());
+                    let (id,epoch)=match command {
+                        Request::Start(id,epoch) => (id,epoch),
+                        Request::AutoRefill{enabled,epoch,response} => {
+                            let result=if response.is_closed() || !subscribed || state.epoch!=epoch || !status.synchronized || status.auto_refill.supported!=Some(true) {
+                                Err(Error::Conflict("Printer connection or auto refill support changed"))
+                            } else {
+                                queue_refill(&client,&request,enabled)
+                            };
+                            let _=response.send(result);
+                            continue;
+                        },
+                    };
                     let same_connection = state.epoch == epoch && subscribed;
                     if let Some(start) = state.start.as_mut().filter(|s| s.id == id && s.phase == Phase::Uploading) {
                         let admitted=inventory.as_ref().is_some_and(|(db,device)|db.check_attempt(device,start,&status).is_ok());
@@ -665,7 +748,7 @@ async fn run(
                     let synchronized = state.status(now()).synchronized;
                     if let Some(start) = &mut state.start {
                         let pending = matches!(start.phase, Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing);
-                        start.tick(now(), start_timeout);
+                        start.tick(now(), config.start_timeout);
                         if !synchronized { start.disconnected(); }
                         persist(inventory.as_ref(),Some(start));
                         // Drop this client's queue so timed-out writes cannot be sent later.

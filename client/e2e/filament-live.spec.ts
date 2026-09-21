@@ -67,8 +67,12 @@ test('material CRUD, temperatures, manual mapping and stale observations',async(
   expect((await request.get(`/api/filament-products/${id}`)).status()).toBe(404);
   await page.goto(`/filaments/${c.gf}`);await page.getByText('製品の管理',{exact:true}).click();page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'製品を削除',exact:true}).click();await expect(page.getByRole('alert')).toContainText('参照');
   await page.goto(`/printers/${c.printer}/ams`);
-  const first=page.getByRole('listitem').filter({has:page.getByRole('heading',{name:'AMS 0 · スロット 1',exact:true})});
-  await expect(first.getByText('ガラス繊維入りPETG',{exact:true})).toBeVisible();await expect(first.getByText('設定温度: 初層 250℃ / 通常 240℃')).toBeVisible();
+  const first=page.getByRole('listitem').filter({has:page.getByRole('button',{name:'AMS 0 スロット 1の詳細',exact:true})});
+  const selector=first.getByRole('button',{name:/材料を選択/});
+  const gfOption=first.getByRole('button',{name:/ガラス繊維入りPETG.*Third party/});
+  await expect(selector).toContainText('ガラス繊維入りPETG');
+  await first.getByRole('button',{name:'AMS 0 スロット 1の詳細',exact:true}).click();
+  await expect(first.getByText('設定温度: 初層 250℃ / 通常 240℃')).toBeVisible();
   for(const scheme of ['dark','light'] as const){
     await page.emulateMedia({colorScheme:scheme});
     for(const width of [320,375,900]){
@@ -76,25 +80,24 @@ test('material CRUD, temperatures, manual mapping and stale observations',async(
       await page.screenshot({path:join(output,`ams-${scheme}-${width}.png`),fullPage:true});
     }
   }
-  await first.getByText('プリンターからの報告',{exact:true}).click();await expect(first.getByText('不明',{exact:true}).first()).toBeVisible();
-  await first.getByRole('button',{name:'材料を指定・解除'}).click();await first.getByLabel('対応する材料').selectOption('');await first.getByRole('button',{name:'対応を保存'}).click();await expect(first.getByText('材料は未指定',{exact:true})).toBeVisible();
-  await first.getByRole('button',{name:'材料を指定・解除'}).click();await first.getByLabel('対応する材料').selectOption(c.gf);await first.getByRole('button',{name:'対応を保存'}).click();await expect(first.getByText('ガラス繊維入りPETG',{exact:true})).toBeVisible();
-  await first.getByRole('button',{name:'材料を指定・解除'}).click();await request.post(c.control,{data:{id:'0',tray_color:'000000FF'}});
-  await expect(first.getByRole('alert')).toContainText('観測情報が変わりました',{timeout:12000});await expect(first.getByRole('button',{name:'対応を保存'})).toBeDisabled();
+  await expect(first.getByText('不明',{exact:true}).first()).toBeVisible();
+  await selector.click();await first.getByRole('button',{name:'指定を解除',exact:true}).click();await expect(selector).toContainText('材料は未指定');
+  await selector.click();await gfOption.click();await expect(selector).toContainText('ガラス繊維入りPETG');
+  await selector.click();await request.post(c.control,{data:{id:'0',tray_color:'000000FF'}});
+  await expect(first.getByRole('alert')).toContainText('観測情報が変わりました',{timeout:12000});await expect(gfOption).toBeDisabled();
   await request.post(c.control,{data:{full:true}});await page.getByRole('button',{name:'状態を更新'}).click();await first.getByRole('button',{name:'キャンセル'}).click();
   await expect.poll(async()=>((await (await request.get(`/api/printers/${c.printer}/ams`)).json()).slots[0].reported.color)).toBe('FFFFFFFF');
-  await page.getByRole('button',{name:'状態を更新'}).click();await first.getByRole('button',{name:'材料を指定・解除'}).click();await first.getByLabel('対応する材料').selectOption(c.gf);await first.getByRole('button',{name:'対応を保存'}).click();
-  await expect(first.getByText('ガラス繊維入りPETG',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'状態を更新'}).click();await selector.click();await gfOption.click();
+  await expect(selector).toContainText('ガラス繊維入りPETG');
   await request.post(c.control,{data:{disconnect:true}});await expect(page.getByRole('status')).toContainText('現在の装填状態は未確認',{timeout:12000});
   await page.setViewportSize({width:375,height:812});await page.screenshot({path:join(output,'ams-disconnected.png'),fullPage:true});
-  await first.getByRole('button',{name:'材料を指定・解除'}).click();await expect(first.getByRole('button',{name:'対応を保存'})).toBeDisabled();await first.getByLabel('対応する材料').selectOption('');await expect(first.getByRole('button',{name:'対応を保存'})).toBeEnabled();
+  await selector.click();await expect(gfOption).toBeDisabled();await expect(first.getByRole('button',{name:'指定を解除',exact:true})).toBeEnabled();
   await first.getByRole('button',{name:'キャンセル'}).click();await request.post(c.control,{data:{full:true}});
   await expect.poll(async()=>((await (await request.get(`/api/printers/${c.printer}/ams`)).json()).current),{timeout:12000}).toBe(true);
   await page.getByRole('button',{name:'状態を更新'}).click();
   await page.evaluate(()=>{const sizes=Array.from(document.querySelectorAll<HTMLElement>('body,body *')).map(el=>[el,parseFloat(getComputedStyle(el).fontSize)] as const);for(const[el,size]of sizes)el.style.fontSize=`${size*2}px`;});
   expect(await page.locator('body').evaluate(el=>getComputedStyle(el).fontSize)).toBe('32px');expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await first.getByRole('button',{name:'材料を指定・解除'}).focus();await expect(first.getByRole('button',{name:'材料を指定・解除'})).toBeFocused();
-  await page.evaluate(()=>window.scrollTo(0,0));
+  await selector.focus();await expect(selector).toBeFocused();await page.evaluate(()=>window.scrollTo(0,0));
   await page.screenshot({path:join(output,'ams-text-200.png'),fullPage:true});
   await page.goto(`/filaments/${c.black}`);await page.getByText('既存の色をまとめる',{exact:true}).click();
   await page.getByRole('combobox',{name:'既存の色',exact:true}).selectOption(c.white);await page.getByRole('button',{name:'この製品にまとめる',exact:true}).click();

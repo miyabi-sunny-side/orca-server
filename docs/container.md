@@ -73,7 +73,7 @@ docker logs orca-server
 稼働中のDBファイルだけをコピーしないでください。SCAD元データはscad-live側でも保管します。
 アップロード元STLは同じDBに含まれるため、DBの復元で再利用できます。
 
-現在のSQLite schema versionは4です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
+現在のSQLite schema versionは5です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
 プレート・キューの`plates`、`plate_items`、`print_jobs`を含めて計8テーブルです。
 製品と色の分離では既存材料IDとキューを保持し、全設定が一致する製品だけをまとめます。[材料の移行条件](filaments.md#保存と移行)を確認してください。
 旧版からの初回起動では、旧`plate.json`が示すプレートID・名前・モデル構成を一つのtransactionで取り込みます。

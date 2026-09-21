@@ -44,6 +44,47 @@ pub struct AmsStatus {
     pub units: Vec<Unit>,
 }
 
+#[derive(Clone, Default, Serialize)]
+pub struct AutoRefill {
+    pub supported: Option<bool>,
+    pub enabled: Option<bool>,
+    pub groups: Option<Vec<u16>>,
+}
+impl AutoRefill {
+    fn update(&mut self, report: &Map<String, Value>) {
+        // BambuStudio DeviceManager: print_option / home_flag bit 10 / filam_bak.
+        update(
+            &mut self.supported,
+            report,
+            "support_filament_backup",
+            Value::as_bool,
+        );
+        update(&mut self.enabled, report, "home_flag", |v| {
+            number(v).map(|n| n & (1 << 10) != 0)
+        });
+        update(&mut self.groups, report, "filam_bak", |v| {
+            v.as_array()?
+                .iter()
+                .map(|n| u16::try_from(n.as_u64()?).ok())
+                .collect()
+        });
+    }
+    pub fn peers(&self, tray: u8) -> Option<Vec<u8>> {
+        let bit = 1u16.checked_shl(u32::from(tray))?;
+        let groups = self.groups.as_ref()?;
+        Some(
+            (0..16)
+                .filter(|&peer| {
+                    peer != tray
+                        && groups
+                            .iter()
+                            .any(|&mask| mask & bit != 0 && mask & (1 << peer) != 0)
+                })
+                .collect(),
+        )
+    }
+}
+
 #[derive(Serialize)]
 pub struct Status {
     pub nozzle_diameter: Option<String>,
@@ -55,6 +96,7 @@ pub struct Status {
     pub ready_to_print: bool,
     pub print: PrintStatus,
     pub ams: Option<AmsStatus>,
+    pub auto_refill: AutoRefill,
 }
 
 pub struct State {
@@ -67,6 +109,7 @@ pub struct State {
     updated_at: Option<u64>,
     print: PrintStatus,
     ams: Option<AmsStatus>,
+    auto_refill: AutoRefill,
     tray_bits: Option<u16>,
 }
 
@@ -86,6 +129,7 @@ impl State {
             updated_at: None,
             print: PrintStatus::default(),
             ams: None,
+            auto_refill: AutoRefill::default(),
             tray_bits: None,
         }
     }
@@ -136,12 +180,14 @@ impl State {
             self.nozzle_material = None;
             self.print = PrintStatus::default();
             self.ams = None;
+            self.auto_refill = AutoRefill::default();
             self.tray_bits = None;
             self.synchronized = true;
         } else if !self.synchronized {
             return false;
         }
         update(&mut self.nozzle_diameter, report, "nozzle_diameter", string);
+        self.auto_refill.update(report);
         update(&mut self.nozzle_material, report, "nozzle_type", string);
         update(&mut self.print.state, report, "gcode_state", string);
         update(&mut self.print.percent, report, "mc_percent", percent);
@@ -194,6 +240,7 @@ impl State {
                 && self.print.error == Some(0),
             print: self.print.clone(),
             ams: self.ams.clone(),
+            auto_refill: self.auto_refill.clone(),
         }
     }
 
@@ -393,6 +440,44 @@ fn string(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn native_refill_reports_distinguish_support_state_and_device_groups() {
+        let mut state = State::new(true);
+        state.connected();
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0}}"#,
+            1,
+        );
+        let r = state.status(1).auto_refill;
+        assert_eq!(r.supported, None);
+        assert_eq!(r.enabled, None);
+        assert_eq!(r.groups, None);
+        state.apply(br#"{"print":{"command":"push_status","msg":1,"support_filament_backup":false,"home_flag":0,"filam_bak":[]}}"#,2);
+        let r = state.status(2).auto_refill;
+        assert_eq!(r.supported, Some(false));
+        assert_eq!(r.enabled, Some(false));
+        assert_eq!(r.peers(0), Some(vec![]));
+        state.apply(br#"{"print":{"command":"push_status","msg":1,"support_filament_backup":true,"home_flag":1024,"filam_bak":[3,12]}}"#,3);
+        let r = state.status(3).auto_refill;
+        assert_eq!(r.supported, Some(true));
+        assert_eq!(r.enabled, Some(true));
+        assert_eq!(r.peers(0), Some(vec![1]));
+        assert_eq!(r.peers(2), Some(vec![3]));
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":1,"mc_percent":5}}"#,
+            4,
+        );
+        assert_eq!(state.status(4).auto_refill.peers(1), Some(vec![0]));
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":1,"home_flag":"bad","filam_bak":["bad"]}}"#,
+            5,
+        );
+        assert_eq!(state.status(5).auto_refill.enabled, None);
+        assert_eq!(state.status(5).auto_refill.groups, None);
+        state.connected();
+        assert_eq!(state.status(6).auto_refill.supported, None);
+    }
 
     #[test]
     fn ams_identity_and_temperatures_merge_without_inventing_unknown_values() {

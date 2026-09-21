@@ -69,6 +69,9 @@ jobs:
       - name: Verify isolated MQTT and TLS printer connection
         run: python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
 
+      - name: Verify AMS priority, native refill and compact controls
+        run: AMS_BROWSER=1 python3 tests/ams_priority.py target/debug/orca-server /tmp/orca-ams-check
+
       - name: Verify isolated FTPS upload and print start
         run: python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 

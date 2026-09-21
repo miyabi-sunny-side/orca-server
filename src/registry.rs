@@ -221,6 +221,15 @@ pub fn router(
             axum::routing::put(update_setting).delete(delete_setting),
         )
         .route("/api/printers/{id}/ams", get(inventory))
+        .route("/api/printers/{id}/ams/resolve", get(resolve_inventory))
+        .route(
+            "/api/printers/{id}/ams/priority",
+            axum::routing::put(prioritize_inventory),
+        )
+        .route(
+            "/api/printers/{id}/ams/auto-refill",
+            axum::routing::put(set_auto_refill),
+        )
         .route(
             "/api/printers/{id}/ams/{slot}",
             axum::routing::put(map_inventory),
@@ -439,13 +448,33 @@ async fn act_queue(
         .map_err(|_| Error::Unavailable("Queue request interrupted; refresh the queue"))?
 }
 
+#[derive(Default, Deserialize)]
+struct MaterialSearch {
+    #[serde(default)]
+    q: String,
+}
 async fn materials(
     State(registry): State<Arc<Registry>>,
+    Query(query): Query<MaterialSearch>,
 ) -> Result<Json<Vec<crate::filament::Filament>>> {
     let db = registry.db.clone();
-    Ok(Json(
-        crate::plate_api::blocking(move || db.filaments()).await?,
-    ))
+    let materials = crate::plate_api::blocking(move || db.filaments()).await?;
+    let mut ranked: Vec<_> = materials
+        .into_iter()
+        .filter_map(|f| {
+            let text = format!(
+                "{} {} {} {}",
+                f.data.name, f.data.vendor, f.data.material, f.data.color
+            );
+            crate::search::score(query.q.trim(), &text).map(|score| (score, f))
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.data.name.cmp(&b.1.data.name))
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
+    Ok(Json(ranked.into_iter().map(|(_, f)| f).collect()))
 }
 
 async fn products(
@@ -876,12 +905,20 @@ async fn inventory(
     let entries = registry.entries.lock().await;
     let entry = entries.get(&id).ok_or(Error::NotFound)?;
     let (current, slots) = entry.printer.ams_inventory(None).await?;
+    let refill = entry.printer.status().await.auto_refill;
     let db = registry.db.clone();
+    let printer_id = id.clone();
+    let machine = entry.device.settings.machine_profile_key.clone();
     let details = crate::plate_api::blocking(move || {
         let mut details = BTreeMap::new();
         for f in db.filaments()? {
             let settings = db.filament_settings(&f.id)?;
-            details.insert(f.id.clone(), (f, settings));
+            let group = if current {
+                db.resolve_slots(&printer_id, &f.id, &machine)?
+            } else {
+                vec![]
+            };
+            details.insert(f.id.clone(), (f, settings, group));
         }
         Ok(details)
     })
@@ -893,7 +930,16 @@ async fn inventory(
             value["current"] = json!(current && slot.reported.present.is_some());
             value["nozzle_fit"] = json!("unknown");
             value["setting"] = Value::Null;
-            if let Some((f, settings)) = slot.filament_id.as_ref().and_then(|id| details.get(id)) {
+            value["priority_group"] = json!([]);
+            value["backup_peers"] = json!(
+                slot.ams_id
+                    .checked_mul(4)
+                    .and_then(|n| n.checked_add(slot.slot_index))
+                    .and_then(|n| refill.peers(n))
+            );
+            if let Some((f, settings, group)) =
+                slot.filament_id.as_ref().and_then(|id| details.get(id))
+            {
                 value["filament"] = json!(f);
                 if let Some(s) = settings.iter().find(|s| {
                     s.data.machine_profile_key == entry.device.settings.machine_profile_key
@@ -903,6 +949,12 @@ async fn inventory(
                         && let Ok(resolved) = p.resolve_filament(&s.data, &f.data.material)
                     {
                         value["setting"]["resolved"] = temperature_view(&resolved);
+                        value["priority_group"] = json!(
+                            group
+                                .iter()
+                                .map(|s| json!({"id":s.id,"revision":s.revision}))
+                                .collect::<Vec<_>>()
+                        );
                         let diameter = p.machine(&s.data.machine_profile_key).ok().and_then(|m| {
                             m.get("nozzle_diameter")?
                                 .get(0)?
@@ -929,7 +981,7 @@ async fn inventory(
         })
         .collect();
     Ok(Json(
-        json!({"printer_id":id,"current":current,"slots":slots}),
+        json!({"printer_id":id,"current":current,"slots":slots,"auto_refill":refill}),
     ))
 }
 async fn map_inventory(
@@ -939,8 +991,78 @@ async fn map_inventory(
 ) -> Result<StatusCode> {
     let entries = registry.entries.lock().await;
     let entry = entries.get(&id).ok_or(Error::NotFound)?;
-    entry.printer.ams_inventory(Some((slot, mapping))).await?;
+    entry
+        .printer
+        .ams_inventory(Some(crate::ams::Change::Mapping(slot, mapping)))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RequestedMaterial {
+    filament_id: String,
+}
+fn usable_material(registry: &Registry, device: &Device, filament: &str) -> Result<()> {
+    let f = registry
+        .db
+        .filaments()?
+        .into_iter()
+        .find(|f| f.id == filament)
+        .ok_or(Error::NotFound)?;
+    let setting = registry
+        .db
+        .filament_settings(filament)?
+        .into_iter()
+        .find(|s| s.data.machine_profile_key == device.settings.machine_profile_key)
+        .ok_or(Error::Conflict("Material has no settings for this machine"))?;
+    registry
+        .profiles
+        .as_ref()
+        .ok_or(Error::Unavailable("Profiles are unavailable"))?
+        .resolve_filament(&setting.data, &f.data.material)?;
+    Ok(())
+}
+async fn resolve_inventory(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Query(q): Query<RequestedMaterial>,
+) -> Result<Json<Value>> {
+    let entries = registry.entries.lock().await;
+    let entry = entries.get(&id).ok_or(Error::NotFound)?;
+    usable_material(&registry, &entry.device, &q.filament_id)?;
+    let candidates = entry.printer.resolve_material(q.filament_id).await?;
+    Ok(Json(
+        json!({"preferred_slot":candidates.first(),"candidates":candidates}),
+    ))
+}
+async fn prioritize_inventory(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(priority): Json<crate::ams::Priority>,
+) -> Result<StatusCode> {
+    let entries = registry.entries.lock().await;
+    let entry = entries.get(&id).ok_or(Error::NotFound)?;
+    usable_material(&registry, &entry.device, &priority.filament_id)?;
+    entry
+        .printer
+        .ams_inventory(Some(crate::ams::Change::Priority(priority)))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefillSetting {
+    enabled: bool,
+}
+async fn set_auto_refill(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(setting): Json<RefillSetting>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let entries = registry.entries.lock().await;
+    let entry = entries.get(&id).ok_or(Error::NotFound)?;
+    entry.printer.set_auto_refill(setting.enabled).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"status":"requested"}))))
 }
 
 #[cfg(test)]
@@ -978,6 +1100,35 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap()
         }
     }
+    #[tokio::test]
+    async fn material_search_uses_fuzzy_product_vendor_type_and_color() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let app = router(root.path(), store, None, None).unwrap();
+        for (name, vendor, material, color) in [
+            ("PLA Matte 黒", "Bambu Lab", "PLA", "000000FF"),
+            ("PETG 白", "Other", "PETG", "FFFFFFFF"),
+        ] {
+            call(&app,"POST","/api/filaments",json!({"name":name,"vendor":vendor,"material":material,"color":color,"bambu_filament_id":null}),201).await;
+        }
+        for q in ["bmb", "mt", "PLA", "0000"] {
+            let found = call(
+                &app,
+                "GET",
+                &format!("/api/filaments?q={q}"),
+                Value::Null,
+                200,
+            )
+            .await;
+            assert_eq!(found.as_array().unwrap().len(), 1);
+            assert_eq!(found[0]["name"], "PLA Matte 黒");
+        }
+        assert_eq!(
+            call(&app, "GET", "/api/filaments?q=unfindable", Value::Null, 200).await,
+            json!([])
+        );
+    }
+
     #[tokio::test]
     async fn products_share_settings_across_colors_and_preserve_exact_identity() {
         let root = tempfile::tempdir().unwrap();
