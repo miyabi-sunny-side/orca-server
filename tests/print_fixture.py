@@ -169,3 +169,22 @@ class Rig:
         self.stop();self.log.close();self.scad.shutdown();self.scad.server_close();self.ftp.close();self.broker.close()
         assert SECRET.encode() not in (self.output/'server.log').read_bytes()
         self.temp.cleanup()
+
+
+def printer_control(rig):
+    class Control(BaseHTTPRequestHandler):
+        def do_GET(self): self.reply()
+        def do_POST(self):
+            value=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if value.get('fail_upload'): rig.ftp.actions.put('fail')
+            elif value.get('disconnect'): rig.broker.actions.put('disconnect')
+            elif value.get('state'): rig.report(value['state'],value.get('index',-1))
+            else: rig.broker.send(rig.full)
+            self.reply()
+        def reply(self):
+            data=json.dumps(dict(prints=rig.broker.prints,uploads=rig.ftp.uploads,count=len(rig.broker.prints))).encode()
+            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+        def log_message(self,*_): pass
+    control=ThreadingHTTPServer(('127.0.0.1',0),Control)
+    threading.Thread(target=control.serve_forever,daemon=True).start()
+    return control

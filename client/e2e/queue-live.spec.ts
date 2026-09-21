@@ -3,9 +3,10 @@ import { writeFileSync } from "node:fs";
 import type { Action, QueueState } from "../src/lib/queue";
 import type { Plate } from "../src/lib/api";
 
-test("mobile queue drives isolated P1 once per confirmed action", async ({ page, request }) => {
+test("queue starts and continues with one action on mobile and desktop", async ({ page, request }) => {
   test.setTimeout(180_000);
   page.setDefaultTimeout(12_000);
+  page.on("dialog", () => { throw new Error("Unexpected extra confirmation"); });
   const control = process.env.E2E_PRINTER_CONTROL!;
   const state = async (): Promise<QueueState> => (await request.get("/api/queue")).json();
   const peer = async () => (await request.get(control)).json();
@@ -51,7 +52,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
   };
   const confirm = () => page.getByRole("checkbox", { name: "造形物を取り外し、空のビルドプレートを戻しました" });
-  const next = () => page.getByRole("button", { name: "次を印刷", exact: true });
+  const next = () => page.getByRole("button", { name: /^(空のプレートで印刷を開始|取り外した・次を印刷)$/ });
   const capture = async (name: string) => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await page.locator(".btn.primary").count()).toBeLessThanOrEqual(1);
@@ -61,7 +62,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   let replayVerified = false;
   for (const colorScheme of ["dark", "light"] as const) {
     displayTheme = colorScheme;
-    await page.setViewportSize({ width: 375, height: 812 });
+    await page.setViewportSize({ width: colorScheme === "dark" ? 375 : 900, height: 812 });
     await page.emulateMedia({ colorScheme });
     const before = (await peer()).prints.length;
     await add(0, 0);
@@ -79,10 +80,9 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await page.getByRole("button", { name: `${plates[1].name}を削除` }).click();
     await expect(page.getByRole("listitem")).toHaveCount(1);
     await add(1, 0);
-    await expect(next()).toBeDisabled();
-    await confirm().focus(); await page.keyboard.press("Space");
     await expect(next()).toBeEnabled();
-    await capture(`ready-375-${colorScheme}`);
+    await expect(confirm()).toHaveCount(0);
+    await capture(`ready-${colorScheme}`);
     let releaseRead: (() => void) | undefined;
     let readWaiting = false;
     if (colorScheme === "dark") {
@@ -119,9 +119,25 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await expect(next()).toHaveCount(0);
     await report("FINISH");
     await expect(page.getByLabel("現在の印刷")).toContainText("取り外し待ち");
-    await expect(next()).toBeDisabled();
+    await expect(confirm()).toHaveCount(0);
+    await expect(next()).toHaveText("取り外した・次を印刷");
+    await expect(next()).toBeEnabled();
     expect((await peer()).prints.length).toBe(before + 1);
-    await capture(`removal-375-${colorScheme}`);
+    await capture(`removal-${colorScheme}`);
+    if (colorScheme === "dark") {
+      const inventory = await (await request.get('/api/printers/p1/ams')).json();
+      const slot = inventory.slots.find((s: any) => s.slot_index === 0);
+      const path = `/api/printers/p1/ams/${slot.id}`;
+      expect((await request.put(path, { data: { revision: slot.revision, filament_id: null } })).status()).toBe(204);
+      await expect(next()).toBeDisabled();
+      await expect(page.getByText('保留:', { exact: false })).toBeVisible();
+      await expect(confirm()).toHaveCount(0);
+      expect((await peer()).prints.length).toBe(before + 1);
+      await capture('held-dark');
+      const refreshed = await (await request.get('/api/printers/p1/ams')).json();
+      expect((await request.put(path, { data: { revision: refreshed.slots.find((s: any) => s.id === slot.id).revision, filament_id: slot.filament_id } })).status()).toBe(204);
+      await expect(next()).toBeEnabled();
+    }
     let lost = false, body = "";
     if (colorScheme === "dark") await page.route("**/api/queue?*", async route => {
       if (!replayVerified && route.request().method() === "POST" && route.request().postDataJSON().action.type === "next") {
@@ -130,7 +146,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
       }
       await route.continue();
     });
-    await confirm().check(); await next().click();
+    await next().click();
     if (colorScheme === "dark") {
       await expect(page.getByText("送信結果が不明です。別の印刷を始めず、同じ要求の結果を確認します。")).toBeVisible();
       await page.getByRole("button", { name: "同じ要求を再確認" }).click();
@@ -139,21 +155,22 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await expect.poll(async () => (await peer()).prints.length).toBe(before + 2);
     expect((await peer()).prints.at(-1).ams_mapping).toEqual([0]);
     await report("RUNNING"); await report("FINISH");
-    await expect(page.getByRole("button", { name: "取り外しを完了" })).toBeVisible();
-    await confirm().check(); await page.getByRole("button", { name: "取り外しを完了" }).click();
+    await expect(page.getByRole("button", { name: "取り外した", exact: true })).toBeVisible();
+    await capture(`complete-${colorScheme}`);
+    await expect(confirm()).toHaveCount(0); await page.getByRole("button", { name: "取り外した", exact: true }).click();
     await expect(page.getByLabel("現在の印刷")).toHaveCount(0);
   }
   expect(replayVerified).toBe(true);
   // A second HTTP client advances while this screen is stale. Its old click must not start the following job.
   await add(2, 3); await add(3, 0);
-  await confirm().check(); await next().click();
+  await next().click();
   await expect.poll(async () => (await peer()).prints.length).toBe(5);
   await report("RUNNING"); await report("FINISH");
   await expect(page.getByLabel("現在の印刷")).toContainText("取り外し待ち");
   const stale = await state();
   let staleReads = true;
   await page.route("**/api/queue?*", route => staleReads && route.request().method() === "GET" ? route.fulfill({ json: stale }) : route.continue());
-  await confirm().check();
+  await expect(confirm()).toHaveCount(0);
   await configure(0,3);
   await command({ type: "add", plate_id: plates[0].id, plate_version: plates[0].version });
   await command({ type: "next", expected_job: stale.waiting[0].id, removed_job: stale.current?.id ?? null, cleared: true });
@@ -164,14 +181,14 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   staleReads = false;
   await page.getByRole("button", { name: "最新状態を読み直す" }).click();
   await expect(page.getByLabel("現在の印刷")).toContainText(plates[3].name);
-  await expect(confirm()).not.toBeChecked();
-  await expect(next()).toBeDisabled();
+  await expect(confirm()).toHaveCount(0);
+  await expect(next()).toBeEnabled();
   expect((await peer()).prints.length).toBe(6);
   await page.getByRole("button", { name: `${plates[0].name}を削除` }).click();
-  await confirm().check(); await page.getByRole("button", { name: "取り外しを完了" }).click();
+  await expect(confirm()).toHaveCount(0); await page.getByRole("button", { name: "取り外した", exact: true }).click();
   // A transfer failure remains visible until an explicit checked retry.
   await add(2, 3); await request.post(control, { data: { fail_upload: true } });
-  await confirm().check(); await next().click();
+  await next().click();
   await expect(page.getByRole("alert")).toContainText("印刷データを転送できませんでした");
   const retry = page.getByRole("button", { name: "同じプレートを再印刷" });
   await expect(retry).toBeDisabled();
@@ -185,8 +202,10 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   await confirm().check(); await retry.click();
   await expect.poll(async () => (await peer()).prints.length).toBe(7);
   await report("RUNNING"); await report("FINISH");
-  await expect(page.getByRole("button", { name: "取り外しを完了" })).toBeVisible();
-  await confirm().check(); await page.getByRole("button", { name: "取り外しを完了" }).click();
+  await expect(page.getByRole("button", { name: "取り外した", exact: true })).toBeVisible();
+  await expect(confirm()).toHaveCount(0);
+  await page.getByRole("button", { name: "取り外した", exact: true }).focus();
+  await page.keyboard.press("Enter");
   await expect(page.getByText("待機中のプレートはありません。プレートの詳細から追加できます。")).toBeVisible();
-  writeFileSync(`${process.env.E2E_EVIDENCE_DIR}/result.json`, JSON.stringify({ realApi: true, isolatedMqttFtps: true, darkLightMobile: true, doubleClickOnce: true, concurrentClientOnce: true, lateReadIgnored: true, removalRequired: true, exactReplayAfterLostResponse: replayVerified, staleClientNoAdvance: true, orderAndRemove: true, failedUploadExplicitRetry: true, compositionSavedWithoutSlicing: true, queuedSettingsEditable: true, keyboardAnd200Percent: true, prints: (await peer()).prints.length }, null, 2));
+  writeFileSync(`${process.env.E2E_EVIDENCE_DIR}/result.json`, JSON.stringify({ realApi: true, isolatedMqttFtps: true, darkMobileLightDesktop: true, noExtraConfirmation: true, oneActionContinueAndFinish: true, doubleClickOnce: true, concurrentClientOnce: true, lateReadIgnored: true, removalRequired: true, exactReplayAfterLostResponse: replayVerified, staleClientNoAdvance: true, orderAndRemove: true, failedUploadExplicitRetry: true, compositionSavedWithoutSlicing: true, queuedSettingsEditable: true, keyboardAnd200Percent: true, prints: (await peer()).prints.length }, null, 2));
 });

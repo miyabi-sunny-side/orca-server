@@ -82,6 +82,7 @@ python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
 python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
+python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 DEFAULTS_BROWSER=1 python3 tests/plate_defaults.py target/debug/orca-server /tmp/orca-defaults-check
 PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
@@ -99,7 +100,8 @@ FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA
 `print_fixture.py`のCLI代替は入力・状態遷移の検証用です。実際の配置・スライスは`tests/slicer_cli.py`とコンテナ検証で公式Orcaを実行します。
 CIでもMQTT・FTPS・キューの経路を検証します。実機や利用者のアクセスコードには接続しません。
 MCP検証は実クライアントの接続・tool呼出しから、10個の構成、共通温度、色追加、AMS対応・使用順を確認します。
-同じデータをREST APIで取得し、古い版・revisionの拒否と印刷命令が送られないことも検証します。
+保存・材料操作では同じデータをREST APIで取得し、古い版・revisionの拒否と印刷命令が送られないことも検証します。
+キューのMCP検証では隔離先への開始・継続・取り外し完了と、同一要求の再送・古い対象・接続断・材料保留での命令回数を観測します。
 
 ## 構成
 

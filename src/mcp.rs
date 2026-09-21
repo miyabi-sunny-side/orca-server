@@ -72,6 +72,22 @@ struct Printer {
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct Continue {
+    printer_id: String,
+    epoch: String,
+    generation: i64,
+    request_id: String,
+    /// `queue_get` waiting[0].id, or null when the queue has no waiting jobs.
+    #[schemars(required)]
+    #[serde(deserialize_with = "nullable_id")]
+    next_job: Option<String>,
+    /// `queue_get` current.id after removal, or null for the first print.
+    #[schemars(required)]
+    #[serde(deserialize_with = "nullable_id")]
+    removed_job: Option<String>,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Assign {
     printer_id: String,
     slot_id: String,
@@ -485,6 +501,42 @@ impl Tools {
             .await
             .map(|value| value["admission"].clone()),
         )
+    }
+    #[tool(
+        description = "Read one explicit printer's queue, current job, waiting head, hold reasons, allowed actions and epoch/generation/request_id. Does not start printing. Use printers to resolve the physical printer; never infer it from a machine model alone.",
+        annotations(read_only_hint = true)
+    )]
+    async fn queue_get(&self, Parameters(a): Parameters<Printer>) -> CallToolResult {
+        answer(
+            self.api(
+                Method::GET,
+                &["api", "queue"],
+                &[("printer_id", &a.printer_id)],
+                None,
+            )
+            .await,
+        )
+    }
+    #[tool(
+        description = "Start/continue the waiting head after the user has made the build plate empty and ready. One clear instruction such as 'removed it, continue' with an established printer/continuation context is sufficient; do not ask for the same confirmation again. Read queue_get and pass its epoch/generation/request_id, waiting[0].id as next_job, and current.id as removed_job (null for first print). When no jobs are waiting, next_job:null with removed_job closes the completed current job without starting anything. With no current or waiting job, do not call. Respect allowed.next/discard and hold reasons; never skip the head. needs_attention is recovery, not ordinary continuation: use the UI recovery actions. Never call merely because FINISH arrived, a page opened or the server restarted. On a lost response, resend exactly the same arguments. On 409, read and report the changed target; never silently substitute another job. Uses the same guarded queue API as the UI."
+    )]
+    async fn queue_continue(&self, Parameters(a): Parameters<Continue>) -> CallToolResult {
+        let action = match (a.next_job, a.removed_job) {
+            (Some(next), removed) => {
+                json!({"type":"next","expected_job":next,"removed_job":removed,"cleared":true})
+            }
+            (None, Some(removed)) => {
+                json!({"type":"discard","expected_job":removed,"cleared":true})
+            }
+            (None, None) => {
+                return answer(Err(failure(
+                    400,
+                    "Specify a waiting head or a completed removal target",
+                )));
+            }
+        };
+        answer(self.api(Method::POST, &["api", "queue"], &[("printer_id", &a.printer_id)],
+            Some(json!({"epoch":a.epoch,"generation":a.generation,"request_id":a.request_id,"action":action}))).await)
     }
 }
 #[tool_handler(router=self.tool_router)]

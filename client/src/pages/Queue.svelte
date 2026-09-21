@@ -36,7 +36,6 @@
   let sequence = 0;
   const controller = new AbortController();
   const choices = $derived({
-    next: queue?.allowed.next ? queue.waiting[0] : null,
     retry: queue?.allowed.retry ? queue.current : null,
     discard: queue?.allowed.discard ? queue.current : null,
   });
@@ -250,24 +249,40 @@
     {#if queue.waiting[0]}<p class="next">
         次: <strong>{queue.waiting[0].name}</strong>
       </p>{/if}
-    {#if choices.next || choices.retry || choices.discard}
+    {#if !queue.current || queue.current.state === "awaiting_removal"}
+      <div class="actions">
+        {#if queue.waiting[0]}<button
+            class="btn primary"
+            disabled={disabled || !queue.allowed.next}
+            onclick={() =>
+              void send({
+                type: "next",
+                expected_job: queue!.waiting[0].id,
+                removed_job: queue!.current?.id ?? null,
+                cleared: true,
+              })}
+            >{queue.current
+              ? "取り外した・次を印刷"
+              : "空のプレートで印刷を開始"}</button
+          >
+        {:else if queue.current}<button
+            class="btn primary"
+            disabled={disabled || !queue.allowed.discard}
+            onclick={() =>
+              void send({
+                type: "discard",
+                expected_job: queue!.current!.id,
+                cleared: true,
+              })}>取り外した</button
+          >{/if}
+      </div>
+    {:else if choices.retry || choices.discard}
       <label class="confirm"
         ><input type="checkbox" bind:checked={cleared} {disabled} /><span
           >造形物を取り外し、空のビルドプレートを戻しました</span
         ></label
       >
       <div class="actions">
-        {#if choices.next}<button
-            class="btn primary"
-            disabled={disabled || !cleared}
-            onclick={() =>
-              void send({
-                type: "next",
-                expected_job: choices.next!.id,
-                removed_job: queue!.current?.id ?? null,
-                cleared: true,
-              })}>次を印刷</button
-          >{/if}
         {#if choices.retry}<button
             class="btn primary"
             disabled={disabled || !cleared}
@@ -280,17 +295,14 @@
           >{/if}
         {#if choices.discard}<button
             class="btn"
-            class:primary={!choices.next && !choices.retry}
+            class:primary={!choices.retry}
             disabled={disabled || !cleared}
             onclick={() =>
               void send({
                 type: "discard",
                 expected_job: choices.discard!.id,
                 cleared: true,
-              })}
-            >{queue.current?.state === "awaiting_removal"
-              ? "取り外しを完了"
-              : "現在のジョブを除く"}</button
+              })}>現在のジョブを除く</button
           >{/if}
       </div>
     {/if}

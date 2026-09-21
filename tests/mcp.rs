@@ -483,3 +483,209 @@ async fn creation_defaults_match_rest() {
     }
     client.cancel().await.unwrap();
 }
+
+async fn wait_value(base: &str, path: &str, pointer: &str, expected: Value) {
+    for _ in 0..1500 {
+        if read(base, path).await.pointer(pointer) == Some(&expected) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("{path}{pointer} did not become {expected}");
+}
+async fn control(base: &str, value: Value) {
+    assert!(
+        reqwest::Client::new()
+            .post(base)
+            .json(&value)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+}
+fn continuation(q: &Value) -> Value {
+    json!({"printer_id":"p1","epoch":q["epoch"],"generation":q["generation"],"request_id":q["request_id"],
+        "next_job":q["waiting"][0]["id"],"removed_job":q["current"]["id"]})
+}
+#[tokio::test]
+#[ignore = "requires tests/mcp_queue.py isolated MQTT/FTPS fixture"]
+#[allow(clippy::too_many_lines)] // Observe one complete two-print cycle and its rejected/replayed requests.
+async fn queue_continuation() {
+    let base = std::env::var("MCP_FIXTURE_URL").unwrap();
+    let peer = std::env::var("MCP_PRINTER_CONTROL").unwrap();
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "{base}/mcp"
+        )))
+        .await
+        .unwrap();
+    let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    let rest = read(&base, "/api/queue?printer_id=p1").await;
+    assert_eq!(q["waiting"], rest["waiting"]);
+    assert_eq!(q["generation"], rest["generation"]);
+    let mut empty = continuation(&q);
+    empty["next_job"] = Value::Null;
+    assert_eq!(
+        call(&client, "queue_continue", empty, true).await["status"],
+        400
+    );
+    let mut missing = continuation(&q);
+    missing.as_object_mut().unwrap().remove("removed_job");
+    let invalid = client
+        .call_tool(
+            CallToolRequestParams::new("queue_continue")
+                .with_arguments(missing.as_object().unwrap().clone()),
+        )
+        .await;
+    assert!(invalid.is_err() || invalid.unwrap().is_error == Some(true));
+    assert_eq!(
+        call(
+            &client,
+            "queue_get",
+            json!({"printer_id":"not-a-printer"}),
+            true
+        )
+        .await["status"],
+        404
+    );
+    // No command is authorized while disconnected or before a fresh report.
+    control(&peer, json!({"disconnect":true})).await;
+    wait_value(&base, "/api/queue", "/printer/ready_to_print", json!(false)).await;
+    assert_eq!(
+        call(&client, "queue_continue", continuation(&q), true).await["status"],
+        409
+    );
+    assert_eq!(read(&peer, "").await["count"], 0);
+    wait_value(
+        &base,
+        "/api/queue",
+        "/printer/connection",
+        json!("synchronizing"),
+    )
+    .await;
+    assert_eq!(
+        call(&client, "queue_continue", continuation(&q), true).await["status"],
+        409
+    );
+    control(&peer, json!({})).await;
+    wait_value(&base, "/api/queue", "/allowed/next", json!(true)).await;
+    let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    let first = continuation(&q);
+    let (a, b) = tokio::join!(
+        call(&client, "queue_continue", first.clone(), false),
+        call(&client, "queue_continue", first.clone(), false)
+    );
+    assert_eq!(a["data"]["current"]["id"], q["waiting"][0]["id"]);
+    assert_eq!(b["data"]["current"]["id"], q["waiting"][0]["id"]);
+    wait_value(&peer, "", "/count", json!(1)).await;
+    call(&client, "queue_continue", first.clone(), false).await;
+    assert_eq!(read(&peer, "").await["count"], 1);
+    control(&peer, json!({"state":"RUNNING"})).await;
+    wait_value(&base, "/api/queue", "/current/state", json!("printing")).await;
+    control(&peer, json!({"state":"FINISH"})).await;
+    wait_value(
+        &base,
+        "/api/queue",
+        "/current/state",
+        json!("awaiting_removal"),
+    )
+    .await;
+    assert_eq!(read(&peer, "").await["count"], 1);
+    let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    for key in ["next_job", "removed_job", "epoch"] {
+        let mut wrong = continuation(&q);
+        wrong[key] = json!("stale-target");
+        assert_eq!(
+            call(&client, "queue_continue", wrong, true).await["status"],
+            409
+        );
+    }
+    let mut stale = continuation(&q);
+    stale["generation"] = json!(-1);
+    assert_eq!(
+        call(&client, "queue_continue", stale, true).await["status"],
+        409
+    );
+    // A held head must not complete the old job or start another material.
+    let inventory = read(&base, "/api/printers/p1/ams").await;
+    let slot = inventory["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["slot_index"] == 0)
+        .unwrap();
+    let path = format!(
+        "{base}/api/printers/p1/ams/{}",
+        slot["id"].as_str().unwrap()
+    );
+    let http = reqwest::Client::new();
+    assert_eq!(
+        http.put(&path)
+            .json(&json!({"revision":slot["revision"],"filament_id":null}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    let held = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    assert!(!held["waiting"][0]["hold_reason"].is_null());
+    assert_eq!(
+        call(&client, "queue_continue", continuation(&held), true).await["status"],
+        409
+    );
+    assert_eq!(
+        read(&base, "/api/queue").await["current"]["id"],
+        q["current"]["id"]
+    );
+    assert_eq!(read(&peer, "").await["count"], 1);
+    let inventory = read(&base, "/api/printers/p1/ams").await;
+    let current_slot = inventory["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == slot["id"])
+        .unwrap();
+    assert_eq!(
+        http.put(&path)
+            .json(&json!({"revision":current_slot["revision"],"filament_id":slot["filament_id"]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    call(&client, "queue_continue", continuation(&q), false).await;
+    wait_value(&peer, "", "/count", json!(2)).await;
+    assert_eq!(
+        read(&peer, "").await["prints"][1]["ams_mapping"],
+        json!([0])
+    );
+    // An old accepted request cannot switch the now-current job back.
+    assert_eq!(
+        call(&client, "queue_continue", first, true).await["status"],
+        409
+    );
+    control(&peer, json!({"state":"RUNNING"})).await;
+    wait_value(&base, "/api/queue", "/current/state", json!("printing")).await;
+    control(&peer, json!({"state":"FINISH"})).await;
+    wait_value(
+        &base,
+        "/api/queue",
+        "/current/state",
+        json!("awaiting_removal"),
+    )
+    .await;
+    let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    assert_eq!(q["waiting"], json!([]));
+    let finish = continuation(&q);
+    assert!(
+        call(&client, "queue_continue", finish.clone(), false).await["data"]["current"].is_null()
+    );
+    assert!(call(&client, "queue_continue", finish, false).await["data"]["current"].is_null());
+    assert_eq!(read(&peer, "").await["count"], 2);
+    client.cancel().await.unwrap();
+}

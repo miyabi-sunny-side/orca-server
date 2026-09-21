@@ -1,7 +1,7 @@
-# MCPでプレートと材料を管理する
+# MCPでプレート・材料・印刷キューを操作する
 
-Streamable HTTP対応のMCPクライアントから、プレートの保存・更新、製品と色、共通温度、AMSの対応と使用順を操作できます。
-ブラウザと同じAPI・SQLiteを使います。MCPで印刷キューの追加や印刷開始は行いません。
+Streamable HTTP対応のMCPクライアントから、プレートの保存・更新、製品と色、共通温度、AMSの対応と使用順、印刷キューの継続を操作できます。
+ブラウザと同じAPI・SQLiteを使います。キューへの追加・順序変更は画面から行います。
 
 ## 接続
 
@@ -91,6 +91,36 @@ MCPからファイル本体をアップロードする操作はありません�
 未指定の温度差分は基本値に戻り、その製品の全色へ反映します。
 値の範囲、AMSの観測と台帳の違いは[材料管理](filaments.md)を参照してください。
 
+## 取り外したあとに次へ進む
+
+対象のプリンターが決まった会話では、「取り外したので次へ」の一度の指示で継続できます。
+空のビルドプレートを戻したという申告を受けたクライアントは、同じ確認を聞き直す必要はありません。
+対象が未確定なら`printers`の実機IDから選びます。同じ機種名だけで複数台を区別しないでください。
+
+`queue_get`へ`{"printer_id":"対象の実機ID"}`を渡します。
+通常の継続では`current`が`awaiting_removal`で、`allowed.next`がtrueの先頭を使います。
+次の例の値をその応答で置き換え、`queue_continue`を呼びます。
+
+```json
+{
+  "printer_id": "対象の実機ID",
+  "epoch": "取得したepoch",
+  "generation": 1,
+  "request_id": "取得したrequest_id",
+  "next_job": "waiting[0].id",
+  "removed_job": "current.id"
+}
+```
+
+最初の開始では`removed_job:null`です。待機がなければ`next_job:null`と`current.id`を送り、
+`allowed.discard`の範囲で取り外しを完了します。この操作では印刷を開始しません。両方なければ操作は不要です。
+2つの項目は省略できず、対象がない側へ明示的に`null`を送ります。成功時は`data`に更新後のキューを返します。
+
+先頭が保留なら`hold_reason`を伝え、後続へ飛ばしません。`needs_attention`は通常の継続と分け、
+[画面の復旧操作](queue.md#失敗再起動からの復旧)で本体・試行を確認します。
+FINISH、再起動、画面表示だけでは次の印刷を始めません。結果不明時は保存した引数をそのまま再送できます。
+409では状態を読み直して対象の変化を伝え、別ジョブへ自動で差し替えません。
+
 ## Toolと引数
 
 `id`は各読取り・保存結果から取得します。「任意」は省略可能で、それ以外は必須です。
@@ -116,6 +146,8 @@ MCPからファイル本体をアップロードする操作はありません�
 | `ams_prioritize` | `printer_id`、`priority: {filament_id,order:[{id,revision}]}`。現在の同一材料グループ全件を使用順に指定。 |
 | `plate_options` | 任意の`machine`。所持機の機種/ノズル一覧と、指定機種の工程・材料・bed候補。 |
 | `plate_admission` | `printer_id`、`plate_id`。現在版の`plate_version`、`allowed`、`reason`。 |
+| `queue_get` | `printer_id`。現在ジョブ・待機先頭・可否・要求に使う識別値。 |
+| `queue_continue` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`next_job: string or null`、`removed_job: string or null`。開始・継続または最後の取り外し完了。 |
 
 `plate_admission`は、条件の不足、実機との不一致、未同期や該当材料の未装填など、通常のキュー追加と同じ判断を返します。
 機種候補は要求profile、`printer_id`は実物を識別します。同型機が複数あるときも対象を区別してください。

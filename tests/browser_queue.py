@@ -1,29 +1,14 @@
 """Chromium + real API + isolated P1: python3 tests/browser_queue.py BINARY OUTPUT_DIR."""
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import subprocess
 import sys
-import threading
-from print_fixture import Rig, REPO
+from print_fixture import Rig, REPO, printer_control
 
 
 def run(binary, output, appdir=None):
     rig = Rig(binary, output, appdir=appdir)
-    class Control(BaseHTTPRequestHandler):
-        def do_GET(self): self.reply()
-        def do_POST(self):
-            value=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            if value.get('fail_upload'): rig.ftp.actions.put('fail')
-            elif value.get('state'): rig.report(value['state'],value.get('index',-1))
-            else: rig.broker.send(rig.full)
-            self.reply()
-        def reply(self):
-            data=json.dumps(dict(prints=rig.broker.prints,uploads=rig.ftp.uploads)).encode()
-            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
-        def log_message(self,*_): pass
-    control=ThreadingHTTPServer(('127.0.0.1',0),Control)
-    threading.Thread(target=control.serve_forever,daemon=True).start()
+    control=printer_control(rig)
     try:
         rig.launch();rig.seed()
         # These are reusable compositions; the browser creates the first plate itself.

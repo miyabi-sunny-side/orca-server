@@ -95,7 +95,10 @@ jobs:
       - name: Verify material names do not block compatible nozzles
         run: python3 tests/nozzle_material.py target/debug/orca-server /tmp/orca-nozzle-check
 
-      - name: Verify mobile queue against isolated printer
+      - name: Verify MCP queue continuation against isolated printer
+        run: python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
+
+      - name: Verify mobile and desktop queue against isolated printer
         run: python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 
       - name: Smoke-test embedded UI from an isolated directory
