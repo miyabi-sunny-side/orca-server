@@ -46,7 +46,7 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     if (index === 0) await capture(`add-${displayTheme}`);
     await page.getByRole("button", { name: "印刷キューへ", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/plates/${plates[index].id}$`));
-    await expect(page.getByRole("status")).toContainText("キューに追加しました");
+    await expect(page.getByRole("status").filter({hasText:"キューに追加しました"})).toBeVisible();
     await page.getByRole('link',{name:'キューを見る',exact:true}).click();
     await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
   };
