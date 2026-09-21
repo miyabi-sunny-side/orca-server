@@ -148,7 +148,7 @@ fn record(c: &Connection, pid: &str, command: &Command) -> Result<()> {
     Ok(())
 }
 fn load_setting(c: &Connection, s: &Specification) -> Result<crate::filament::SettingData> {
-    let (base,raw):(String,String)=c.query_row("SELECT base_profile_key,overrides_json FROM filament_settings WHERE filament_id=?1 AND machine_profile_key=?2",params![s.filament_id,s.required_machine_profile_key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::Conflict("Configure this material for the required machine and nozzle first"))?;
+    let (base,raw):(String,String)=c.query_row("SELECT s.base_profile_key,s.overrides_json FROM filament_settings s JOIN filaments f ON f.product_id=s.product_id WHERE f.id=?1 AND s.machine_profile_key=?2",params![s.filament_id,s.required_machine_profile_key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::Conflict("Configure this material for the required machine and nozzle first"))?;
     Ok(crate::filament::SettingData {
         machine_profile_key: s.required_machine_profile_key.clone(),
         base_profile_key: base,

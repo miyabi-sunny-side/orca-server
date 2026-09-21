@@ -2,39 +2,54 @@
   import { onMount } from "svelte";
   import {
     request,
-    type Filament,
-    type FilamentSetting,
+    ApiError,
+    type FilamentProduct,
     type Machine,
     type FilamentProfile,
   } from "../lib/api";
   const parts = window.location.pathname.split("/");
-  const editing = !!parts[2];
   const id = parts[2] === "new" ? "" : parts[2];
+  const productMode = parts[2] === "new" || parts[3] === "edit";
+  const colorMode = parts[3] === "colors";
   const settingMode = parts[3] === "settings";
-  const sid = parts[4] === "new" ? "" : parts[4];
-  let items = $state<Filament[]>([]);
-  let settings = $state<FilamentSetting[]>([]);
+  const childId = parts[4] === "new" ? "" : parts[4];
+  const sid = childId;
+  const formMode = productMode || colorMode || settingMode;
+  const back = id ? `/filaments/${id}` : "/filaments";
+  const api = id ? `/api/filament-products/${id}` : "/api/filament-products";
+  let items = $state<FilamentProduct[]>([]);
+  let product = $state<FilamentProduct>();
+  let settings = $state<FilamentProduct["settings"]>([]);
   let machines = $state<Machine[]>([]);
   let profiles = $state<FilamentProfile[]>([]);
-  let loading = $state(true);
-  let loaded = $state(false);
-  let busy = $state(false);
-  let error = $state("");
-  let profileError = $state("");
   let data = $state({
     name: "",
     vendor: "",
     material: "PLA",
-    color: "FFFFFFFF",
     bambu_filament_id: "",
   });
-  let machine = $state("");
-  let base = $state("");
-  let first = $state<number>();
-  let normal = $state<number>();
-  let bedFirst = $state<number>();
-  let bedNormal = $state<number>();
+  let color = $state({ name: "", color: "FFFFFFFF" });
+  let loading = $state(true),
+    loaded = $state(false),
+    busy = $state(false),
+    error = $state(""),
+    profileError = $state("");
+  let machine = $state(""),
+    base = $state(""),
+    adoptId = $state("");
+  let first = $state<number>(),
+    normal = $state<number>(),
+    bedFirst = $state<number>(),
+    bedNormal = $state<number>();
   const selected = $derived(profiles.find((p) => p.key === base));
+  const presets = [
+    { name: "黒", color: "000000FF" },
+    { name: "白", color: "FFFFFFFF" },
+    { name: "黄", color: "FFFF00FF" },
+    { name: "赤", color: "FF0000FF" },
+    { name: "青", color: "0000FFFF" },
+    { name: "透明", color: "FFFFFF00" },
+  ];
   const controller = new AbortController();
   let sequence = 0;
   async function loadProfiles() {
@@ -44,7 +59,7 @@
     if (!machine) return;
     try {
       const result = await request<FilamentProfile[]>(
-        `/api/filaments/${id}/profiles?machine=${encodeURIComponent(machine)}`,
+        `${api}/profiles?machine=${encodeURIComponent(machine)}`,
         { signal: controller.signal },
       );
       if (ticket === sequence && !controller.signal.aborted) profiles = result;
@@ -59,21 +74,39 @@
     error = "";
     try {
       if (id) {
-        const value = await request<{
-          filament: Filament;
-          settings: FilamentSetting[];
-        }>(`/api/filaments/${id}`, { signal: controller.signal });
-        const f = value.filament;
+        try {
+          product = await request<FilamentProduct>(api, {
+            signal: controller.signal,
+          });
+        } catch (cause) {
+          if (cause instanceof ApiError && cause.status === 404 && !parts[3]) {
+            const legacy = await request<{ product_id: string }>(
+              `/api/filaments/${id}`,
+              { signal: controller.signal },
+            );
+            window.location.replace(
+              `/filaments/${legacy.product_id}/colors/${id}`,
+            );
+            return;
+          }
+          throw cause;
+        }
         data = {
-          name: f.name,
-          vendor: f.vendor,
-          material: f.material,
-          color: f.color,
-          bambu_filament_id: f.bambu_filament_id ?? "",
+          name: product.name,
+          vendor: product.vendor,
+          material: product.material,
+          bambu_filament_id: product.bambu_filament_id ?? "",
         };
-        settings = value.settings;
-      } else if (!editing)
-        items = await request<Filament[]>("/api/filaments", {
+        settings = product.settings;
+        if (colorMode && childId) {
+          const c = product.colors.find((c) => c.id === childId);
+          if (!c)
+            throw new Error("色が見つかりません。製品から開き直してください。");
+          color = { name: c.name, color: c.color };
+        }
+      }
+      if (!formMode)
+        items = await request<FilamentProduct[]>("/api/filament-products", {
           signal: controller.signal,
         });
       if (settingMode) {
@@ -84,7 +117,7 @@
           const s = settings.find((s) => s.id === sid);
           if (!s)
             throw new Error(
-              "設定が見つかりません。材料の画面から開き直してください。",
+              "設定が見つかりません。製品から開き直してください。",
             );
           machine = s.machine_profile_key;
           base = s.base_profile_key;
@@ -113,7 +146,7 @@
     error = "";
     try {
       if (settingMode) {
-        await request(`/api/filaments/${id}/settings${sid ? `/${sid}` : ""}`, {
+        await request(`${api}/settings${sid ? `/${sid}` : ""}`, {
           method: sid ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -127,21 +160,25 @@
             },
           }),
         });
-        window.location.assign(`/filaments/${id}`);
+      } else if (colorMode) {
+        await request(`${api}/colors${childId ? `/${childId}` : ""}`, {
+          method: childId ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(color),
+        });
       } else {
-        const f = await request<Filament>(
-          `/api/filaments${id ? `/${id}` : ""}`,
-          {
-            method: id ? "PUT" : "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              ...data,
-              bambu_filament_id: data.bambu_filament_id || null,
-            }),
-          },
-        );
-        window.location.assign(`/filaments/${f.id}`);
+        const saved = await request<FilamentProduct>(api, {
+          method: id ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...data,
+            bambu_filament_id: data.bambu_filament_id || null,
+          }),
+        });
+        window.location.assign(`/filaments/${saved.id}`);
+        return;
       }
+      window.location.assign(back);
     } catch (cause) {
       error = (cause as Error).message;
       busy = false;
@@ -152,8 +189,10 @@
       busy ||
       !window.confirm(
         settingMode
-          ? "この機種用設定を削除しますか？"
-          : `「${data.name}」と機種用設定を削除しますか？`,
+          ? "全色に共通の機種用設定を削除しますか？"
+          : colorMode
+            ? `「${color.name}」を削除しますか？`
+            : `「${data.name}」と全ての色・設定を削除しますか？`,
       )
     )
       return;
@@ -161,64 +200,67 @@
     error = "";
     try {
       await request(
-        `/api/filaments/${id}${settingMode ? `/settings/${sid}` : ""}`,
+        `${api}${settingMode ? `/settings/${sid}` : colorMode ? `/colors/${childId}` : ""}`,
         { method: "DELETE" },
       );
-      window.location.assign(settingMode ? `/filaments/${id}` : "/filaments");
+      window.location.assign(formMode ? back : "/filaments");
     } catch (cause) {
       error = (cause as Error).message;
+      busy = false;
+    }
+  }
+  async function adopt(event: SubmitEvent) {
+    event.preventDefault();
+    if (busy || !adoptId) return;
+    busy = true;
+    error = "";
+    try {
+      await request(`${api}/adopt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filament_id: adoptId }),
+      });
+      adoptId = "";
+      await load();
+    } catch (cause) {
+      error = (cause as Error).message;
+    } finally {
       busy = false;
     }
   }
 </script>
 
 <svelte:head
-  ><title
-    >{settingMode
-      ? "機種別の材料設定"
-      : editing
-        ? "材料を編集"
-        : "フィラメント"} · OrcaServer</title
-  ></svelte:head
+  ><title>{id ? data.name : "フィラメント"} · OrcaServer</title></svelte:head
 >
 <section class="content" aria-label="フィラメント管理">
-  {#if editing}<a href={settingMode ? `/filaments/${id}` : "/filaments"}
-      >{settingMode ? "材料へ戻る" : "材料一覧へ"}</a
+  {#if id || productMode}<a href={formMode ? back : "/filaments"}
+      >{formMode && id ? "製品へ戻る" : "フィラメント一覧へ"}</a
     >{/if}
   <div class="page-heading">
     <h1>
       {settingMode
-        ? `${data.name} · 機種別設定`
-        : editing
-          ? id
-            ? "材料を編集"
-            : "材料を追加"
-          : "フィラメント"}
+        ? `${data.name} · 共通設定`
+        : colorMode
+          ? `${data.name} · ${childId ? "色を編集" : "色を追加"}`
+          : productMode
+            ? id
+              ? "製品を編集"
+              : "製品を追加"
+            : id
+              ? data.name
+              : "フィラメント"}
     </h1>
-    {#if !editing}<a class="btn primary" href="/filaments/new">追加</a>{/if}
+    {#if !id && !formMode}<a class="btn primary" href="/filaments/new"
+        >製品を追加</a
+      >{/if}
   </div>
   {#if error}<div class="notice"><p role="alert">{error}</p></div>{/if}
   {#if loading}<p class="state" role="status">読み込んでいます…</p>
   {:else if !loaded}<button class="btn" onclick={() => void load()}
       >読み直す</button
     >
-  {:else if !editing}
-    {#if items.length === 0}<p class="state">
-        使用するフィラメントを銘柄と色ごとに登録してください。AMSのスロットと対応づけられます。
-      </p>{/if}
-    <ul class="plate-list">
-      {#each items as f (f.id)}<li>
-          <a class="plate-row" href={`/filaments/${f.id}`}
-            ><strong
-              ><span class="swatch" style:background={`#${f.color}`}
-              ></span>{f.name}</strong
-            ><span class="caption">{f.vendor} · {f.material} · #{f.color}</span
-            ></a
-          >
-        </li>{/each}
-    </ul>
-    <a href="/printers">プリンターとAMSを確認</a>
-  {:else}
+  {:else if formMode}
     <form onsubmit={save}>
       <fieldset disabled={busy}>
         {#if settingMode}
@@ -317,17 +359,71 @@
           <p class="help">
             材料メーカーの推奨温度とプリンターの仕様を確認してください。同じ構成のプリンターでこの設定を共有します。
           </p>
-        {:else}
+        {:else if colorMode}
           <label class="field"
-            ><span>材料名</span><input
+            ><span>基本色</span><select
+              value={color.name &&
+              presets.some((p) => p.color === color.color.toUpperCase())
+                ? color.color.toUpperCase()
+                : ""}
+              onchange={(event) => {
+                const preset = presets.find(
+                  (p) => p.color === event.currentTarget.value,
+                );
+                if (preset) color = { ...preset };
+              }}
+              ><option value="">カスタム</option
+              >{#each presets as preset}<option value={preset.color}
+                  >{preset.name}</option
+                >{/each}</select
+            ></label
+          >
+          <label class="field"
+            ><span>色名</span><input
               required
               maxlength="160"
-              bind:value={data.name}
-              placeholder="例: PLA Matte 黒"
+              bind:value={color.name}
+              placeholder="例: アイボリーホワイト"
             /></label
           >
           <label class="field"
-            ><span>メーカー・銘柄</span><input
+            ><span>色見本</span><input
+              type="color"
+              value={/^[0-9a-fA-F]{8}$/.test(color.color)
+                ? `#${color.color.slice(0, 6)}`
+                : "#ffffff"}
+              oninput={(event) =>
+                (color.color =
+                  event.currentTarget.value.slice(1).toUpperCase() +
+                  (color.color.slice(6) || "FF"))}
+            /></label
+          >
+          <details>
+            <summary>正確な色を編集</summary>
+            <label class="field"
+              ><span>色（RGBA・8桁）</span><input
+                required
+                pattern={"[0-9a-fA-F]{8}"}
+                maxlength="8"
+                bind:value={color.color}
+              /></label
+            >
+            <p class="help">
+              000000はRGB
+              0/0/0、161616は22/22/22の異なる色です。末尾2桁は透明度で、FFは不透明です。AMSとの照合には正確な値を使います。
+            </p>
+          </details>
+        {:else}
+          <label class="field"
+            ><span>製品名</span><input
+              required
+              maxlength="160"
+              bind:value={data.name}
+              placeholder="例: Bambu PLA Matte"
+            /></label
+          >
+          <label class="field"
+            ><span>メーカー</span><input
               required
               maxlength="160"
               bind:value={data.vendor}
@@ -346,28 +442,18 @@
                 value={m}
               ></option>{/each}</datalist
           >
-          <label class="field"
-            ><span>色（RGBA・8桁）</span><input
-              required
-              pattern={"[0-9a-fA-F]{8}"}
-              maxlength="8"
-              bind:value={data.color}
-              aria-describedby="color-help"
-            /></label
-          >
-          <p id="color-help" class="help">
-            黒: 000000FF / 白: FFFFFFFF。末尾2桁は透明度です。
-          </p>
-          <label class="field"
-            ><span>Bambu材料ID（純正品・任意）</span><input
-              maxlength="64"
-              bind:value={data.bambu_filament_id}
-              placeholder="例: GFA01"
-            /></label
-          >
-          <p class="help">
-            ID・色・材料種別とタグ情報が一致すると自動で対応づけます。サードパーティ製は空欄にして、AMS画面で指定してください。
-          </p>
+          <details>
+            <summary>自動識別の詳細</summary><label class="field"
+              ><span>Bambu材料ID（純正品・任意）</span><input
+                maxlength="64"
+                bind:value={data.bambu_filament_id}
+                placeholder="例: GFA01"
+              /></label
+            >
+            <p class="help">
+              ID・正確な色・材料種別・タグが一致した候補を使います。サードパーティ製は空欄にしてAMSで対応づけます。
+            </p>
+          </details>
         {/if}
       </fieldset>
       <div class="actions">
@@ -375,60 +461,120 @@
           class="btn primary"
           disabled={busy || (settingMode && !selected)}
           >{busy ? "保存しています…" : "保存"}</button
-        ><a class="btn" href={settingMode ? `/filaments/${id}` : "/filaments"}
-          >戻る</a
-        >
+        ><a class="btn" href={back}>戻る</a>
       </div>
     </form>
-    {#if id && !settingMode}
-      <section class="settings">
-        <div class="page-heading">
-          <h2>機種別の材料設定</h2>
-          <a class="btn" href={`/filaments/${id}/settings/new`}>設定を追加</a>
-        </div>
-        {#if !settings.length}<p class="help">
-            使う機種・ノズル径ごとに基本プロファイルを選択してください。
-          </p>{/if}
-        <ul class="plate-list">
-          {#each settings as s (s.id)}<li>
-              <a class="plate-row" href={`/filaments/${id}/settings/${s.id}`}
-                ><strong>{s.machine_profile_key}</strong><span class="caption"
-                  >{s.base_profile_key}</span
-                ><span
-                  >初層 {s.resolved?.nozzle_temperature_initial_layer ??
-                    "不明"}℃ / 通常 {s.resolved?.nozzle_temperature ??
-                    "不明"}℃</span
-                >{#if s.overrides_json.bed_temperature_initial_layer !== undefined || s.overrides_json.bed_temperature !== undefined}<span
-                    class="caption"
-                    >ベッド: 初層 {s.overrides_json
-                      .bed_temperature_initial_layer === undefined
-                      ? "基本値"
-                      : `${s.overrides_json.bed_temperature_initial_layer}℃`} / 通常
-                    {s.overrides_json.bed_temperature === undefined
-                      ? "基本値"
-                      : `${s.overrides_json.bed_temperature}℃`}</span
-                  >{/if}{#if s.error}<span role="alert"
-                    >基本プロファイルを選び直してください。</span
-                  >{/if}</a
-              >
-            </li>{/each}
-        </ul>
-      </section>
-    {/if}
-    {#if id && (!settingMode || sid)}<div class="delete-area">
+    {#if childId && (colorMode || settingMode)}<div class="delete-area">
         <button class="btn" disabled={busy} onclick={() => void remove()}
-          >{settingMode ? "この設定を削除" : "材料を削除"}</button
-        >{#if !settingMode}<p class="help">
-            AMSに対応づけた材料は削除できません。先にAMS画面で対応を解除してください。
-          </p>{/if}
+          >{settingMode ? "この設定を削除" : "この色を削除"}</button
+        >
       </div>{/if}
+  {:else if !id}
+    {#if !items.length}<p class="state">
+        製品を登録して、使用する色を追加してください。
+      </p>{/if}
+    <ul class="plate-list">
+      {#each items as p (p.id)}<li>
+          <a class="plate-row" href={`/filaments/${p.id}`}
+            ><strong>{p.name}</strong><span class="caption"
+              >{p.vendor} · {p.material}</span
+            ><span class="colors"
+              >{#each p.colors as c (c.id)}<span
+                  ><span class="swatch" style:background={`#${c.color}`}
+                  ></span>{c.name}</span
+                >{/each}</span
+            ></a
+          >
+        </li>{/each}
+    </ul>
+    <a href="/printers">プリンターとAMSを確認</a>
+  {:else if product}
+    <p class="caption">{product.vendor} · {product.material}</p>
+    <a href={`/filaments/${id}/edit`}>共通情報を編集</a>
+    <div class="page-heading">
+      <h2>色</h2>
+      <a class="btn primary" href={`/filaments/${id}/colors/new`}>色を追加</a>
+    </div>
+    {#if !product.colors.length}<p class="help">
+        色を追加するとAMSに対応づけられます。
+      </p>{/if}
+    <ul class="plate-list">
+      {#each product.colors as c (c.id)}<li>
+          <a class="plate-row" href={`/filaments/${id}/colors/${c.id}`}
+            ><strong
+              ><span class="swatch" style:background={`#${c.color}`}
+              ></span>{c.name}</strong
+            ></a
+          >
+        </li>{/each}
+    </ul>
+    <section class="settings">
+      <div class="page-heading">
+        <h2>全色に共通の機種別設定</h2>
+        <a class="btn" href={`/filaments/${id}/settings/new`}>設定を追加</a>
+      </div>
+      {#if !settings.length}<p class="help">
+          使う機種・ノズル径ごとに基本プロファイルを選択してください。
+        </p>{/if}
+      <ul class="plate-list">
+        {#each settings as s (s.id)}<li>
+            <a class="plate-row" href={`/filaments/${id}/settings/${s.id}`}
+              ><strong>{s.machine_profile_key}</strong><span class="caption"
+                >{s.base_profile_key}</span
+              ><span
+                >初層 {s.resolved?.nozzle_temperature_initial_layer ?? "不明"}℃
+                / 通常 {s.resolved?.nozzle_temperature ?? "不明"}℃</span
+              >{#if s.overrides_json.bed_temperature_initial_layer !== undefined || s.overrides_json.bed_temperature !== undefined}<span
+                  class="caption"
+                  >ベッド: 初層 {s.overrides_json
+                    .bed_temperature_initial_layer === undefined
+                    ? "基本値"
+                    : `${s.overrides_json.bed_temperature_initial_layer}℃`} / 通常
+                  {s.overrides_json.bed_temperature === undefined
+                    ? "基本値"
+                    : `${s.overrides_json.bed_temperature}℃`}</span
+                >{/if}{#if s.error}<span role="alert"
+                  >基本プロファイルを選び直してください。</span
+                >{/if}</a
+            >
+          </li>{/each}
+      </ul>
+    </section>
+    <details class="settings">
+      <summary>既存の色をまとめる</summary>
+      <p class="help">
+        メーカー・材料・Bambu
+        ID・全機種の設定が同じ登録を、この製品の色としてまとめます。材料IDとAMSの対応は保持します。
+      </p>
+      <form onsubmit={adopt}>
+        <fieldset disabled={busy}>
+          <label class="field"
+            ><span>既存の色</span><select required bind:value={adoptId}
+              ><option value="" disabled>色を選択</option
+              >{#each items.filter((p) => p.id !== id) as p}{#each p.colors as c}<option
+                    value={c.id}>{p.name} / {c.name}</option
+                  >{/each}{/each}</select
+            ></label
+          ><button class="btn" disabled={!adoptId || busy}
+            >この製品にまとめる</button
+          >
+        </fieldset>
+      </form>
+    </details>
+    <details class="delete-area">
+      <summary>製品の管理</summary>
+      <p class="help">AMSや印刷ジョブが参照する色・設定は削除できません。</p>
+      <button class="btn" disabled={busy} onclick={() => void remove()}
+        >製品を削除</button
+      >
+    </details>
   {/if}
 </section>
 
 <style lang="sass">
   .page-heading
     margin-top: var(--sp-3)
-  h1, .settings
+  h1, .settings, .colors
     overflow-wrap: anywhere
   fieldset
     margin: 0
@@ -439,6 +585,10 @@
     margin-top: var(--sp-5)
     padding-top: var(--sp-4)
     border-top: 1px solid var(--c-border)
+  .colors
+    display: flex
+    flex-wrap: wrap
+    gap: var(--sp-2)
   .swatch
     display: inline-block
     width: 1em

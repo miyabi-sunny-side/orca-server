@@ -1,5 +1,5 @@
 use crate::plates::{Error, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
@@ -93,20 +93,19 @@ fn private_connection(root: &Path) -> Result<Connection> {
         options.mode(0o600);
     }
     options.open(&path)?;
-    Connection::open(&path).map_err(Error::from)
+    let connection = Connection::open(&path)?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(Error::from)?;
+    connection
+        .pragma_update(None, "foreign_keys", false)
+        .map_err(Error::from)?;
+    Ok(connection)
 }
 impl Database {
     pub fn open(root: &Path, initial: impl FnOnce() -> Result<Option<Device>>) -> Result<Self> {
         let mut connection = private_connection(root)?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(Error::from)?;
-        connection
-            .pragma_update(None, "foreign_keys", true)
-            .map_err(Error::from)?;
-        let tx = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(Error::from)?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let version: i64 = tx
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::from)?;
@@ -127,7 +126,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=3 => {}
+            1..=4 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -186,7 +185,21 @@ impl Database {
             crate::plates::migrate(&tx, root)?;
             tx.pragma_update(None, "user_version", 3)?;
         }
+        if version < 4 {
+            crate::products::migrate(&tx)?;
+        }
+        if tx
+            .prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_some()
+        {
+            return Err(Error::Unavailable(
+                "Database migration found broken references; restore or repair the saved database",
+            ));
+        }
         tx.commit().map_err(Error::from)?;
+        connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -204,66 +217,55 @@ impl Database {
         f.data.validate()?;
         let mut c = self.connection()?;
         let tx = c.transaction()?;
-        tx.execute("INSERT INTO filaments(id,name,vendor,material,color,bambu_filament_id) VALUES (?1,?2,?3,?4,?5,?6)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name,vendor=excluded.vendor,material=excluded.material,color=excluded.color,bambu_filament_id=excluded.bambu_filament_id",
-            params![f.id,f.data.name,f.data.vendor,f.data.material,f.data.color,f.data.bambu_filament_id])?;
+        let old: Option<(String,String,String,i64)> = tx.query_row("SELECT f.product_id,f.name,p.name,(SELECT count(*) FROM filaments WHERE product_id=p.id) FROM filaments f JOIN filament_products p ON p.id=f.product_id WHERE f.id=?1",[&f.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        if let Some((pid, old_name, product_name, count)) = old {
+            let display = if old_name == product_name {
+                old_name.clone()
+            } else {
+                format!("{product_name} · {old_name}")
+            };
+            let name = if f.data.name == display {
+                &old_name
+            } else {
+                &f.data.name
+            };
+            let product_name = if count == 1 && old_name == product_name {
+                &f.data.name
+            } else {
+                &product_name
+            };
+            tx.execute("UPDATE filament_products SET vendor=?1,material=?2,bambu_filament_id=?3,name=?4 WHERE id=?5",params![f.data.vendor,f.data.material,f.data.bambu_filament_id,product_name,pid])?;
+            tx.execute(
+                "UPDATE filaments SET name=?1,color=?2 WHERE id=?3",
+                params![name, f.data.color, f.id],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO filament_products VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    f.id,
+                    f.data.name,
+                    f.data.vendor,
+                    f.data.material,
+                    f.data.bambu_filament_id
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO filaments VALUES (?1,?1,?2,?3)",
+                params![f.id, f.data.name, f.data.color],
+            )?;
+        }
         crate::ams::invalidate_automatic(&tx)?;
         tx.commit()?;
         Ok(())
     }
     pub(crate) fn delete_filament(&self, id: &str) -> Result<()> {
-        if self
-            .connection()?
-            .execute("DELETE FROM filaments WHERE id=?1", [id])?
-            == 0
-        {
-            return Err(Error::NotFound);
-        }
-        Ok(())
-    }
-    pub(crate) fn filament_settings(
-        &self,
-        filament_id: &str,
-    ) -> Result<Vec<crate::filament::Setting>> {
-        use crate::filament::{Setting, SettingData};
-        let connection = self.connection()?;
-        let mut q=connection.prepare("SELECT id,filament_id,machine_profile_key,base_profile_key,overrides_json FROM filament_settings WHERE filament_id=?1 ORDER BY machine_profile_key")?;
-        Ok(q.query_map([filament_id], |r| {
-            let raw: String = r.get(4)?;
-            let overrides_json = serde_json::from_str(&raw).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-            Ok(Setting {
-                id: r.get(0)?,
-                filament_id: r.get(1)?,
-                data: SettingData {
-                    machine_profile_key: r.get(2)?,
-                    base_profile_key: r.get(3)?,
-                    overrides_json,
-                },
-            })
-        })?
-        .collect::<std::result::Result<_, _>>()?)
-    }
-    pub(crate) fn save_setting(&self, s: &crate::filament::Setting) -> Result<()> {
-        s.data.overrides_json.validate()?;
-        self.connection()?.execute("INSERT INTO filament_settings(id,filament_id,machine_profile_key,base_profile_key,overrides_json) VALUES (?1,?2,?3,?4,?5)
-            ON CONFLICT(id) DO UPDATE SET machine_profile_key=excluded.machine_profile_key,base_profile_key=excluded.base_profile_key,overrides_json=excluded.overrides_json",
-            params![s.id,s.filament_id,s.data.machine_profile_key,s.data.base_profile_key,serde_json::to_string(&s.data.overrides_json).expect("temperatures serialize")])?;
-        Ok(())
-    }
-    pub(crate) fn delete_setting(&self, filament_id: &str, id: &str) -> Result<()> {
-        if self.connection()?.execute(
-            "DELETE FROM filament_settings WHERE id=?1 AND filament_id=?2",
-            params![id, filament_id],
-        )? == 0
-        {
-            return Err(Error::NotFound);
-        }
+        let mut c = self.connection()?;
+        let tx = c.transaction()?;
+        let pid = crate::products::product_id(&tx, id)?;
+        tx.execute("DELETE FROM filaments WHERE id=?1", [id])?;
+        tx.execute("DELETE FROM filament_products WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM filaments WHERE product_id=?1)",[pid])?;
+        tx.commit()?;
         Ok(())
     }
     pub fn list(&self) -> Result<Vec<Device>> {
@@ -336,7 +338,7 @@ fn save(connection: &Connection, device: &Device) -> Result<()> {
 pub(crate) fn load_filaments(connection: &Connection) -> Result<Vec<crate::filament::Filament>> {
     use crate::filament::{Filament, FilamentData};
     let mut q = connection.prepare(
-        "SELECT id,name,vendor,material,color,bambu_filament_id FROM filaments ORDER BY name,id",
+        "SELECT f.id,CASE WHEN f.name=p.name THEN f.name ELSE p.name || ' · ' || f.name END,p.vendor,p.material,f.color,p.bambu_filament_id FROM filaments f JOIN filament_products p ON p.id=f.product_id ORDER BY p.name,f.name,f.id",
     )?;
     Ok(q.query_map([], |r| {
         Ok(Filament {
@@ -407,7 +409,7 @@ mod tests {
                     |r| r.get::<_, i64>(0)
                 )
                 .unwrap(),
-                7
+                8
             );
             assert_eq!(
                 c.query_row("SELECT name FROM plates WHERE id=?1", [&id], |r| r
@@ -445,6 +447,174 @@ mod tests {
         );
     }
     #[test]
+    fn schema_three_product_migration_preserves_colors_settings_and_active_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        c.execute_batch(include_str!("../tests/fixtures/schema-v3.sql"))
+            .unwrap();
+        save(&c, &device()).unwrap();
+        c.execute_batch("INSERT INTO filaments VALUES
+            ('black','PLA Matte','Bambu Lab','PLA','000000FF','GFA01'),
+            ('white','PLA Matte','Bambu Lab','PLA','FFFFFFFF','GFA01'),
+            ('tuned','PLA Matte','Bambu Lab','PLA','FFFF00FF','GFA01'),
+            ('different','PLA Basic','Bambu Lab','PLA','000000FF','GFA00');
+            INSERT INTO filament_settings VALUES
+            ('bs','black','machine','base','{\"nozzle_temperature\":215}'),
+            ('ws','white','machine','base','{\"nozzle_temperature\":215}'),
+            ('ts','tuned','machine','base','{\"nozzle_temperature\":220}');
+            INSERT INTO ams_slots(id,printer_id,ams_id,slot_index,filament_id,mapping_source) VALUES ('slot','stable-id',0,0,'white','manual');
+            INSERT INTO plates(id,name) VALUES ('plate','Legacy plate');
+            INSERT INTO print_jobs(id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,state,position,attempt_id,execution_json,attempt_json)
+            VALUES ('job','stable-id','plate','Legacy plate','slot','white','machine','quality','bed','printing',0,'attempt','{\"frozen\":true}','{\"sent_at\":123}');").unwrap();
+        drop(c);
+        let db = Database::open(dir.path(), || panic!("must not import environment")).unwrap();
+        let c = db.connection().unwrap();
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM filament_products", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(DISTINCT product_id) FROM filaments WHERE id IN ('black','white')",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT filament_id FROM ams_slots WHERE id='slot'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "white"
+        );
+        let job:(String,String,String,String)=c.query_row("SELECT filament_id,state,execution_json,attempt_json FROM print_jobs WHERE id='job'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(
+            job,
+            (
+                "white".into(),
+                "printing".into(),
+                "{\"frozen\":true}".into(),
+                "{\"sent_at\":123}".into()
+            )
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        drop(c);
+        assert_eq!(
+            db.filament_settings("white").unwrap()[0]
+                .data
+                .overrides_json
+                .nozzle_temperature,
+            Some(215)
+        );
+        assert_eq!(
+            db.filament_settings("tuned").unwrap()[0]
+                .data
+                .overrides_json
+                .nozzle_temperature,
+            Some(220)
+        );
+        assert_eq!(db.filaments().unwrap().len(), 4);
+        assert!(db.delete_setting("white", "bs").is_err());
+        assert!(db.delete_filament("white").is_err());
+        assert!(db.delete_product("black").is_err());
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("must not import")).unwrap();
+        assert_eq!(db.filaments().unwrap().len(), 4);
+    }
+    #[test]
+    fn legacy_color_read_write_preserves_display_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(None)).unwrap();
+        db.save_product(
+            "product",
+            &crate::products::ProductData {
+                name: "Matte".into(),
+                vendor: "Bambu".into(),
+                material: "PLA".into(),
+                bambu_filament_id: None,
+            },
+        )
+        .unwrap();
+        for (id, color) in [("black", "000000FF"), ("white", "FFFFFFFF")] {
+            db.save_color(
+                "product",
+                id,
+                &crate::products::ColorData {
+                    name: id.into(),
+                    color: color.into(),
+                },
+            )
+            .unwrap();
+            let saved = db
+                .filaments()
+                .unwrap()
+                .into_iter()
+                .find(|f| f.id == id)
+                .unwrap();
+            db.save_filament(&saved).unwrap();
+            let read = db
+                .filaments()
+                .unwrap()
+                .into_iter()
+                .find(|f| f.id == id)
+                .unwrap();
+            assert_eq!(read.data.name, saved.data.name);
+        }
+    }
+    #[test]
+    fn invalid_legacy_settings_roll_back_product_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        c.execute_batch(include_str!("../tests/fixtures/schema-v3.sql"))
+            .unwrap();
+        c.execute_batch("INSERT INTO filaments VALUES ('a','Matte','Bambu','PLA','000000FF',NULL),('z','Matte','Bambu','PLA','FFFFFFFF',NULL);
+            INSERT INTO filament_settings VALUES ('bad','z','machine','base','invalid-json');").unwrap();
+        drop(c);
+        assert!(Database::open(dir.path(), || panic!("no import")).is_err());
+        let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM filaments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='filament_products'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT overrides_json FROM filament_settings WHERE id='bad'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "invalid-json"
+        );
+    }
+    #[test]
     fn new_ambiguous_catalog_entry_invalidates_automatic_mapping_without_a_report() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
@@ -473,24 +643,33 @@ mod tests {
     }
     #[test]
     fn version_one_migration_preserves_printers_and_rolls_back_failed_ddl() {
+        fn legacy(root: &Path) -> Connection {
+            let c = Connection::open(root.join("orca.sqlite3")).unwrap();
+            let schema = include_str!("../tests/fixtures/schema-v3.sql");
+            c.execute_batch(schema.split("CREATE TABLE filaments").next().unwrap())
+                .unwrap();
+            save(&c, &device()).unwrap();
+            c.pragma_update(None, "user_version", 1).unwrap();
+            c
+        }
         let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
-        db.connection().unwrap().execute_batch("DROP TABLE print_jobs;DROP TABLE plate_items;DROP TABLE plates;ALTER TABLE printers DROP COLUMN queue_request;ALTER TABLE printers DROP COLUMN queue_generation;DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;PRAGMA user_version=1;").unwrap();
-        drop(db);
+        drop(legacy(dir.path()));
         let db = Database::open(dir.path(), || panic!("no import during migration")).unwrap();
         assert_eq!(db.list().unwrap()[0].id, "stable-id");
         assert!(db.filaments().unwrap().is_empty());
-        let c = db.connection().unwrap();
         assert_eq!(
-            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            db.connection()
+                .unwrap()
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
-        c.execute_batch("DROP TABLE print_jobs;DROP TABLE plate_items;DROP TABLE plates;ALTER TABLE printers DROP COLUMN queue_request;ALTER TABLE printers DROP COLUMN queue_generation;DROP TABLE ams_slots;DROP TABLE filament_settings;DROP TABLE filaments;CREATE TABLE ams_slots(conflict TEXT);PRAGMA user_version=1;").unwrap();
-        drop(c);
-        drop(db);
-        assert!(Database::open(dir.path(), || panic!("no import")).is_err());
-        let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        let bad = tempfile::tempdir().unwrap();
+        legacy(bad.path())
+            .execute_batch("CREATE TABLE ams_slots(conflict TEXT);")
+            .unwrap();
+        assert!(Database::open(bad.path(), || panic!("no import")).is_err());
+        let c = Connection::open(bad.path().join("orca.sqlite3")).unwrap();
         assert_eq!(
             c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -498,7 +677,7 @@ mod tests {
         );
         assert_eq!(
             c.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name='filaments'",
+                "SELECT count(*) FROM sqlite_master WHERE name='filaments'",
                 [],
                 |r| r.get::<_, i64>(0)
             )

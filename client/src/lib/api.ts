@@ -57,14 +57,17 @@ export async function request<T>(
   }
   if (
     path.startsWith("/api/filaments") ||
+    path.startsWith("/api/filament-products") ||
     /^\/api\/printers\/[^/]+\/ams(?:\/|$)/.test(path)
   ) {
     const messages: Record<number, string> = {
       400: "材料の種別・色・温度と、機種に対応する基本プロファイルを確認してください。",
       404: "材料・設定・AMSスロットが見つかりません。一覧から開き直してください。",
-      409: path.includes("/ams")
-        ? "AMSの観測状態が変わったか未確認です。状態を更新して材料を選び直してください。"
-        : "AMS・印刷ジョブからの参照、または同じ機種の設定が存在します。割当・キュー・登録済み設定を確認してください。",
+      409: path.endsWith("/adopt")
+        ? "共通情報・全機種の設定が一致しないか、この色の印刷が進行中です。設定と印刷状態を確認してください。"
+        : path.includes("/ams")
+          ? "AMSの観測状態が変わったか未確認です。状態を更新して材料を選び直してください。"
+          : "AMS・印刷ジョブからの参照、または同じ機種の設定が存在します。割当・キュー・登録済み設定を確認してください。",
       422: "入力の形式を確認してください。温度は整数で指定します。",
       503: "材料の保存先またはプロファイルを利用できません。接続とサーバー設定を確認してください。",
     };
@@ -138,6 +141,11 @@ export type Filament = {
   material: string;
   color: string;
   bambu_filament_id: string | null;
+};
+export type FilamentColor = { id: string; name: string; color: string };
+export type FilamentProduct = Omit<Filament, "color"> & {
+  colors: FilamentColor[];
+  settings: Omit<FilamentSetting, "filament_id">[];
 };
 export type FilamentTemperatures = {
   nozzle_temperature_initial_layer: string | null;

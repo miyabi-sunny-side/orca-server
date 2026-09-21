@@ -1,25 +1,31 @@
 # フィラメントとAMSの材料管理
 
-使用するフィラメントを銘柄・色ごとに登録し、AMSの各スロットに対応づけます。
-登録した材料と温度設定はSQLiteに保存されます。初期状態の台帳は空です。
+製品の共通設定と色を分けてSQLiteに保存し、AMSの各スロットには色を対応づけます。
+初期状態の台帳は空です。スプールの在庫は管理しません。
 
-## 材料を登録する
+## 製品と色を登録する
 
-1. 右上のメニューから「フィラメント」→「追加」を開きます。
-2. 名前、メーカー・銘柄、材料種別、8桁のRGBA色を入力して保存します。
-3. 純正Bambu材料を自動識別する場合だけ、材料IDも入力します。PLA MatteのIDは`GFA01`です。
-4. 材料の編集画面から「設定を追加」を選び、機種・ノズル径と基本プロファイルを指定します。
+1. メニューの「フィラメント」→「製品を追加」で、製品名・メーカー・材料種別を保存します。
+2. 純正Bambu材料を自動識別する場合は「自動識別の詳細」に材料IDも入力します。PLA MatteのIDは`GFA01`です。
+3. 製品の「色を追加」で基本色、色名、色見本を選んで保存します。黒・白・黄を追加しても共通情報の再入力は不要です。
+4. 製品の「設定を追加」で機種・ノズル径と基本プロファイルを指定します。この設定と温度調整は全色に反映されます。
 
-色はRRGGBBAAです。黒は`000000FF`、白は`FFFFFFFF`で、末尾`FF`は不透明を表します。
-PETGとPETG-GFは別の材料として登録します。材料IDが同じでも、色の違う製品は別々に登録してください。
-同じID・種別・色の候補が複数ある場合は、自動で一つを選びません。
+色行から色名・色見本を編集できます。「正確な色を編集」では8桁のRRGGBBAAを指定します。
+黒の`000000FF`とチャコールの`161616FF`は異なる色です。末尾`FF`は不透明を表します。
+自動対応には正確な色を使い、黒という名前だけでは同一視しません。
+PETGとPETG-GFも区別します。同じID・種別・色の候補が複数あれば、自動で一つを選びません。
+
+既存の白黒が別々に登録されている場合は、残す製品で「既存の色をまとめる」を開いて対象を選びます。
+メーカー・材料種別・Bambu ID・全機種の設定が一致する場合だけまとめられます。名前から製品を推測しません。
+材料ID・色・AMSの対応・待機ジョブは保持します。印刷準備中から取り外し待ち、要確認の色は終了後に操作してください。
+個別調整が異なる登録は別製品として保持できます。共通化すると、その後の設定変更は全色へ反映されます。
 
 ## 機種別の温度設定
 
 基本プロファイルは、同梱OrcaSlicer 2.4.2でその機種・ノズル径に対応するものから選択します。
 初層と通常層のノズル温度・ベッド温度は個別に上書きでき、空欄なら基本値を使います。
 ベッド温度を指定すると、選択したプレートの種類にかかわらずその温度を使います。0℃は加熱なしです。
-同じ材料・機種構成の設定は一つで、同じ構成の複数プリンターで共有します。
+同じ製品・機種構成の設定は一つで、全色と同じ構成の複数プリンターで共有します。
 設定を変更しても、AMSが報告する温度範囲や材料名は書き換えません。
 
 入力範囲はノズル120〜350℃、ベッド0〜120℃の整数です。これはアプリの入力制限で、機器がその全範囲に対応する保証ではありません。
@@ -56,7 +62,8 @@ CF/GF入り材料の0.2mmは非対応、ステンレスは非対応とし、0.4m
 [Bambuのノズル別材料条件](https://us.store.bambulab.com/products/bambu-hotend-p1-series)と材料メーカーの適合条件も確認してください。
 
 AMSや印刷ジョブから参照される材料は削除できません。先に対応を解除し、ジョブを終了・取消します。
-材料削除時は機種別設定も削除します。ジョブから参照される機種別設定の削除も拒否します。
+色の削除は製品の共通設定を残します。製品の削除は全色・設定を削除し、参照があれば全体を拒否します。
+ジョブから参照される機種別設定の削除・機種キーの変更も拒否します。
 
 ## API
 
@@ -64,19 +71,36 @@ JSONを送る操作には`Content-Type: application/json`を付けます。IDは
 
 | URL | 操作 |
 | --- | --- |
-| `/api/filaments` | GET: 材料一覧。POST: 材料作成、201と作成結果。 |
-| `/api/filaments/{id}` | GET: `filament`と`settings`。PUT: 材料更新。DELETE: 削除、204。 |
-| `/api/filaments/{id}/profiles?machine=...` | GET: URLエンコードした機種キーに対応する基本プロファイルと温度。 |
-| `/api/filaments/{id}/settings` | POST: 機種別設定の作成、201。 |
-| `/api/filaments/{id}/settings/{setting_id}` | PUT: 機種別設定の更新。DELETE: 削除、204。 |
+| `/api/filament-products` | GET: 製品一覧（各製品の`colors`と`settings`を含む）。POST: 製品作成、201。 |
+| `/api/filament-products/{id}` | GET: 製品詳細。PUT: 共通情報の更新。DELETE: 全色・設定を含め削除、204。 |
+| `/api/filament-products/{id}/colors` | POST: 色の作成、201と`id`・`name`・`color`。 |
+| `/api/filament-products/{id}/colors/{color_id}` | PUT: 色の更新。DELETE: 色の削除、204。 |
+| `/api/filament-products/{id}/adopt` | POST: `{"filament_id":"既存の色ID"}`で共通設定が一致する色をまとめる、204。同じ所属への再実行も204。 |
+| `/api/filament-products/{id}/profiles?machine=...` | GET: URLエンコードした機種キーに対応する基本プロファイルと温度。 |
+| `/api/filament-products/{id}/settings` | POST: 全色に共通の機種別設定を作成、201。 |
+| `/api/filament-products/{id}/settings/{setting_id}` | PUT: 共通設定を更新。DELETE: 削除、204。 |
+| `/api/filaments` | GET: AMSやキュー向けの色別材料一覧。 |
+| `/api/filaments/{color_id}` | GET: 色別`filament`、共通`settings`、所属`product_id`。 |
 | `/api/printers/{id}/ams` | GET: `printer_id`、`current`、`slots`。 |
-| `/api/printers/{id}/ams/{slot_id}` | PUT: 観測revisionを指定して材料を対応づけ、204。 |
+| `/api/printers/{id}/ams/{slot_id}` | PUT: 観測revisionを指定して色を対応づけ、204。 |
 
-材料の作成・更新形式:
+製品の作成・共通情報更新:
 
 ```json
-{"name":"Example PETG","vendor":"Example","material":"PETG","color":"FFFFFFFF","bambu_filament_id":null}
+{"name":"Example PETG","vendor":"Example","material":"PETG","bambu_filament_id":null}
 ```
+
+色の追加・更新:
+
+```json
+{"name":"白","color":"FFFFFFFF"}
+```
+
+返された色IDをAMSとキューの`filament_id`として使います。製品IDとは区別してください。
+共通設定があれば、新しい色も追加直後から使用できます。
+従来の`POST /api/filaments`は単色の製品を作成します。色IDを使うPUTと`/settings`操作も残していますが、
+メーカー・種別・Bambu ID・機種別設定の更新は所属製品の全色へ反映されます。
+新規の管理操作には製品APIを使ってください。
 
 機種別設定の作成・更新形式:
 
@@ -105,11 +129,14 @@ AMSスロットの識別項目は`id`、`printer_id`、`ams_id`、`slot_index`�
 
 ## 保存と移行
 
-`<PLATES_DIR>/orca.sqlite3`のschema versionは3です。
-材料管理には`filaments`、`filament_settings`、`ams_slots`を使用します。
-`ams_slots`の組`(printer_id, ams_id, slot_index)`は一意です。
-機種別設定の組`(filament_id, machine_profile_key)`も一意です。
-旧versionからの起動時移行は一つのtransactionで行い、既存プリンターを保持します。
+`<PLATES_DIR>/orca.sqlite3`のschema versionは4です。
+`filament_products`が製品の共通情報、`filaments`が色と製品への参照、`filament_settings`が製品の機種別設定を持ちます。
+`(product_id, machine_profile_key)`は一意です。`ams_slots`の`(printer_id, ams_id, slot_index)`も一意です。
+
+旧DBは起動時の一つのtransactionで移行します。製品名・メーカー・種別・Bambu IDと全機種の基本設定・温度差分が
+一致する色だけをまとめます。異なる個別調整や名前は別製品として残し、近い名前や色から推測しません。
+既存の材料ID・AMS割当・待機/実行中ジョブ・固定入力は保持します。統合した設定IDは製品詳細から取り直してください。
+移行で印刷開始を送信しません。不正な旧設定や参照の欠落があれば移行を取り消して起動を拒否します。
 台帳を観測値で上書きせず、受信した完全・差分報告からAMSの観測情報だけを更新します。
 
 更新前にサーバーを停止して保存領域全体をバックアップしてください。

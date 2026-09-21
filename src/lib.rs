@@ -7,6 +7,7 @@ pub mod plates;
 mod print_start;
 pub mod printer;
 mod printer_state;
+mod products;
 mod profiles;
 pub mod queue;
 pub mod registry;

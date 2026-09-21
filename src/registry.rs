@@ -209,6 +209,7 @@ pub fn router(
         .route("/api/printers/profiles", get(machines))
         .route("/api/printers/{id}", get(read).put(update).delete(delete))
         .route("/api/filaments", get(materials).post(create_material))
+        .merge(product_routes())
         .route(
             "/api/filaments/{id}",
             get(material).put(update_material).delete(delete_material),
@@ -234,6 +235,38 @@ pub fn router(
         .layer(DefaultBodyLimit::max(80 * 1024))
         .layer(axum::middleware::from_fn(crate::plate_api::same_origin))
         .with_state(Arc::new(registry)))
+}
+fn product_routes() -> Router<Arc<Registry>> {
+    Router::new()
+        .route("/api/filament-products", get(products).post(create_product))
+        .route(
+            "/api/filament-products/{id}",
+            get(product).put(update_product).delete(delete_product),
+        )
+        .route(
+            "/api/filament-products/{id}/colors",
+            axum::routing::post(create_color),
+        )
+        .route(
+            "/api/filament-products/{id}/adopt",
+            axum::routing::post(adopt_color),
+        )
+        .route(
+            "/api/filament-products/{id}/colors/{fid}",
+            axum::routing::put(update_color).delete(delete_color),
+        )
+        .route(
+            "/api/filament-products/{id}/profiles",
+            get(product_profiles),
+        )
+        .route(
+            "/api/filament-products/{id}/settings",
+            axum::routing::post(create_product_setting),
+        )
+        .route(
+            "/api/filament-products/{id}/settings/{sid}",
+            axum::routing::put(update_product_setting).delete(delete_product_setting),
+        )
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -414,6 +447,224 @@ async fn materials(
         crate::plate_api::blocking(move || db.filaments()).await?,
     ))
 }
+
+async fn products(
+    State(registry): State<Arc<Registry>>,
+) -> Result<Json<Vec<crate::products::Product>>> {
+    let db = registry.db.clone();
+    Ok(Json(
+        crate::plate_api::blocking(move || db.products()).await?,
+    ))
+}
+async fn product(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    let db = registry.db.clone();
+    let p = crate::plate_api::blocking(move || db.product(&id)).await?;
+    let mut value = json!(p);
+    for (s, v) in p
+        .settings
+        .iter()
+        .zip(value["settings"].as_array_mut().expect("settings array"))
+    {
+        if let Ok(profile) = registry
+            .profiles
+            .as_ref()
+            .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))
+            .and_then(|profiles| profiles.resolve_filament(&s.data, &p.data.material))
+        {
+            v["resolved"] = temperature_view(&profile);
+            v["error"] = Value::Null;
+        } else {
+            v["resolved"] = Value::Null;
+            v["error"] = json!("Base profile is unavailable or incompatible; select it again");
+        }
+    }
+    Ok(Json(value))
+}
+async fn create_product(
+    State(registry): State<Arc<Registry>>,
+    Json(data): Json<crate::products::ProductData>,
+) -> Result<(StatusCode, Json<crate::products::Product>)> {
+    let db = registry.db.clone();
+    let p = crate::plate_api::blocking(move || {
+        let id = uuid::Uuid::new_v4().to_string();
+        db.save_product(&id, &data)?;
+        db.product(&id)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(p)))
+}
+async fn update_product(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(data): Json<crate::products::ProductData>,
+) -> Result<Json<crate::products::Product>> {
+    let _entries = registry.entries.lock().await;
+    let db = registry.db.clone();
+    let profiles = registry.profiles.clone();
+    Ok(Json(
+        crate::plate_api::blocking(move || {
+            let old = db.product(&id)?;
+            if old.data.material != data.material {
+                for setting in old.settings {
+                    profiles
+                        .as_ref()
+                        .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))?
+                        .resolve_filament(&setting.data, &data.material)?;
+                }
+            }
+            db.save_product(&id, &data)?;
+            db.product(&id)
+        })
+        .await?,
+    ))
+}
+async fn delete_product(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let db = registry.db.clone();
+    crate::plate_api::blocking(move || db.delete_product(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn create_color(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(data): Json<crate::products::ColorData>,
+) -> Result<(StatusCode, Json<crate::products::Color>)> {
+    let db = registry.db.clone();
+    let color = crate::plate_api::blocking(move || {
+        db.product(&id)?;
+        let fid = uuid::Uuid::new_v4().to_string();
+        db.save_color(&id, &fid, &data)?;
+        db.product(&id)?
+            .colors
+            .into_iter()
+            .find(|c| c.id == fid)
+            .ok_or(Error::NotFound)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(color)))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdoptColor {
+    filament_id: String,
+}
+async fn adopt_color(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(data): Json<AdoptColor>,
+) -> Result<StatusCode> {
+    let db = registry.db.clone();
+    crate::plate_api::blocking(move || db.adopt_color(&id, &data.filament_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn update_color(
+    State(registry): State<Arc<Registry>>,
+    Path((id, fid)): Path<(String, String)>,
+    Json(data): Json<crate::products::ColorData>,
+) -> Result<Json<crate::products::Color>> {
+    let db = registry.db.clone();
+    Ok(Json(
+        crate::plate_api::blocking(move || {
+            if !db.product(&id)?.colors.iter().any(|c| c.id == fid) {
+                return Err(Error::NotFound);
+            }
+            db.save_color(&id, &fid, &data)?;
+            db.product(&id)?
+                .colors
+                .into_iter()
+                .find(|c| c.id == fid)
+                .ok_or(Error::NotFound)
+        })
+        .await?,
+    ))
+}
+async fn delete_color(
+    State(registry): State<Arc<Registry>>,
+    Path((id, fid)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    let db = registry.db.clone();
+    crate::plate_api::blocking(move || {
+        let c = db.connection()?;
+        if c.execute(
+            "DELETE FROM filaments WHERE id=?1 AND product_id=?2",
+            rusqlite::params![fid, id],
+        )? == 0
+        {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn product_profiles(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Query(query): Query<MaterialProfiles>,
+) -> Result<Json<Value>> {
+    let db = registry.db.clone();
+    let p = crate::plate_api::blocking(move || db.product(&id)).await?;
+    profiles_for_material(&registry, &query.machine, &p.data.material)
+}
+async fn create_product_setting(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(data): Json<crate::filament::SettingData>,
+) -> Result<(StatusCode, Json<crate::products::ProductSetting>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            save_product_setting(&registry, id, uuid::Uuid::new_v4().to_string(), data, false)
+                .await?,
+        ),
+    ))
+}
+async fn update_product_setting(
+    State(registry): State<Arc<Registry>>,
+    Path((id, sid)): Path<(String, String)>,
+    Json(data): Json<crate::filament::SettingData>,
+) -> Result<Json<crate::products::ProductSetting>> {
+    Ok(Json(
+        save_product_setting(&registry, id, sid, data, true).await?,
+    ))
+}
+async fn save_product_setting(
+    registry: &Registry,
+    id: String,
+    sid: String,
+    data: crate::filament::SettingData,
+    exists: bool,
+) -> Result<crate::products::ProductSetting> {
+    let _entries = registry.entries.lock().await;
+    let db = registry.db.clone();
+    let profiles = registry
+        .profiles
+        .clone()
+        .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))?;
+    crate::plate_api::blocking(move || {
+        let p = db.product(&id)?;
+        if exists && !p.settings.iter().any(|s| s.id == sid) {
+            return Err(Error::NotFound);
+        }
+        profiles.resolve_filament(&data, &p.data.material)?;
+        db.save_product_setting(&id, &sid, &data)?;
+        Ok(crate::products::ProductSetting { id: sid, data })
+    })
+    .await
+}
+async fn delete_product_setting(
+    State(registry): State<Arc<Registry>>,
+    Path((id, sid)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    let db = registry.db.clone();
+    crate::plate_api::blocking(move || db.delete_product_setting(&id, &sid)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 async fn material(
     State(registry): State<Arc<Registry>>,
     Path(id): Path<String>,
@@ -448,7 +699,11 @@ async fn material(
             value
         })
         .collect();
-    Ok(Json(json!({"filament":f,"settings":settings})))
+    let c = registry.db.connection()?;
+    let product_id = crate::products::product_id(&c, &f.id)?;
+    Ok(Json(
+        json!({"filament":f,"settings":settings,"product_id":product_id}),
+    ))
 }
 async fn create_material(
     State(registry): State<Arc<Registry>>,
@@ -529,11 +784,18 @@ async fn material_profiles(
             .ok_or(Error::NotFound)
     })
     .await?;
+    profiles_for_material(&registry, &query.machine, &f.data.material)
+}
+fn profiles_for_material(
+    registry: &Registry,
+    machine: &str,
+    material: &str,
+) -> Result<Json<Value>> {
     let profiles = registry
         .profiles
         .as_ref()
         .ok_or(Error::Unavailable("OrcaSlicer profiles unavailable"))?;
-    let choices = profiles.choices_for(&query.machine)?;
+    let choices = profiles.choices_for(machine)?;
     let compatible: Vec<_> = choices["filaments"]
         .as_array()
         .into_iter()
@@ -541,11 +803,11 @@ async fn material_profiles(
         .filter_map(|key| {
             let key = key.as_str()?;
             let setting = crate::filament::SettingData {
-                machine_profile_key: query.machine.clone(),
+                machine_profile_key: machine.into(),
                 base_profile_key: key.into(),
                 overrides_json: crate::filament::Overrides::default(),
             };
-            let p = profiles.resolve_filament(&setting, &f.data.material).ok()?;
+            let p = profiles.resolve_filament(&setting, material).ok()?;
             Some(json!({"key":key,"resolved":temperature_view(&p)}))
         })
         .collect();
@@ -684,6 +946,183 @@ async fn map_inventory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    async fn call(app: &Router, method: &str, path: &str, body: Value, expected: u16) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            status,
+            expected,
+            "{path}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        }
+    }
+    #[tokio::test]
+    async fn products_share_settings_across_colors_and_preserve_exact_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let app = router(root.path(), store.clone(), None, None).unwrap();
+        let data = json!({"name":"PLA Matte","vendor":"Bambu Lab","material":"PLA","bambu_filament_id":"GFA01"});
+        let product = call(&app, "POST", "/api/filament-products", data.clone(), 201).await;
+        let pid = product["id"].as_str().unwrap();
+        let path = format!("/api/filament-products/{pid}");
+        let mut colors = vec![];
+        for (name, color) in [("黒", "000000FF"), ("白", "FFFFFFFF"), ("黄", "FFFF00FF")] {
+            let value = call(
+                &app,
+                "POST",
+                &format!("{path}/colors"),
+                json!({"name":name,"color":color}),
+                201,
+            )
+            .await;
+            colors.push(value["id"].as_str().unwrap().to_owned());
+        }
+        let mut setting = crate::filament::Setting {
+            id: "shared-setting".into(),
+            filament_id: colors[0].clone(),
+            data: crate::filament::SettingData {
+                machine_profile_key: "machine".into(),
+                base_profile_key: "base".into(),
+                overrides_json: crate::filament::Overrides {
+                    nozzle_temperature: Some(215),
+                    ..Default::default()
+                },
+            },
+        };
+        store.db.save_setting(&setting).unwrap();
+        setting.filament_id = colors[1].clone();
+        setting.data.overrides_json.nozzle_temperature = Some(220);
+        store.db.save_setting(&setting).unwrap();
+        for id in &colors {
+            assert_eq!(
+                store.db.filament_settings(id).unwrap()[0]
+                    .data
+                    .overrides_json
+                    .nozzle_temperature,
+                Some(220)
+            );
+        }
+        let mut tray = crate::printer_state::Tray {
+            present: Some(true),
+            tag_uid: Some("TAG".into()),
+            profile_id: Some("GFA01".into()),
+            material: Some("PLA".into()),
+            color: Some("000000FF".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::filament::candidates(&tray, &store.db.filaments().unwrap()),
+            vec![colors[0].clone()]
+        );
+        tray.color = Some("161616FF".into());
+        assert!(crate::filament::candidates(&tray, &store.db.filaments().unwrap()).is_empty());
+        call(
+            &app,
+            "POST",
+            &format!("{path}/colors"),
+            json!({"name":"別の黒","color":"000000FF"}),
+            201,
+        )
+        .await;
+        tray.color = Some("000000FF".into());
+        assert_eq!(
+            crate::filament::candidates(&tray, &store.db.filaments().unwrap()).len(),
+            2
+        );
+        call(
+            &app,
+            "POST",
+            &format!("{path}/colors"),
+            json!({"name":"bad","color":"red;url(x)"}),
+            400,
+        )
+        .await;
+        let mut edited = data;
+        edited["vendor"] = json!("Bambu");
+        call(&app, "PUT", &path, edited, 200).await;
+        assert!(
+            store
+                .db
+                .filaments()
+                .unwrap()
+                .iter()
+                .all(|f| f.data.vendor == "Bambu")
+        );
+        let saved = call(&app, "GET", &path, Value::Null, 200).await;
+        assert_eq!(saved["colors"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            saved["settings"][0]["overrides_json"]["nozzle_temperature"],
+            220
+        );
+        assert_legacy_color_adoption(&app, &store, &path, &setting).await;
+    }
+    async fn assert_legacy_color_adoption(
+        app: &Router,
+        store: &Store,
+        path: &str,
+        setting: &crate::filament::Setting,
+    ) {
+        let legacy=call(app,"POST","/api/filaments",json!({"name":"Matte 白（旧登録）","vendor":"Bambu","material":"PLA","color":"FFFFFFFF","bambu_filament_id":"GFA01"}),201).await;
+        let fid = legacy["id"].as_str().unwrap();
+        let mut other = setting.clone();
+        other.id = "old-setting".into();
+        other.filament_id = fid.into();
+        other.data.overrides_json.nozzle_temperature = Some(225);
+        store.db.save_setting(&other).unwrap();
+        call(
+            app,
+            "POST",
+            &format!("{path}/adopt"),
+            json!({"filament_id":fid}),
+            409,
+        )
+        .await;
+        other.data.overrides_json.nozzle_temperature = Some(220);
+        store.db.save_setting(&other).unwrap();
+        call(
+            app,
+            "POST",
+            &format!("{path}/adopt"),
+            json!({"filament_id":fid}),
+            204,
+        )
+        .await;
+        assert_eq!(
+            store.db.filament_settings(fid).unwrap()[0].id,
+            "shared-setting"
+        );
+        assert!(store.db.filaments().unwrap().iter().any(|f| f.id == fid));
+        call(
+            app,
+            "POST",
+            &format!("{path}/adopt"),
+            json!({"filament_id":fid}),
+            204,
+        )
+        .await;
+    }
     #[test]
     fn explicit_printer_selection_never_falls_back_to_another_device() {
         let keys = vec!["one".to_owned(), "two".to_owned()];
