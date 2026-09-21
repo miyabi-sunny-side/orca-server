@@ -1,9 +1,9 @@
 use crate::plates::{Error, Result, valid_model_name};
 use axum::{
     Json, Router,
-    extract::{Query, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use reqwest::{Client, Url};
 use serde::Deserialize;
@@ -19,6 +19,7 @@ pub(crate) fn router(store: crate::plates::Store, source: Option<Source>) -> Rou
     Router::new()
         .route("/api/scad/models", get(list_models))
         .route("/api/plates/import", post(import))
+        .route("/api/plates/{id}", put(replace))
         .with_state(ImportState { store, source })
 }
 
@@ -50,8 +51,37 @@ async fn import(
     payload: std::result::Result<Json<crate::plates::Edit>, JsonRejection>,
 ) -> Result<(StatusCode, Json<crate::plates::Plate>)> {
     let Json(payload) = payload.map_err(|_| Error::Invalid("Invalid composition"))?;
-    let plate = crate::plate_api::blocking(move || state.store.edit(None, payload)).await?;
+    let plate = save_composition(state, None, payload).await?;
     Ok((StatusCode::CREATED, Json(plate)))
+}
+
+async fn replace(
+    State(state): State<ImportState>,
+    Path(id): Path<String>,
+    Json(edit): Json<crate::plates::Edit>,
+) -> Result<Json<crate::plates::Plate>> {
+    save_composition(state, Some(id), edit).await.map(Json)
+}
+
+async fn save_composition(
+    state: ImportState,
+    id: Option<String>,
+    edit: crate::plates::Edit,
+) -> Result<crate::plates::Plate> {
+    if edit.models.iter().any(|model| model.source.is_some()) {
+        let known = require_source(state.source)?.models().await?;
+        if edit
+            .models
+            .iter()
+            .filter_map(|model| model.source.as_ref())
+            .any(|source| known.binary_search(source).is_err())
+        {
+            return Err(Error::Invalid(
+                "Unknown SCAD model; list the available models again",
+            ));
+        }
+    }
+    crate::plate_api::blocking(move || state.store.edit(id.as_deref(), edit)).await
 }
 
 #[derive(Clone)]
@@ -376,7 +406,14 @@ mod tests {
     async fn composition_api_saves_references_without_downloading_them() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::plates::Store::open(root.path()).unwrap();
-        let app = crate::app_with_store(store.clone());
+        let fixture = Fixture::default();
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("parts/part.stl".into(), b"not downloaded at save".to_vec());
+        let server = fixture_server(fixture).await;
+        let app = crate::app_with_source(store.clone(), Some(Source::new(&server.base).unwrap()));
         let request = |source: &str| {
             Request::builder().method("POST").uri("/api/plates/import")
             .header("content-type","application/json").body(Body::from(serde_json::json!({
@@ -392,6 +429,33 @@ mod tests {
         let saved = store.list("").unwrap().remove(0);
         assert_eq!(saved.models[0].quantity, 2);
         assert!(store.read_file(&saved.id, &saved.models[0].id).is_err());
+        assert_eq!(
+            app.clone()
+                .oneshot(request("missing.stl"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/plates/{}", saved.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name":"Rejected", "version":saved.version,
+                "models":[{"name":"missing.stl","source":"missing.stl","quantity":10}]})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(store.get(&saved.id).unwrap(), saved);
+        assert_eq!(store.list("").unwrap().len(), 1);
         assert_eq!(
             app.clone()
                 .oneshot(request("../bad.stl"))

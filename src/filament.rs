@@ -2,6 +2,7 @@ use crate::{
     plates::{Error, Result},
     printer_state::Tray,
 };
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -46,7 +47,7 @@ impl FilamentData {
     }
 }
 
-#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Overrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,7 +85,7 @@ impl Overrides {
         Ok(())
     }
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SettingData {
     pub machine_profile_key: String,

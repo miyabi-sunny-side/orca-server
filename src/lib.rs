@@ -2,6 +2,7 @@ mod ams;
 mod artifacts;
 mod database;
 mod filament;
+mod mcp;
 mod plate_api;
 pub mod plates;
 mod print_start;
@@ -46,6 +47,11 @@ pub fn app_with_slicer(
 
 pub fn app_with_store(store: plates::Store) -> Router {
     app_with_source(store, None)
+}
+
+/// Add trusted-network MCP tools to the fully composed application API.
+pub fn with_mcp(api: Router) -> Router {
+    mcp::mount(api)
 }
 
 #[derive(Serialize)]

@@ -59,6 +59,14 @@ SCADの最新データと材料設定は、印刷準備の開始時に固定し�
 
 [開発ガイド](docs/development.md)に、環境変数、API、検証コマンドをまとめています。
 
+## MCPから保存・管理する
+
+Streamable HTTP対応クライアントの接続先に`http://127.0.0.1:3000/mcp`を指定します。
+別端末から使う場合は、信頼できるLAN/Tailscale内のサーバーアドレスに置き換えます。
+プレートの保存・更新、製品への色追加、共通温度設定、AMSの材料対応と使用順を操作できます。
+保存結果にはID・構成・管理画面のパスが含まれます。印刷開始はブラウザから行います。
+[MCPガイド](docs/mcp.md)に、toolの引数、モデル10個の保存例、競合時の確認方法をまとめています。
+
 ## ライセンス
 
 OrcaServerは[GNU Affero General Public License version 3](LICENSE)（`AGPL-3.0-only`）で提供します。

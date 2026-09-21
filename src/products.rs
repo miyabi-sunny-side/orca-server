@@ -3,10 +3,11 @@ use crate::{
     filament::{FilamentData, Setting, SettingData},
     plates::{Error, Result},
 };
+use rmcp::schemars;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProductData {
     pub name: String,
@@ -26,7 +27,7 @@ impl ProductData {
         .validate()
     }
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ColorData {
     pub name: String,

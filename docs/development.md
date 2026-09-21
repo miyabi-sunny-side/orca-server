@@ -23,7 +23,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | `PORT` | `3000` | 待受ポート。1〜65535の整数。不正な値では起動しません。 |
 | `LOG_LEVEL` | `info` | `off`、`error`、`warn`、`info`、`debug`、`trace`。不正な値は`info`です。 |
 | `PLATES_DIR` | `data/plates` | プレートとSQLite台帳の保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
-| `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。未設定ではモデル一覧と印刷時のSCAD取得を利用できません。 |
+| `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。モデル一覧・SCAD参照の保存/更新・印刷時の取得に必要です。 |
 | `ORCA_APPDIR` | ネイティブでは未設定、コンテナでは`/opt/orcaslicer` | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
 | `ORCA_TIMEOUT_SECS` | `300` | 各CLI工程の上限秒数。OrcaSlicerを設定する場合は1〜3600。 |
 
@@ -34,6 +34,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 
 複数プリンターの台帳・環境変数からの初回取り込み・状態取得・印刷APIは[プリンター接続](printer.md)を参照してください。
 [材料台帳・機種別設定・AMS対応API](filaments.md)も利用できます。
+[MCP](mcp.md)は同じプロセスの`/mcp`で提供し、既存APIの検証・競合制御を使います。
 未設定でもプレートの保存・閲覧は使えます。印刷予定の操作は[キューAPI](queue.md)を参照してください。
 
 ## 検証
@@ -80,6 +81,7 @@ cargo build --locked
 python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
 python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
+python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
 REGISTRY_BROWSER=1 python3 tests/printer_registry.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-registry-check
@@ -94,6 +96,8 @@ FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA
 キュー検証では準備時の最新データ固定、取り外し待ち、同時・重複操作、転送中AMS交換、開始前後の再起動とDB復元を通します。
 `print_fixture.py`のCLI代替は入力・状態遷移の検証用です。実際の配置・スライスは`tests/slicer_cli.py`とコンテナ検証で公式Orcaを実行します。
 CIでもMQTT・FTPS・キューの経路を検証します。実機や利用者のアクセスコードには接続しません。
+MCP検証は実クライアントの接続・tool呼出しから、10個の構成、共通温度、色追加、AMS対応・使用順を確認します。
+同じデータをREST APIで取得し、古い版・revisionの拒否と印刷命令が送られないことも検証します。
 
 ## 構成
 

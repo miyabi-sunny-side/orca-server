@@ -4,6 +4,7 @@ use crate::{
     plates::{Error, Result},
     printer_state::{Status, Tray},
 };
+use rmcp::schemars;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
@@ -31,13 +32,13 @@ fn new_load(old: Option<&AmsSlot>, tray: &Tray) -> bool {
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SlotRevision {
     pub id: String,
     pub revision: i64,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Priority {
     pub filament_id: String,
@@ -321,6 +322,9 @@ impl Database {
             return Err(Error::Conflict(
                 "AMS observation changed; refresh before mapping",
             ));
+        }
+        if let Some(filament) = filament_id {
+            crate::products::product_id(&tx, filament)?;
         }
         // A manual empty choice remains empty until the reported identity changes.
         tx.execute("UPDATE ams_slots SET filament_id=?1,mapping_source='manual',revision=revision+1 WHERE id=?2",params![filament_id,id])?;

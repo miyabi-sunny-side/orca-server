@@ -1,3 +1,4 @@
+use rmcp::schemars;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -107,7 +108,7 @@ pub struct Model {
     pub source: Option<String>,
     pub quantity: u16,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Conditions {
     pub required_machine_profile_key: Option<String>,
@@ -171,7 +172,7 @@ pub struct Plate {
     pub conditions: Conditions,
     pub models: Vec<Model>,
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ItemEdit {
     pub id: Option<String>,
@@ -179,7 +180,7 @@ pub struct ItemEdit {
     pub source: Option<String>,
     pub quantity: u16,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Edit {
     #[serde(default)]

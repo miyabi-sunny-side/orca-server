@@ -9,7 +9,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::plates::{Edit, Error, Input, MAX_UPLOAD, ModelInput, Plate, Result, Store};
+use crate::plates::{Error, Input, MAX_UPLOAD, ModelInput, Plate, Result, Store};
 
 // Browsers may send multipart POSTs across origins without a CORS preflight.
 // This is a browser-origin check; native API clients need no credential/header.
@@ -47,7 +47,7 @@ pub async fn same_origin(request: axum::extract::Request, next: Next) -> Respons
 pub fn router(store: Store) -> Router {
     Router::new()
         .route("/api/plates", get(list).post(create))
-        .route("/api/plates/{id}", get(read).put(replace))
+        .route("/api/plates/{id}", get(read))
         .route("/api/plates/{id}/files/{*path}", get(file))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(store)
@@ -61,7 +61,7 @@ impl IntoResponse for Error {
             Self::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "OrcaSlicer timed out"),
-            Self::NotFound => (StatusCode::NOT_FOUND, "Plate or file not found"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "Requested item not found"),
             Self::Io(error) => {
                 tracing::error!(%error, "plate storage operation failed");
                 (
@@ -106,16 +106,6 @@ async fn create(
     let input = form(multipart).await?;
     let plate = blocking(move || store.save(input)).await?;
     Ok((StatusCode::CREATED, Json(plate)))
-}
-
-async fn replace(
-    State(store): State<Store>,
-    Path(id): Path<String>,
-    Json(edit): Json<Edit>,
-) -> Result<Json<Plate>> {
-    blocking(move || store.edit(Some(&id), edit))
-        .await
-        .map(Json)
 }
 
 async fn file(

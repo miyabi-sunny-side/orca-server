@@ -1,0 +1,434 @@
+use axum::{Json, Router, routing::get};
+use rmcp::{
+    RoleClient, ServiceExt, model::CallToolRequestParams, service::RunningService,
+    transport::StreamableHttpClientTransport,
+};
+use serde_json::{Value, json};
+
+type Client = RunningService<RoleClient, ()>;
+struct Server {
+    base: String,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+async fn serve(app: Router) -> Server {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    Server { base, task }
+}
+async fn call(client: &Client, name: &str, args: Value, error: bool) -> Value {
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new(name.to_owned())
+                .with_arguments(args.as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.is_error.unwrap_or(false),
+        error,
+        "{name}: {result:?}"
+    );
+    result.structured_content.unwrap()
+}
+async fn read(base: &str, path: &str) -> Value {
+    let response = reqwest::get(format!("{base}{path}")).await.unwrap();
+    assert!(response.status().is_success());
+    serde_json::from_str(&response.text().await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the observed create/read/update/failure sequence together.
+async fn client_saves_references_and_shares_the_rest_validation() {
+    let source = serve(Router::new().route(
+        "/api/models",
+        get(|| async { Json(json!(["Gridfinity/10mm.stl"])) }),
+    ))
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let store = orca_server::plates::Store::open(root.path()).unwrap();
+    let scad = orca_server::scad::Source::new(&source.base).unwrap();
+    let api = orca_server::app_with_source(store.clone(), Some(scad.clone()))
+        .merge(orca_server::registry::router(root.path(), store, None, Some(scad)).unwrap());
+    let server = serve(orca_server::with_mcp(api)).await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "{}/mcp",
+            server.base
+        )))
+        .await
+        .unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    assert!(tools.iter().any(|tool| tool.name == "plate_save"));
+    assert!(
+        client
+            .call_tool(CallToolRequestParams::new("print_start"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        call(&client, "scad_models", json!({"q":"grid10"}), false).await["data"],
+        json!(["Gridfinity/10mm.stl"])
+    );
+    let mut edit = json!({"name":"Gridfinity ×10","models":[{"name":"Gridfinity/10mm.stl","source":"Gridfinity/10mm.stl","quantity":10}]});
+    let saved = call(&client, "plate_save", json!({"plate":edit}), false).await;
+    let id = saved["data"]["id"].as_str().unwrap();
+    assert_eq!(saved["ui_path"], format!("/plates/{id}"));
+    let path = format!("/api/plates/{id}");
+    let rest = read(&server.base, &path).await;
+    assert_eq!(rest, saved["data"]);
+    assert_eq!(rest["models"][0]["quantity"], 10);
+    assert!(
+        rest["conditions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(Value::is_null)
+    );
+    assert_eq!(
+        call(&client, "plate_get", json!({"id":id}), false).await["data"],
+        rest
+    );
+    assert_eq!(
+        call(&client, "plate_list", json!({"q":"Gridfinity"}), false).await["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    edit["version"] = rest["version"].clone();
+    edit["models"] = rest["models"].clone();
+    edit["name"] = json!("Ten saved bins");
+    let updated =
+        call(&client, "plate_save", json!({"id":id,"plate":edit}), false).await["data"].clone();
+    assert_eq!(updated["name"], "Ten saved bins");
+    let stale = call(&client, "plate_save", json!({"id":id,"plate":edit}), true).await;
+    assert_eq!(stale["status"], 409);
+    edit["version"] = updated["version"].clone();
+    edit["models"][0]["source"] = json!("missing.stl");
+    assert_eq!(
+        call(&client, "plate_save", json!({"id":id,"plate":edit}), true).await["status"],
+        400
+    );
+    edit["models"] = updated["models"].clone();
+    edit["conditions"] = json!({"filament_id":"unknown"});
+    assert_eq!(
+        call(&client, "plate_save", json!({"id":id,"plate":edit}), true).await["status"],
+        404
+    );
+    assert_eq!(read(&server.base, &path).await, updated);
+    for id in ["..", "../queue", "/api/queue?printer_id=p1"] {
+        call(&client, "plate_get", json!({"id":id}), true).await;
+    }
+    let bad = client
+        .call_tool(
+            CallToolRequestParams::new("plate_get")
+                .with_arguments(json!({"id":id,"start":true}).as_object().unwrap().clone()),
+        )
+        .await;
+    assert!(bad.is_err() || bad.unwrap().is_error == Some(true));
+    let cross = reqwest::Client::new()
+        .post(format!("{}/mcp", server.base))
+        .header("origin", "http://unrelated.test")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross.status(), 403);
+    let product=call(&client,"filament_product_save",json!({"data":{"name":"PLA Matte","vendor":"Bambu Lab","material":"PLA","bambu_filament_id":"GFA01"}}),false).await["data"].clone();
+    let pid = product["id"].as_str().unwrap();
+    let color = call(
+        &client,
+        "filament_color_save",
+        json!({"product_id":pid,"data":{"name":"Yellow","color":"FFFF00FF"}}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    assert_eq!(
+        read(&server.base, &format!("/api/filament-products/{pid}")).await["colors"],
+        json!([color])
+    );
+    assert!(
+        call(&client, "plate_options", json!({}), false).await["data"]["machines"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        call(
+            &client,
+            "plate_options",
+            json!({"machine":"unregistered"}),
+            true
+        )
+        .await["status"],
+        409
+    );
+    assert_eq!(read(&server.base, "/api/queue").await["waiting"], json!([]));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Run through tests/mcp_printer.py with its disposable printer and database"]
+#[allow(clippy::too_many_lines)] // One client follows shared settings through both AMS slots.
+async fn shared_materials_ams_and_admission() {
+    let base = std::env::var("MCP_FIXTURE_URL").expect("isolated fixture URL");
+    assert!(base.starts_with("http://127.0.0.1:"));
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "{base}/mcp"
+        )))
+        .await
+        .unwrap();
+    let machine = "Bambu Lab P1S 0.4 nozzle";
+    let process = "0.20mm Standard @BBL X1C";
+    let profile = "Generic PLA High Speed @BBL X1C";
+    let printers = call(&client, "printers", json!({}), false).await["data"].clone();
+    assert_eq!(printers[0]["id"], "p1");
+    assert_eq!(
+        call(&client, "plate_options", json!({}), false).await["data"]["machines"],
+        json!([machine])
+    );
+    let options = call(&client, "plate_options", json!({"machine":machine}), false).await;
+    assert!(
+        options["data"]["profiles"]["processes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(process))
+    );
+    assert_eq!(
+        call(
+            &client,
+            "plate_options",
+            json!({"machine":"Bambu Lab A1 mini 0.2 nozzle"}),
+            true
+        )
+        .await["status"],
+        409
+    );
+    let mut data = json!({"name":"MCP PLA Matte","vendor":"Bambu Lab","material":"PLA","bambu_filament_id":"GFA01"});
+    let product = call(
+        &client,
+        "filament_product_save",
+        json!({"data":data}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    let pid = product["id"].as_str().unwrap();
+    data["name"] = json!("MCP shared PLA");
+    call(
+        &client,
+        "filament_product_save",
+        json!({"id":pid,"data":data}),
+        false,
+    )
+    .await;
+    let choices = call(
+        &client,
+        "filament_profiles",
+        json!({"product_id":pid,"machine":machine}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    assert!(
+        choices
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["key"] == profile)
+    );
+    let mut setting = json!({"machine_profile_key":machine,"base_profile_key":profile,"overrides_json":{"nozzle_temperature":215}});
+    let common = call(
+        &client,
+        "filament_setting_save",
+        json!({"product_id":pid,"data":setting}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    let yellow = call(
+        &client,
+        "filament_color_save",
+        json!({"product_id":pid,"data":{"name":"Yellow","color":"FFFF00FF"}}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    let black = call(
+        &client,
+        "filament_color_save",
+        json!({"product_id":pid,"data":{"name":"Black","color":"000000FF"}}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    call(
+        &client,
+        "filament_color_save",
+        json!({"product_id":pid,"id":yellow["id"],"data":{"name":"MCP Yellow","color":"FFFF00FF"}}),
+        false,
+    )
+    .await;
+    setting["overrides_json"]["nozzle_temperature"] = json!(218);
+    call(
+        &client,
+        "filament_setting_save",
+        json!({"product_id":pid,"id":common["id"],"data":setting}),
+        false,
+    )
+    .await;
+    setting["overrides_json"]["nozzle_temperature"] = json!(999);
+    assert_eq!(
+        call(
+            &client,
+            "filament_setting_save",
+            json!({"product_id":pid,"id":common["id"],"data":setting}),
+            true
+        )
+        .await["status"],
+        400
+    );
+    for color in [&yellow, &black] {
+        let material = read(
+            &base,
+            &format!("/api/filaments/{}", color["id"].as_str().unwrap()),
+        )
+        .await;
+        assert_eq!(
+            material["settings"][0]["resolved"]["nozzle_temperature"],
+            "218"
+        );
+        assert_eq!(material["settings"][0]["id"], common["id"]);
+    }
+    assert_eq!(
+        call(&client, "filament_product", json!({"id":pid}), false).await["data"],
+        read(&base, &format!("/api/filament-products/{pid}")).await
+    );
+    assert!(
+        call(&client, "filament_products", json!({}), false).await["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == pid)
+    );
+    assert_eq!(
+        call(
+            &client,
+            "filaments_search",
+            json!({"q":"MCP Yellow"}),
+            false
+        )
+        .await["data"][0]["id"],
+        yellow["id"]
+    );
+    let mut edit = json!({"name":"MCP Gridfinity ×10","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":10}]});
+    let mut plate = call(&client, "plate_save", json!({"plate":edit}), false).await["data"].clone();
+    let plate_id = plate["id"].clone();
+    let admission = json!({"printer_id":"p1","plate_id":plate_id});
+    assert_eq!(
+        call(&client, "plate_admission", admission.clone(), false).await["data"]["allowed"],
+        false
+    );
+    edit["version"] = plate["version"].clone();
+    edit["conditions"] = json!({"required_machine_profile_key":machine,"filament_id":yellow["id"],"process_profile_key":process,"bed_type":"Textured PEI Plate"});
+    plate = call(
+        &client,
+        "plate_save",
+        json!({"id":plate_id,"plate":edit}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    assert_eq!(
+        call(&client, "plate_admission", admission.clone(), false).await["data"]["allowed"],
+        false
+    );
+    let inventory =
+        call(&client, "ams_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    for slot in inventory["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["reported"]["present"] == true)
+    {
+        let args = json!({"printer_id":"p1","slot_id":slot["id"],"revision":slot["revision"],"filament_id":yellow["id"]});
+        call(&client, "ams_assign", args.clone(), false).await;
+        assert_eq!(call(&client, "ams_assign", args, true).await["status"], 409);
+    }
+    let inventory =
+        call(&client, "ams_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+    assert_eq!(inventory, read(&base, "/api/printers/p1/ams").await);
+    let resolved = call(
+        &client,
+        "ams_resolve",
+        json!({"printer_id":"p1","filament_id":yellow["id"]}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    let mut order: Vec<_> = resolved["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| json!({"id":s["id"],"revision":s["revision"]}))
+        .collect();
+    assert_eq!(order.len(), 2);
+    order.reverse();
+    let priority = json!({"printer_id":"p1","priority":{"filament_id":yellow["id"],"order":order}});
+    call(&client, "ams_prioritize", priority.clone(), false).await;
+    assert_eq!(
+        call(&client, "ams_prioritize", priority, true).await["status"],
+        409
+    );
+    let resolved = call(
+        &client,
+        "ams_resolve",
+        json!({"printer_id":"p1","filament_id":yellow["id"]}),
+        false,
+    )
+    .await["data"]
+        .clone();
+    assert_eq!(resolved["preferred_slot"]["id"], order[0]["id"]);
+    let accepted = call(&client, "plate_admission", admission, false).await["data"].clone();
+    assert_eq!(accepted["allowed"], true);
+    assert_eq!(accepted["plate_version"], plate["version"]);
+    let slot = &resolved["candidates"][0];
+    let missing = client
+        .call_tool(
+            CallToolRequestParams::new("ams_assign").with_arguments(
+                json!({"printer_id":"p1","slot_id":slot["id"],"revision":slot["revision"]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+    assert!(missing.is_err() || missing.unwrap().is_error == Some(true));
+    assert_eq!(call(&client,"ams_assign",json!({"printer_id":"p1","slot_id":slot["id"],"revision":slot["revision"],"filament_id":"unknown"}),true).await["status"],404);
+    call(&client,"ams_assign",json!({"printer_id":"p1","slot_id":slot["id"],"revision":slot["revision"],"filament_id":null}),false).await;
+    let rest = read(&base, "/api/printers/p1/ams").await;
+    assert!(
+        rest["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == slot["id"])
+            .unwrap()["filament_id"]
+            .is_null()
+    );
+    assert_eq!(
+        read(&base, "/api/queue?printer_id=p1").await["waiting"],
+        json!([])
+    );
+    client.cancel().await.unwrap();
+}

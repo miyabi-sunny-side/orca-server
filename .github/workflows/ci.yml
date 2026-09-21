@@ -72,6 +72,9 @@ jobs:
       - name: Verify AMS priority, native refill and compact controls
         run: AMS_BROWSER=1 python3 tests/ams_priority.py target/debug/orca-server /tmp/orca-ams-check
 
+      - name: Verify MCP client and shared material and AMS operations
+        run: python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
+
       - name: Verify isolated FTPS upload and print start
         run: python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 

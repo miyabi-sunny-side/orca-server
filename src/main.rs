@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!(%bind_addr, "server listening");
     axum::serve(
         listener,
-        orca_server::app_with_slicer(plates, source, slicer).merge(registry),
+        orca_server::with_mcp(orca_server::app_with_slicer(plates, source, slicer).merge(registry)),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;
