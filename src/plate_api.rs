@@ -47,7 +47,7 @@ pub async fn same_origin(request: axum::extract::Request, next: Next) -> Respons
 pub fn router(store: Store) -> Router {
     Router::new()
         .route("/api/plates", get(list).post(create))
-        .route("/api/plates/{id}", get(read))
+        .route("/api/plates/{id}", get(read).delete(remove))
         .route("/api/plates/{id}/files/{*path}", get(file))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(store)
@@ -56,6 +56,9 @@ pub fn router(store: Store) -> Router {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            Self::Slicer(message) => {
+                return (StatusCode::BAD_GATEWAY, Json(json!({"error":message}))).into_response();
+            }
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, message),
             Self::Upstream(message) => (StatusCode::BAD_GATEWAY, message),
             Self::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
@@ -97,6 +100,11 @@ async fn list(State(store): State<Store>, Query(query): Query<Search>) -> Result
 
 async fn read(State(store): State<Store>, Path(id): Path<String>) -> Result<Json<Plate>> {
     blocking(move || store.get(&id)).await.map(Json)
+}
+
+async fn remove(State(store): State<Store>, Path(id): Path<String>) -> Result<StatusCode> {
+    blocking(move || store.delete(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create(

@@ -19,7 +19,7 @@
   {:else if path === "/filaments" || path.startsWith("/filaments/")}<Filaments
     />
   {:else if path === "/printers" || path.startsWith("/printers/")}<Printers />
-  {:else if path === "/queue"}<Queue />
+  {:else if path === "/" || path === "/queue"}<Queue />
   {:else if path === "/about"}<About />
   {:else if path === "/plates/new"}<NewPlate />
   {:else if id}<PlateDetail {id} />

@@ -8,5 +8,5 @@
   <PlateEditor
     saved={(plate) => window.location.assign(`/plates/${plate.id}`)}
   />
-  <div class="actions"><a href="/">プレート一覧へ</a></div>
+  <div class="actions"><a href="/plates">プレート一覧へ</a></div>
 </section>

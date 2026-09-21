@@ -55,7 +55,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
   const next = () => page.getByRole("button", { name: /^(空のプレートで印刷を開始|取り外した・次を印刷)$/ });
   const capture = async (name: string) => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    expect(await page.locator(".btn.primary").count()).toBeLessThanOrEqual(1);
+    expect(await page.locator(".btn.primary:visible").count()).toBeLessThanOrEqual(1);
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: `${process.env.E2E_EVIDENCE_DIR}/${name}.png`, fullPage: true });
   };
@@ -66,6 +66,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
     await page.emulateMedia({ colorScheme });
     const before = (await peer()).prints.length;
     await add(0, 0);
+    await page.locator('.waiting-job summary').first().click();
     await page.getByRole('link', { name: 'プレートの条件を編集' }).click();
     await page.getByRole('combobox', { name: 'フィラメント',exact:true }).selectOption(specification(3).filament_id);
     await capture(`edit-${colorScheme}`);
@@ -73,11 +74,13 @@ test("queue starts and continues with one action on mobile and desktop", async (
     await expect(page.getByRole('button',{name:'構成を編集'})).toBeVisible();
     await page.goto('/queue?printer_id=p1');
     await add(1, 0);
-    await page.getByRole("button", { name: `${plates[1].name}を前へ` }).click();
+    const handle = page.getByRole("button", { name: `${plates[1].name}を並べ替え` });
+    await handle.press("Space"); await handle.press("ArrowUp"); await handle.press("Enter");
     await expect(page.getByRole("listitem").first()).toContainText(plates[1].name);
-    await page.getByRole("button", { name: `${plates[1].name}を後へ` }).click();
+    await handle.press("Space"); await handle.press("ArrowDown"); await handle.press("Enter");
     await expect(page.getByRole("listitem").first()).toContainText(plates[0].name);
-    await page.getByRole("button", { name: `${plates[1].name}を削除` }).click();
+    await page.locator(".waiting-job summary").last().click();
+    await page.getByRole("button", { name: `${plates[1].name}をキューから削除` }).click();
     await expect(page.getByRole("listitem")).toHaveCount(1);
     await add(1, 0);
     await expect(next()).toBeEnabled();
@@ -130,7 +133,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
       const path = `/api/printers/p1/ams/${slot.id}`;
       expect((await request.put(path, { data: { revision: slot.revision, filament_id: null } })).status()).toBe(204);
       await expect(next()).toBeDisabled();
-      await expect(page.getByText('保留:', { exact: false })).toBeVisible();
+      await expect(page.locator('.waiting-job summary').filter({hasText:'保留'})).toBeVisible();
       await expect(confirm()).toHaveCount(0);
       expect((await peer()).prints.length).toBe(before + 1);
       await capture('held-dark');
@@ -184,12 +187,16 @@ test("queue starts and continues with one action on mobile and desktop", async (
   await expect(confirm()).toHaveCount(0);
   await expect(next()).toBeEnabled();
   expect((await peer()).prints.length).toBe(6);
-  await page.getByRole("button", { name: `${plates[0].name}を削除` }).click();
+  await page.locator(".waiting-job summary").first().click();
+  await page.getByRole("button", { name: `${plates[0].name}をキューから削除` }).click();
   await expect(confirm()).toHaveCount(0); await page.getByRole("button", { name: "取り外した", exact: true }).click();
   // A transfer failure remains visible until an explicit checked retry.
   await add(2, 3); await request.post(control, { data: { fail_upload: true } });
   await next().click();
+  await expect(page.locator(".current-job summary")).toContainText("確認が必要");
+  await page.locator(".current-job summary").click();
   await expect(page.getByRole("alert")).toContainText("印刷データを転送できませんでした");
+  await expect(page.getByRole('link',{name:'材料の温度を設定'})).toHaveCount(0);
   const retry = page.getByRole("button", { name: "同じプレートを再印刷" });
   await expect(retry).toBeDisabled();
   expect((await peer()).prints.length).toBe(6);
@@ -206,6 +213,6 @@ test("queue starts and continues with one action on mobile and desktop", async (
   await expect(confirm()).toHaveCount(0);
   await page.getByRole("button", { name: "取り外した", exact: true }).focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByText("待機中のプレートはありません。プレートの詳細から追加できます。")).toBeVisible();
+  await expect(page.getByText("待機中のプレートはありません。", {exact:false})).toBeVisible();
   writeFileSync(`${process.env.E2E_EVIDENCE_DIR}/result.json`, JSON.stringify({ realApi: true, isolatedMqttFtps: true, darkMobileLightDesktop: true, noExtraConfirmation: true, oneActionContinueAndFinish: true, doubleClickOnce: true, concurrentClientOnce: true, lateReadIgnored: true, removalRequired: true, exactReplayAfterLostResponse: replayVerified, staleClientNoAdvance: true, orderAndRemove: true, failedUploadExplicitRetry: true, compositionSavedWithoutSlicing: true, queuedSettingsEditable: true, keyboardAnd200Percent: true, prints: (await peer()).prints.length }, null, 2));
 });

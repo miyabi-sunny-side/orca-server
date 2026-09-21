@@ -78,3 +78,50 @@ describe("queue estimates", () => {
     }
   });
 });
+
+it("inserts dragged IDs before or after targets without moving on stale or identical positions", async () => {
+  const { moveIndex } = await import("./queue");
+  expect(moveIndex(["a", "b", "c", "d"], "a", "c", true)).toBe(2);
+  expect(moveIndex(["a", "b", "c", "d"], "d", "b", false)).toBe(1);
+  expect(moveIndex(["a", "b", "c"], "a", "b", false)).toBeNull();
+  expect(moveIndex(["a", "b", "c"], "b", "b", true)).toBeNull();
+  expect(moveIndex(["a", "b"], "missing", "b", true)).toBeNull();
+  expect(moveIndex(["a", "b"], "a", "missing", false)).toBeNull();
+});
+it("summarizes current progress and waiting holds in one status line", async () => {
+  const { jobStatus, failureMessage } = await import("./queue");
+  const job = {
+    state: "printing",
+    estimate: { state: "ready", seconds: 4800, error: null },
+  } as any;
+  expect(
+    jobStatus(job, {
+      ...printer,
+      print: { ...printer.print, percent: 35, remaining_minutes: 52 },
+    }),
+  ).toBe("印刷中 · 35% · 残り約52分");
+  expect(
+    jobStatus({ ...job, state: "queued", hold_reason: "no material" }),
+  ).toBe("保留 · 約1時間20分");
+  expect(
+    failureMessage(
+      "Selected build plate temperature is missing or zero for this material",
+      { bed_type: "Cool Plate" } as any,
+      "PETG-GF 黒",
+    ),
+  ).toContain("PETG-GF 黒");
+  expect(
+    failureMessage(
+      "Selected build plate temperature is missing or zero for this material",
+      { bed_type: "Cool Plate" } as any,
+      "PETG-GF 黒",
+    ),
+  ).toContain("Cool Plate");
+  expect(
+    failureMessage(
+      "Selected build plate temperature is missing or zero for this material",
+      { bed_type: "Cool Plate" } as any,
+      "PETG-GF 黒",
+    ),
+  ).toContain("0℃");
+});

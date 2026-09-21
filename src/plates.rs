@@ -11,6 +11,7 @@ use std::{
 pub enum Error {
     Invalid(&'static str),
     Upstream(&'static str),
+    Slicer(String),
     Unavailable(&'static str),
     Conflict(&'static str),
     Timeout,
@@ -331,7 +332,7 @@ impl Store {
         let id = if let Some(id) = id {
             valid_id(id)?;
             if tx.execute(
-                "UPDATE plates SET name=?1,version=version+1 WHERE id=?2 AND version=?3",
+                "UPDATE plates SET name=?1,version=version+1 WHERE id=?2 AND version=?3 AND deleted=0",
                 rusqlite::params![name.trim(), id, version],
             )? != 1
             {
@@ -383,7 +384,26 @@ impl Store {
     /// Rejects invalid IDs, missing plates or unavailable storage.
     pub fn get(&self, id: &str) -> Result<Plate> {
         valid_id(id)?;
-        load(&*self.db.connection()?, id)
+        let c = self.db.connection()?;
+        if is_deleted(&c, id)? {
+            return Err(Error::NotFound);
+        }
+        load(&c, id)
+    }
+    /// Hide a plate from new use without deleting originals or existing queue references.
+    /// # Errors
+    /// Rejects invalid or missing IDs and unavailable storage.
+    pub fn delete(&self, id: &str) -> Result<()> {
+        valid_id(id)?;
+        if self
+            .db
+            .connection()?
+            .execute("UPDATE plates SET deleted=1 WHERE id=?1", [id])?
+            == 0
+        {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
     /// Search saved names and model names, ordered by fuzzy relevance.
     /// # Errors
@@ -391,7 +411,7 @@ impl Store {
     pub fn list(&self, query: &str) -> Result<Vec<Plate>> {
         let c = self.db.connection()?;
         let ids = c
-            .prepare("SELECT id FROM plates")?
+            .prepare("SELECT id FROM plates WHERE deleted=0")?
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut matches = Vec::new();
@@ -418,8 +438,13 @@ impl Store {
     pub fn read_file(&self, id: &str, item: &str) -> Result<Vec<u8>> {
         valid_id(id)?;
         valid_id(item).map_err(|_| Error::NotFound)?;
-        self.db.connection()?.query_row("SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2 AND source_kind='upload'",rusqlite::params![id,item],|r|r.get(0)).optional()?.ok_or(Error::NotFound)
+        self.db.connection()?.query_row("SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2 AND source_kind='upload' AND EXISTS(SELECT 1 FROM plates WHERE id=?1 AND deleted=0)",rusqlite::params![id,item],|r|r.get(0)).optional()?.ok_or(Error::NotFound)
     }
+}
+pub(crate) fn is_deleted(c: &rusqlite::Connection, id: &str) -> Result<bool> {
+    c.query_row("SELECT deleted FROM plates WHERE id=?1", [id], |r| r.get(0))
+        .optional()?
+        .ok_or(Error::NotFound)
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
     let (name, version, conditions) = c

@@ -10,7 +10,7 @@ test("queue estimates update automatically and recover without sending a print",
   const control = process.env.E2E_PRINTER_CONTROL!;
   const peer = async () => (await request.get(control)).json();
   const before = await peer();
-  const row = () => page.locator(".plate-row").last();
+  const row = () => page.locator(".waiting-job").last();
   const add = async () => {
     await page.goto(`/plates/${plate_id}`);
     await page
@@ -55,6 +55,7 @@ test("queue estimates update automatically and recover without sending a print",
     await expect(row()).not.toContainText("約0分");
     await capture(`estimate-failed-${colorScheme}`);
     await request.post(control, { data: { slice_fail: false } });
+    await row().locator("summary").click();
     await row()
       .getByRole("button", { name: /再試算/ })
       .click();
@@ -67,8 +68,9 @@ test("queue estimates update automatically and recover without sending a print",
     expect((await peer()).prints).toHaveLength(before.prints.length);
     expect((await peer()).uploads).toHaveLength(before.uploads.length);
     for (let i = 0; i < 2; i++) {
+      if (!(await row().locator("details").getAttribute("open")) && !(await row().locator("details").evaluate(el=>(el as HTMLDetailsElement).open))) await row().locator("summary").click();
       await row().getByRole("button", { name: /削除/ }).click();
-      await expect(page.locator(".plate-row")).toHaveCount(1 - i);
+      await expect(page.locator(".waiting-job")).toHaveCount(1 - i);
     }
   }
 });

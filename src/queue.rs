@@ -189,6 +189,7 @@ pub(crate) fn resolve(
         "filament.json".into(),
         profiles.resolve_filament(&setting, &filament.data.material)?,
     );
+    crate::profiles::validate_bed(&resolved["filament.json"], &selection.bed)?;
     Ok(Resolved {
         selection,
         profiles: resolved,
@@ -294,6 +295,7 @@ fn planned(c: &Connection, device: &Device, plate: &crate::plates::Plate) -> Res
 }
 pub(crate) fn message(error: &Error) -> String {
     match error {
+        Error::Slicer(message) => message.clone(),
         Error::Invalid(s) | Error::Unavailable(s) | Error::Conflict(s) | Error::Upstream(s) => {
             (*s).into()
         }
@@ -451,6 +453,7 @@ impl Service {
             let plate = crate::plates::load(&c, &job.plate_id)?;
             value["name"] = json!(plate.name);
             value["plate_version"] = json!(plate.version);
+            value["plate_deleted"] = json!(crate::plates::is_deleted(&c, &job.plate_id)?);
             for key in [
                 "required_machine_profile_key",
                 "filament_id",
@@ -489,6 +492,7 @@ impl Service {
         let current_view = current
             .map(|job| -> Result<Value> {
                 let mut value = json!(job);
+                value["plate_deleted"] = json!(crate::plates::is_deleted(&c, &job.plate_id)?);
                 value["estimate"] = crate::estimates::view(
                     &c,
                     job,
@@ -718,6 +722,9 @@ impl Service {
         plate: &crate::plates::Plate,
         status: &Status,
     ) -> Result<Specification> {
+        if crate::plates::is_deleted(c, &plate.id)? {
+            return Err(Error::Conflict("Plate has been deleted"));
+        }
         let count: i64 = c.query_row(
             "SELECT count(*) FROM print_jobs WHERE printer_id=?1 AND state='queued'",
             [&self.device.id],
@@ -1083,7 +1090,7 @@ mod tests {
         ] {
             let directory = app.join("resources/profiles/BBL").join(category);
             std::fs::create_dir_all(&directory).unwrap();
-            std::fs::write(directory.join("profile.json"),json!({"name":name,"instantiation":"true","nozzle_diameter":["0.4"],"filament_type":["PLA"],"required_nozzle_HRC":["0"],"compatible_printers":[MACHINE]}).to_string()).unwrap();
+            std::fs::write(directory.join("profile.json"),json!({"name":name,"instantiation":"true","nozzle_diameter":["0.4"],"filament_type":["PLA"],"cool_plate_temp":["35"],"cool_plate_temp_initial_layer":["35"],"eng_plate_temp":["55"],"eng_plate_temp_initial_layer":["55"],"hot_plate_temp":["55"],"hot_plate_temp_initial_layer":["55"],"textured_plate_temp":["55"],"textured_plate_temp_initial_layer":["55"],"required_nozzle_HRC":["0"],"compatible_printers":[MACHINE]}).to_string()).unwrap();
         }
         let binary = app.join("AppRun");
         std::fs::write(&binary, "#!/bin/sh\nprintf 'OrcaSlicer-2.4.2:\\n'\n").unwrap();

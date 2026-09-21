@@ -15,7 +15,13 @@
   const childId = parts[4] === "new" ? "" : parts[4];
   const sid = childId;
   const formMode = productMode || colorMode || settingMode;
-  const back = id ? `/filaments/${id}` : "/filaments";
+  const params = new URLSearchParams(location.search);
+  const returnPrinter = params.get("return_queue");
+  const back = returnPrinter
+    ? `/?printer_id=${encodeURIComponent(returnPrinter)}#job-${encodeURIComponent(params.get("return_job") ?? "")}`
+    : id
+      ? `/filaments/${id}`
+      : "/filaments";
   const api = id ? `/api/filament-products/${id}` : "/api/filament-products";
   let items = $state<FilamentProduct[]>([]);
   let product = $state<FilamentProduct>();
@@ -52,6 +58,21 @@
   ];
   const controller = new AbortController();
   let sequence = 0;
+  async function openColor() {
+    const legacy = await request<{
+      product_id: string;
+      settings: FilamentProduct["settings"];
+    }>(`/api/filaments/${id}`, { signal: controller.signal });
+    const machine = params.get("machine");
+    const setting = legacy.settings.find(
+      (s) => s.machine_profile_key === machine,
+    );
+    window.location.replace(
+      machine
+        ? `/filaments/${legacy.product_id}/settings/${setting?.id ?? "new"}?${params.toString()}#bed-temperature`
+        : `/filaments/${legacy.product_id}/colors/${id}`,
+    );
+  }
   async function loadProfiles() {
     const ticket = ++sequence;
     profiles = [];
@@ -74,19 +95,17 @@
     error = "";
     try {
       if (id) {
+        if (!parts[3] && params.has("machine")) {
+          await openColor();
+          return;
+        }
         try {
           product = await request<FilamentProduct>(api, {
             signal: controller.signal,
           });
         } catch (cause) {
           if (cause instanceof ApiError && cause.status === 404 && !parts[3]) {
-            const legacy = await request<{ product_id: string }>(
-              `/api/filaments/${id}`,
-              { signal: controller.signal },
-            );
-            window.location.replace(
-              `/filaments/${legacy.product_id}/colors/${id}`,
-            );
+            await openColor();
             return;
           }
           throw cause;
@@ -113,6 +132,7 @@
         machines = await request<Machine[]>("/api/printers/profiles", {
           signal: controller.signal,
         });
+        if (!sid) machine = params.get("machine") ?? "";
         if (sid) {
           const s = settings.find((s) => s.id === sid);
           if (!s)
@@ -235,7 +255,11 @@
 >
 <section class="content" aria-label="フィラメント管理">
   {#if id || productMode}<a href={formMode ? back : "/filaments"}
-      >{formMode && id ? "製品へ戻る" : "フィラメント一覧へ"}</a
+      >{returnPrinter
+        ? "キューへ戻る"
+        : formMode && id
+          ? "製品へ戻る"
+          : "フィラメント一覧へ"}</a
     >{/if}
   <div class="page-heading">
     <h1>
@@ -332,7 +356,7 @@
                 .nozzle_temperature_initial_layer ?? "不明"}℃ / 通常 {selected
                 .resolved.nozzle_temperature ?? "不明"}℃
             </p>{/if}
-          <h2>ベッド温度の調整</h2>
+          <h2 id="bed-temperature">ベッド温度の調整</h2>
           <p class="help">
             空欄は選択したビルドプレートの基本温度を使用します。指定した温度はプレートの種類にかかわらず適用します。
           </p>

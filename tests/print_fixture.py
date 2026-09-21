@@ -36,7 +36,7 @@ def fake_slicer(root):
     (profiles/'process'/'standard.json').write_text(json.dumps(dict(name=PROCESS, instantiation='true', compatible_printers=machines, sparse_infill_pattern='crosshatch', sparse_infill_density='15%', wall_loops='2', top_shell_layers='5', bottom_shell_layers='3', top_shell_thickness='1', bottom_shell_thickness='0')))
     for i, (name, material) in enumerate([(FILAMENT, 'PLA'), ('Generic PETG', 'PETG')]):
         (profiles/'filament'/f'{i}.json').write_text(json.dumps(dict(name=name, instantiation='true', compatible_printers=machines,
-            filament_type=[material], nozzle_temperature=['220'], nozzle_temperature_initial_layer=['220'], required_nozzle_HRC=['0'])))
+            cool_plate_temp=['35'], cool_plate_temp_initial_layer=['35'], eng_plate_temp=['55'], eng_plate_temp_initial_layer=['55'], hot_plate_temp=['55'], hot_plate_temp_initial_layer=['55'], textured_plate_temp=['55'], textured_plate_temp_initial_layer=['55'], filament_type=[material], nozzle_temperature=['220'], nozzle_temperature_initial_layer=['220'], required_nozzle_HRC=['0'])))
     script = '''#!/usr/bin/env python3
 import hashlib, io, json, pathlib, sys, time, zipfile, xml.etree.ElementTree as ET
 if '--help' in sys.argv:
@@ -49,12 +49,15 @@ control=pathlib.Path(FIXTURE_CONTROL_DIR)
 while (control/'cli-hold').exists(): time.sleep(.02)
 if (control/'cli-fail').exists(): raise SystemExit(3)
 output=sys.argv[sys.argv.index('--export-3mf')+1]
+if '--curr-bed-type' in sys.argv: bed=sys.argv[sys.argv.index('--curr-bed-type')+1]
+else:
+    with zipfile.ZipFile('project.3mf') as project: bed=json.loads(project.read('Metadata/project_settings.config'))['curr_bed_type']
 with zipfile.ZipFile(ARTIFACT) as source, zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as target:
     for entry in source.infolist():
         data=source.read(entry.filename)
         if entry.filename=='Metadata/project_settings.config':
             settings=json.loads(data)
-            settings.update(printer_settings_id=profiles['printer']['name'],print_settings_id=profiles['process']['name'],filament_settings_id=[profiles['filament']['name']])
+            settings.update(printer_settings_id=profiles['printer']['name'],print_settings_id=profiles['process']['name'],filament_settings_id=[profiles['filament']['name']],curr_bed_type=bed)
             for key in ['filament_type','nozzle_temperature','nozzle_temperature_initial_layer']: settings[key]=profiles['filament'][key]
             data=json.dumps(settings).encode()
         if entry.filename=='Metadata/slice_info.config':

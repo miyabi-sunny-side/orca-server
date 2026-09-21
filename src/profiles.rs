@@ -15,6 +15,30 @@ pub const BEDS: [&str; 4] = [
     "High Temp Plate",
 ];
 
+pub(crate) fn validate_bed(profile: &Map<String, Value>, bed: &str) -> Result<()> {
+    let prefix = match bed {
+        "Cool Plate" => "cool_plate",
+        "Engineering Plate" => "eng_plate",
+        "High Temp Plate" => "hot_plate",
+        "Textured PEI Plate" => "textured_plate",
+        _ => return Err(Error::Invalid("Unknown bed type")),
+    };
+    for suffix in ["temp_initial_layer", "temp"] {
+        if !profile
+            .get(&format!("{prefix}_{suffix}"))
+            .and_then(|v| v.get(0))
+            .and_then(Value::as_str)
+            .and_then(|v| v.parse::<f64>().ok())
+            .is_some_and(|v| v.is_finite() && v > 0.0)
+        {
+            return Err(Error::Invalid(
+                "Selected build plate temperature is missing or zero for this material",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Selection {
@@ -286,6 +310,23 @@ fn flatten(profiles: &BTreeMap<String, Value>, name: &str) -> Result<Map<String,
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn selected_bed_requires_both_temperatures_without_inventing_a_default() {
+        let mut profile = json!({"cool_plate_temp":["0"],"cool_plate_temp_initial_layer":["0"],"hot_plate_temp":["70"],"hot_plate_temp_initial_layer":["70"]}).as_object().unwrap().clone();
+        assert!(validate_bed(&profile, "Cool Plate").is_err());
+        assert!(validate_bed(&profile, "High Temp Plate").is_ok());
+        profile.insert("cool_plate_temp_initial_layer".into(), json!(["65"]));
+        assert!(validate_bed(&profile, "Cool Plate").is_err());
+        profile.insert("cool_plate_temp".into(), json!(["65"]));
+        assert!(validate_bed(&profile, "Cool Plate").is_ok());
+        for value in [json!(["NaN"]), json!(["-1"]), json!([]), Value::Null] {
+            profile.insert("cool_plate_temp".into(), value);
+            assert!(validate_bed(&profile, "Cool Plate").is_err());
+        }
+        assert!(validate_bed(&profile, "Engineering Plate").is_err());
+        assert!(validate_bed(&profile, "Unknown").is_err());
+    }
 
     #[test]
     fn material_settings_resolve_only_compatible_profiles_and_typed_deltas() {

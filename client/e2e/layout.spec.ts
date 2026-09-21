@@ -27,10 +27,10 @@ for (const width of [320, 375, 900]) {
           json: q ? plates.filter((p) => p.name.includes(q)) : plates,
         });
       });
-      await page.goto("/");
+      await page.goto("/plates");
       await expect(page.locator(".plate-row")).toHaveCount(100);
       await expect(page).toHaveTitle("OrcaServer");
-      await expect(page.locator("header a, header button")).toHaveCount(2);
+      await expect(page.locator("header a, header button")).toHaveCount(3);
       expect(
         await page.evaluate(
           () => document.documentElement.scrollWidth <= innerWidth,
@@ -133,7 +133,7 @@ test("loading and failed list recover through retry", async ({ page }) => {
       await route.fulfill({ status: 500, json: { error: "unavailable" } });
     } else await route.fulfill({ json: [] });
   });
-  await page.goto("/");
+  await page.goto("/plates");
   await expect(page.getByRole("status")).toContainText("読み込んでいます");
   await expect.poll(() => typeof finish).toBe("function");
   finish();
@@ -190,5 +190,5 @@ test("unconfigured services expose recovery without hiding the plate list", asyn
   ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "プレート一覧へ" }),
-  ).toHaveAttribute("href", "/");
+  ).toHaveAttribute("href", "/plates");
 });

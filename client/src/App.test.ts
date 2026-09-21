@@ -7,7 +7,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("keeps the product header and theme controls on the plate list", async () => {
+it("opens the printer queue home with both tabs and settings", async () => {
   vi.stubGlobal(
     "fetch",
     vi
@@ -27,7 +27,10 @@ it("keeps the product header and theme controls on the plate list", async () => 
   ).toBe("/");
   expect(screen.getByRole("button", { name: "メニュー" })).toBeTruthy();
   expect(screen.getByRole("banner").querySelectorAll("a, button")).toHaveLength(
-    2,
+    3,
   );
-  expect(await screen.findByText("保存済みプレートはありません")).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: "プレート" }).getAttribute("href"),
+  ).toBe("/plates");
+  expect(await screen.findByText(/印刷先が登録されていません/)).toBeTruthy();
 });

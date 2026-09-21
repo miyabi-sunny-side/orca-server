@@ -23,6 +23,85 @@ async fn json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+async fn deleted_plate_stays_stored_but_cannot_be_listed_read_or_edited() {
+    let root = tempfile::tempdir().unwrap();
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    let saved = json(
+        app.clone()
+            .oneshot(upload(
+                "POST",
+                "/api/plates",
+                "Disposable cube",
+                include_str!("fixtures/triangle.stl"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = saved["id"].as_str().unwrap();
+    let path = format!("/api/plates/{id}");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    for path in [
+        &path,
+        &format!(
+            "{path}/files/{}",
+            saved["models"][0]["id"].as_str().unwrap()
+        ),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let listed = json(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plates?q=cube")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed, serde_json::json!([]));
+    let mut edit = saved.clone();
+    edit.as_object_mut().unwrap().remove("id");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header("content-type", "application/json")
+                .body(Body::from(edit.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let c = rusqlite::Connection::open(root.path().join("orca.sqlite3")).unwrap();
+    let (name, original): (String, Vec<u8>) = c.query_row("SELECT p.name,i.original FROM plates p JOIN plate_items i ON p.id=i.plate_id WHERE p.id=?1", [id], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(name, "Disposable cube");
+    assert_eq!(original, include_bytes!("fixtures/triangle.stl"));
+}
+
+#[tokio::test]
 async fn multipart_save_search_download_and_restart_use_the_same_store() {
     let root = tempfile::tempdir().unwrap();
     let app = orca_server::app_with_store(Store::open(root.path()).unwrap());

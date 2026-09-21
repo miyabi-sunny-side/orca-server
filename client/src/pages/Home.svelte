@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { tick, onDestroy } from "svelte";
   import { request, type Plate } from "../lib/api";
+  import Modal from "../lib/Modal.svelte";
+  import PlateQueueAdd from "../lib/PlateQueueAdd.svelte";
   let query = $state("");
   let revision = $state(0);
   let plates = $state<Plate[]>([]);
@@ -7,6 +10,67 @@
   let error = $state("");
   let search = $state<HTMLInputElement>();
   let list = $state<HTMLUListElement>();
+  let menuPlate = $state<Plate>(),
+    menuRow: HTMLAnchorElement | undefined;
+  let queueBusy = $state(false),
+    deleting = $state(false),
+    menuError = $state(""),
+    notice = $state("");
+  let press: ReturnType<typeof setTimeout> | undefined,
+    point = { x: 0, y: 0 },
+    longPressed = false;
+  function cancelPress() {
+    clearTimeout(press);
+    press = undefined;
+  }
+  onDestroy(cancelPress);
+  function openMenu(event: Event, plate: Plate) {
+    event.preventDefault();
+    cancelPress();
+    menuRow = event.currentTarget as HTMLAnchorElement;
+    menuPlate = plate;
+    menuError = "";
+    queueBusy = false;
+  }
+  async function closeMenu() {
+    if (deleting) return;
+    menuPlate = undefined;
+    await tick();
+    (menuRow?.isConnected
+      ? menuRow
+      : (list?.querySelector("a") ?? search)
+    )?.focus();
+  }
+  function startPress(event: PointerEvent, plate: Plate) {
+    cancelPress();
+    longPressed = false;
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    point = { x: event.clientX, y: event.clientY };
+    const row = event.currentTarget as HTMLAnchorElement;
+    press = setTimeout(() => {
+      longPressed = true;
+      menuRow = row;
+      menuPlate = plate;
+      menuError = "";
+      queueBusy = false;
+    }, 500);
+  }
+  async function remove() {
+    if (!menuPlate || deleting || queueBusy) return;
+    const plate = menuPlate;
+    deleting = true;
+    menuError = "";
+    try {
+      await request(`/api/plates/${plate.id}`, { method: "DELETE" });
+      plates = plates.filter((p) => p.id !== plate.id);
+      notice = `「${plate.name}」を削除しました`;
+      deleting = false;
+      await closeMenu();
+    } catch (cause) {
+      menuError = (cause as Error).message;
+      deleting = false;
+    }
+  }
 
   $effect(() => {
     const q = query.trim();
@@ -51,6 +115,7 @@
 </script>
 
 <section class="content" aria-label="プレート一覧" data-state={phase}>
+  {#if notice}<p role="status">{notice}</p>{/if}
   <div class="page-heading">
     <h1>プレート</h1>
     <a class="btn primary" href="/plates/new">新規作成</a>
@@ -91,7 +156,37 @@
     <ul class="plate-list" bind:this={list}>
       {#each plates as plate (plate.id)}
         <li>
-          <a class="plate-row" href={`/plates/${plate.id}`} onkeydown={move}>
+          <a
+            class="plate-row"
+            aria-haspopup="dialog"
+            href={`/plates/${plate.id}`}
+            oncontextmenu={(event) => openMenu(event, plate)}
+            onkeydown={(event) => {
+              if (
+                event.key === "ContextMenu" ||
+                (event.shiftKey && event.key === "F10")
+              )
+                openMenu(event, plate);
+              else move(event);
+            }}
+            onpointerdown={(event) => startPress(event, plate)}
+            onpointermove={(event) => {
+              if (
+                Math.hypot(event.clientX - point.x, event.clientY - point.y) >
+                10
+              )
+                cancelPress();
+            }}
+            onpointerup={cancelPress}
+            onpointercancel={cancelPress}
+            onpointerleave={cancelPress}
+            onclick={(event) => {
+              if (longPressed) {
+                event.preventDefault();
+                longPressed = false;
+              }
+            }}
+          >
             <strong>{plate.name}</strong>
             <span class="caption"
               >{plate.models.length}モデル · {plate.models.reduce(
@@ -105,3 +200,38 @@
     </ul>
   {/if}
 </section>
+
+{#if menuPlate}
+  <Modal title={menuPlate.name} onclose={() => void closeMenu()}>
+    <div class="plate-menu">
+      <PlateQueueAdd
+        bind:plate={menuPlate}
+        label="キュー追加"
+        paused={deleting}
+        onbusy={(value) => (queueBusy = value)}
+        onadded={() => {
+          notice = "キューに追加しました";
+          void closeMenu();
+        }}
+      />
+      <button
+        class="btn"
+        disabled={queueBusy || deleting}
+        onclick={() => location.assign(`/plates/${menuPlate!.id}?edit=1`)}
+        >編集</button
+      >
+      <button
+        class="btn danger"
+        disabled={queueBusy || deleting}
+        onclick={() => void remove()}>{deleting ? "削除中…" : "削除"}</button
+      >
+      {#if menuError}<p role="alert">{menuError}</p>{/if}
+    </div>
+  </Modal>
+{/if}
+
+<style lang="sass">
+  .plate-menu
+    display: grid
+    gap: var(--sp-2)
+</style>

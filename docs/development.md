@@ -84,6 +84,7 @@ python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
 python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 ESTIMATE_BROWSER=1 python3 tests/queue_estimates.py target/debug/orca-server /tmp/orca-estimates-check
+COMPACT_BROWSER=1 python3 tests/compact_queue.py target/debug/orca-server /tmp/orca-compact-check
 python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
 python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
 python3 tests/notifications.py /tmp/orca-notification-check

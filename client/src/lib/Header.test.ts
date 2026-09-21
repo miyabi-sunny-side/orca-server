@@ -19,7 +19,7 @@ describe("Header menu and theme flow", () => {
 
     expect(screen.queryByRole("dialog", { name: "メニュー" })).toBeNull();
     expect(hamburger.getAttribute("aria-expanded")).toBe("true");
-    const menu = screen.getByRole("navigation");
+    const menu = screen.getByRole("navigation", { name: "設定メニュー" });
     expect(screen.getByRole("banner").contains(menu)).toBe(true);
     const first = menu.querySelector(":scope > :first-child");
     expect(first?.textContent?.trim()).toBe("テーマ設定");
@@ -40,7 +40,9 @@ describe("Header menu and theme flow", () => {
 
     await fireEvent.click(hamburger);
     await fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("navigation")).toBeNull();
+    expect(
+      screen.queryByRole("navigation", { name: "設定メニュー" }),
+    ).toBeNull();
     expect(hamburger.getAttribute("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(hamburger);
 
@@ -48,7 +50,9 @@ describe("Header menu and theme flow", () => {
     await fireEvent.click(
       screen.getByRole("button", { name: "メニューを閉じる" }),
     );
-    expect(screen.queryByRole("navigation")).toBeNull();
+    expect(
+      screen.queryByRole("navigation", { name: "設定メニュー" }),
+    ).toBeNull();
   });
 
   it("テーマ設定 opens the modal and choices apply without closing", async () => {

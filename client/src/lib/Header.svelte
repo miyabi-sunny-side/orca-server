@@ -5,6 +5,8 @@
   let menuOpen = $state(false);
   let themeOpen = $state(false);
   let menuButton = $state<HTMLButtonElement | undefined>();
+  const plates = location.pathname.startsWith("/plates");
+  const home = ["/", "/queue"].includes(location.pathname);
 
   function closeMenu() {
     menuOpen = false;
@@ -32,7 +34,10 @@
 <svelte:window {onkeydown} />
 
 <header>
-  <a class="title" href="/">OrcaServer</a>
+  <nav class="tabs" aria-label="主なページ">
+    <a href="/" aria-current={home ? "page" : undefined}>OrcaServer</a>
+    <a href="/plates" aria-current={plates ? "page" : undefined}>プレート</a>
+  </nav>
   <div class="menu-wrapper">
     <button
       class="icon-btn"
@@ -52,13 +57,12 @@
         aria-label="メニューを閉じる"
         onclick={closeMenu}
       ></button>
-      <nav class="menu">
+      <nav class="menu" aria-label="設定メニュー">
         <button class="menu-item" type="button" onclick={openTheme}>
           テーマ設定
         </button>
         <a class="menu-item" href="/printers">プリンター</a>
         <a class="menu-item" href="/filaments">フィラメント</a>
-        <a class="menu-item" href="/queue">印刷キュー</a>
         <a class="menu-item" href="/about">ライセンスとソース</a>
       </nav>
     {/if}
@@ -77,16 +81,29 @@
     display: flex
     align-items: center
     justify-content: space-between
-    height: var(--header-h)
+    min-height: var(--header-h)
     padding: 0 var(--sp-3)
     background: var(--c-wash-base)
     border-bottom: 1px solid var(--c-border)
 
-  .title
-    font-size: var(--fs-md)
-    font-weight: 500
-    color: var(--c-on-surface)
-    text-decoration: none
+  .tabs
+    display: flex
+    flex-wrap: wrap
+    min-width: 0
+    align-self: stretch
+    gap: var(--sp-3)
+    a
+      display: flex
+      align-items: center
+      min-height: var(--header-h)
+      font-size: var(--fs-md)
+      font-weight: 500
+      color: var(--c-muted)
+      text-decoration: none
+      border-bottom: 2px solid transparent
+      &[aria-current="page"]
+        color: var(--c-on-surface)
+        border-color: var(--c-accent)
 
   .menu-wrapper
     position: relative

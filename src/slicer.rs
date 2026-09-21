@@ -22,6 +22,59 @@ use tokio::{
     sync::Semaphore,
 };
 
+fn failure_reason(stdout: &str, stderr: &str) -> &'static str {
+    // Only known diagnostics reach clients; paths, model text and arbitrary CLI output stay in logs.
+    let output = format!("{stderr}\n{stdout}").to_ascii_lowercase();
+    for (needle, reason) in [
+        (
+            "does not support filament",
+            "Build plate does not support the selected material",
+        ),
+        ("no valid model", "No valid model to slice"),
+        ("nothing to slice", "No valid model to slice"),
+        (
+            "outside the printable area",
+            "Model is outside the printable area",
+        ),
+        ("no space left on device", "Insufficient server storage"),
+        ("out of memory", "Insufficient memory to slice"),
+        ("invalid config", "Invalid slicing configuration"),
+        ("failed to load", "Unable to load a model or profile"),
+    ] {
+        if output.contains(needle) {
+            return reason;
+        }
+    }
+    "CLI exited abnormally"
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    #[test]
+    fn cli_reason_ignores_warnings_and_never_exposes_raw_paths_or_secrets() {
+        assert_eq!(
+            failure_reason(
+                "",
+                "QStandardPaths: XDG_RUNTIME_DIR not set\nPlate 1: Cool Plate does not support filament 1"
+            ),
+            "Build plate does not support the selected material"
+        );
+        assert_eq!(
+            failure_reason("Error: No valid model to slice", "warning: unrelated"),
+            "No valid model to slice"
+        );
+        assert_eq!(
+            failure_reason("", "Error: /private/model-secret.stl token=secret-value"),
+            "CLI exited abnormally"
+        );
+        assert_eq!(
+            failure_reason("", "Objects are outside the printable area"),
+            "Model is outside the printable area"
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct Slicer {
     binary: PathBuf,
@@ -135,10 +188,13 @@ impl Slicer {
         };
         let status = status?;
         let stdout = stdout?;
-        let _ = stderr?;
+        let stderr = stderr?;
         tracing::info!(%plate, %phase, %status, "OrcaSlicer exited");
         if !status.success() {
-            return Err(Error::Upstream("OrcaSlicer failed; check server logs"));
+            return Err(Error::Slicer(format!(
+                "OrcaSlicer {phase}: {} ({status}; reference {plate})",
+                failure_reason(&stdout, &stderr)
+            )));
         }
         Ok(stdout)
     }
@@ -307,7 +363,7 @@ mod tests {
             slicer
                 .slice(directory.clone(), 1, defaults.clone(), "test")
                 .await,
-            Err(Error::Upstream(_))
+            Err(Error::Slicer(ref message)) if message.contains("arrange") && message.contains('7') && message.contains("reference test")
         ));
         std::fs::write(&binary, "#!/bin/sh\nexec sleep 30\n").unwrap();
         assert!(matches!(

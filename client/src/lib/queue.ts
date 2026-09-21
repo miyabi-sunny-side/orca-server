@@ -12,6 +12,7 @@ export type Job = {
   process_profile_key: string | null;
   bed_type: string | null;
   actual_ams_slot?: number | null;
+  plate_deleted?: boolean;
   id: string;
   plate_id: string;
   name: string;
@@ -104,12 +105,15 @@ export function printerText(printer: Printer) {
 }
 export const phaseText = {
   queued: "待機中",
-  preparing: "最新モデルの取得・配置・スライス・開始確認中",
+  preparing: "準備中",
   printing: "印刷中",
   awaiting_removal: "完了 · 取り外し待ち",
   needs_attention: "確認が必要です",
 };
 export const failureText: Record<string, string> = {
+  "Selected build plate temperature is missing or zero for this material":
+    "選択したプレートの温度が未設定または0℃です。材料のベッド温度を設定してください。",
+  "Plate has been deleted": "このプレートは一覧から削除されています。",
   "Queue holds at most 100 waiting jobs":
     "待機キューは100件までです。不要な待機分を削除してください。",
   "Complete the plate machine, material, process and bed conditions":
@@ -172,4 +176,40 @@ export function estimateText(estimate?: Estimate): string {
   const hours = Math.floor(minutes / 60),
     rest = minutes % 60;
   return `約${hours ? `${hours}時間` : ""}${rest ? `${rest}分` : ""}`;
+}
+
+export function moveIndex(
+  ids: string[],
+  from: string,
+  target: string,
+  after: boolean,
+): number | null {
+  if (from === target || !ids.includes(from) || !ids.includes(target))
+    return null;
+  const index = ids.filter((id) => id !== from).indexOf(target) + Number(after);
+  return index === ids.indexOf(from) ? null : index;
+}
+export function jobStatus(job: Job, printer?: Printer): string {
+  if (job.state === "queued")
+    return `${job.hold_reason ? "保留 · " : ""}${estimateText(job.estimate)}`;
+  if (job.state === "printing" && printer?.synchronized) {
+    const parts = ["印刷中"];
+    if (printer.print.percent !== null) parts.push(`${printer.print.percent}%`);
+    if (printer.print.remaining_minutes !== null)
+      parts.push(`残り約${printer.print.remaining_minutes}分`);
+    return parts.join(" · ");
+  }
+  return phaseText[job.state];
+}
+export function failureMessage(
+  error: string,
+  job?: Job,
+  material?: string,
+): string {
+  if (
+    error ===
+    "Selected build plate temperature is missing or zero for this material"
+  )
+    return `${material ?? "選択材料"}の${job?.bed_type ?? "ビルドプレート"}温度が未設定または0℃です。材料の初層・通常のベッド温度を設定してください。`;
+  return failureText[error] ?? error;
 }

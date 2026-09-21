@@ -26,14 +26,17 @@
       return;
     }
     const focusables = dialog.querySelectorAll<HTMLElement>(
-      "button, a[href], input, select, textarea",
+      "button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)",
     );
     if (focusables.length === 0) {
       return;
     }
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
+    if (
+      event.shiftKey &&
+      (document.activeElement === first || document.activeElement === dialog)
+    ) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && document.activeElement === last) {

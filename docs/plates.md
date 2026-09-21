@@ -30,9 +30,19 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 | SCAD参照で新規作成 | `POST /api/plates/import`（JSON） |
 | プレート取得 | `GET /api/plates/{id}` |
 | 構成を編集 | `PUT /api/plates/{id}`（JSON） |
+| 一覧から論理削除 | `DELETE /api/plates/{id}` |
 | 未保存の公開SCADモデル取得 | `GET /api/scad/model?path=相対パス` |
 | 保存モデルのプレビュー用STL取得 | `GET /api/plates/{id}/models/{model_id}` |
 | アップロード元のSTL取得 | `GET /api/plates/{id}/files/{model_id}` |
+
+## 一覧から削除する
+
+プレート一覧で右クリック・長押し、または行にフォーカスしてShift+F10を押すと、キュー追加・編集・削除のメニューを開きます。
+「削除」はそのプレートを一覧・検索から隠します。既存の待機・進行中ジョブは取り消さず、手動で継続できます。
+
+`DELETE /api/plates/{id}`は204を返し、同じIDへの再送も204です。不明なIDは404です。
+削除後の通常取得・モデル取得は404、編集と新規キュー追加は409です。元のSTL・構成・IDと既存ジョブの固定入力は保持します。
+通常の編集による復活や復元画面はありません。必要な構成は別のプレートとして新規保存してください。
 
 ## SCADモデルを選ぶ
 

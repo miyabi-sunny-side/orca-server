@@ -1,0 +1,37 @@
+import { test, expect } from '@playwright/test';
+
+test('Cool Plate failure links to the matching common setting, returns to the job and recovers without print', async({page,request})=>{
+  const ctx=JSON.parse(process.env.E2E_COMPACT_CONTEXT!);
+  const peer=async()=> (await request.get(process.env.E2E_PRINTER_CONTROL!)).json();
+  const before=await peer();
+  await page.setViewportSize({width:375,height:812});await page.emulateMedia({colorScheme:'dark'});
+  await page.goto('/');
+  const job=page.locator(`#job-${ctx.job}`);
+  await job.locator('summary').click();
+  await expect(job.getByRole('alert')).toContainText('PETG-GF 黒のCool Plate温度が未設定または0℃');
+  await job.getByRole('link',{name:'材料の温度を設定'}).click();
+  await expect(page).toHaveURL(/\/settings\/[^?]+\?.*#bed-temperature$/);
+  await expect(page.getByLabel('ベッド初層（℃）',{exact:true})).toHaveValue('0');
+  await page.getByLabel('ベッド初層（℃）',{exact:true}).fill('65');
+  await page.getByLabel('ベッド通常層（℃）',{exact:true}).fill('65');
+  await page.getByRole('button',{name:'保存',exact:true}).click();
+  await expect(page).toHaveURL(new RegExp(`/\\?printer_id=p1#job-${ctx.job}$`));
+  await expect(job).toHaveAttribute('open','');
+  await expect(job.locator('summary')).toContainText('約19分');
+  await expect(job.getByRole('alert')).toHaveCount(0);
+  await page.getByRole('link',{name:'プレート',exact:true}).click();
+  const row=page.locator(`a[href="/plates/${ctx.plate}"]`);
+  await row.click({button:'right'});
+  await expect(page.getByRole('button',{name:'キュー追加',exact:true})).toBeEnabled();
+  page.on('dialog',()=>{throw new Error('Deletion should not add another confirmation');});
+  await page.getByRole('button',{name:'削除',exact:true}).click();
+  await expect(row).toHaveCount(0);
+  expect((await request.get('/api/plates/'+ctx.plate)).status()).toBe(404);
+  await page.getByRole('link',{name:'OrcaServer',exact:true}).click();
+  await job.locator('summary').click();
+  await expect(job.getByText('一覧から削除済み · このジョブは継続できます')).toBeVisible();
+  await expect(job.getByRole('link',{name:'プレートの条件を編集'})).toHaveCount(0);
+  expect((await peer()).prints).toHaveLength(before.prints.length);
+  expect((await peer()).uploads).toHaveLength(before.uploads.length);
+  await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/temperature-recovered-deleted.png`,fullPage:true});
+});
