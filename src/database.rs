@@ -140,7 +140,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=9 => {}
+            1..=10 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -216,6 +216,15 @@ impl Database {
         }
         if version < 9 {
             tx.execute_batch("ALTER TABLE print_jobs ADD COLUMN estimate_json TEXT CHECK(estimate_json IS NULL OR json_valid(estimate_json)); PRAGMA user_version=9;")?;
+        }
+        if version < 10 {
+            tx.execute_batch("ALTER TABLE plates ADD COLUMN sparse_infill_pattern TEXT;
+                ALTER TABLE plates ADD COLUMN sparse_infill_density REAL CHECK(sparse_infill_density BETWEEN 0 AND 100);
+                ALTER TABLE plates ADD COLUMN wall_loops INTEGER CHECK(wall_loops BETWEEN 0 AND 1000 AND wall_loops=CAST(wall_loops AS INTEGER));
+                ALTER TABLE default_settings ADD COLUMN sparse_infill_pattern TEXT NOT NULL DEFAULT 'adaptivecubic';
+                ALTER TABLE default_settings ADD COLUMN sparse_infill_density REAL NOT NULL DEFAULT 15 CHECK(sparse_infill_density BETWEEN 0 AND 100);
+                ALTER TABLE default_settings ADD COLUMN wall_loops INTEGER NOT NULL DEFAULT 2 CHECK(wall_loops BETWEEN 0 AND 1000 AND wall_loops=CAST(wall_loops AS INTEGER));
+                PRAGMA user_version=10;")?;
         }
         reconcile_defaults(&tx)?;
         check_references(&tx)?;
@@ -350,7 +359,18 @@ impl Database {
             |r| r.get(0),
         )?)
     }
-    pub(crate) fn set_default_printer(&self, id: Option<&str>) -> Result<()> {
+    pub(crate) fn default_strength(&self) -> Result<crate::strength::Strength> {
+        Ok(self.connection()?.query_row(
+            "SELECT sparse_infill_pattern,sparse_infill_density,wall_loops FROM default_settings WHERE id=1",
+            [], |r| Ok(crate::strength::Strength { sparse_infill_pattern:r.get(0)?, sparse_infill_density:r.get(1)?, wall_loops:r.get(2)? }),
+        )?)
+    }
+    pub(crate) fn set_defaults(
+        &self,
+        id: Option<&str>,
+        strength: &crate::strength::Strength,
+    ) -> Result<()> {
+        strength.validate()?;
         let mut c = self.connection()?;
         let tx = c.transaction()?;
         if let Some(id) = id
@@ -363,8 +383,8 @@ impl Database {
             return Err(Error::NotFound);
         }
         tx.execute(
-            "UPDATE default_settings SET default_printer_id=?1 WHERE id=1",
-            [id],
+            "UPDATE default_settings SET default_printer_id=?1,sparse_infill_pattern=COALESCE(?2,sparse_infill_pattern),sparse_infill_density=COALESCE(?3,sparse_infill_density),wall_loops=COALESCE(?4,wall_loops) WHERE id=1",
+            params![id,strength.sparse_infill_pattern,strength.sparse_infill_density,strength.wall_loops],
         )?;
         reconcile_defaults(&tx)?;
         tx.commit()?;
@@ -438,10 +458,32 @@ mod tests {
         }
     }
     #[test]
+    fn strength_defaults_are_persisted_without_backfilling_legacy_plates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(None)).unwrap();
+        let c = db.connection().unwrap();
+        let values: (String, f64, u32) = c.query_row("SELECT sparse_infill_pattern,sparse_infill_density,wall_loops FROM default_settings", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(values, ("adaptivecubic".into(), 15.0, 2));
+        c.execute("INSERT INTO plates(id,name) VALUES ('old','Old')", [])
+            .unwrap();
+        drop(c);
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("no reimport")).unwrap();
+        let plate = crate::plates::load(&db.connection().unwrap(), "old").unwrap();
+        assert!(
+            serde_json::to_value(plate.conditions)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .values()
+                .all(serde_json::Value::is_null)
+        );
+    }
+    #[test]
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
-        db.connection().unwrap().execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
+        db.connection().unwrap().execute_batch("ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
         assert_eq!(db.default_printer().unwrap().as_deref(), Some("stable-id"));
@@ -460,8 +502,12 @@ mod tests {
         second.id = "second".into();
         second.settings.serial = "SECOND".into();
         db.save(&second).unwrap();
-        db.set_default_printer(Some("second")).unwrap();
-        assert!(db.set_default_printer(Some("missing")).is_err());
+        db.set_defaults(Some("second"), &crate::strength::Strength::default())
+            .unwrap();
+        assert!(
+            db.set_defaults(Some("missing"), &crate::strength::Strength::default())
+                .is_err()
+        );
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
         assert_eq!(db.default_printer().unwrap().as_deref(), Some("second"));
@@ -473,7 +519,7 @@ mod tests {
         db.save(&second).unwrap();
         db.connection()
             .unwrap()
-            .execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
+            .execute_batch("ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
             .unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -776,7 +822,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            9
+            10
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

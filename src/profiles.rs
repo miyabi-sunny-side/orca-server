@@ -135,6 +135,18 @@ impl Profiles {
         Ok(())
     }
 
+    pub(crate) fn resolve_process(
+        &self,
+        machine: &str,
+        process: &str,
+        strength: &crate::strength::Strength,
+    ) -> Result<Map<String, Value>> {
+        self.machine(machine)?;
+        let mut profile = selectable(&self.process, process, machine)?;
+        strength.apply(&mut profile)?;
+        Ok(profile)
+    }
+
     pub(crate) fn resolve_filament(
         &self,
         setting: &crate::filament::SettingData,

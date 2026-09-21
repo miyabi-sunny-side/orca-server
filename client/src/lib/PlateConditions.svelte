@@ -10,18 +10,21 @@
     type FilamentSetting,
   } from "./api";
   import { machineChoices } from "./plate";
+  import StrengthFields from "./StrengthFields.svelte";
   let {
     value = $bindable(),
     defaults,
     defaultsReading,
     defaultsError,
     changed,
+    legacy = false,
   }: {
     value: PlateConditions;
     defaults?: DefaultSettings;
     defaultsReading: boolean;
     defaultsError: string;
     changed: (key: keyof PlateConditions) => void;
+    legacy?: boolean;
   } = $props();
   const reasons = {
     printer: "プリンターを登録すると初期値を使えます。",
@@ -32,7 +35,14 @@
       "AMSの現在の装填を確認できません。プリンターとの接続を確認してください。",
     material: "AMSに、この機種で使える割当済みの材料がありません。",
   };
-  const missing = $derived(Object.values(value).some((v) => v === null));
+  const missing = $derived(
+    [
+      value.required_machine_profile_key,
+      value.filament_id,
+      value.process_profile_key,
+      value.bed_type,
+    ].some((v) => v == null),
+  );
   let printers = $state<Printer[]>([]),
     filaments = $state<Filament[]>([]),
     profiles = $state<Profiles>();
@@ -197,6 +207,17 @@
         >{/each}
     </select></label
   >
+  <details class="settings-details">
+    <summary>詳細設定</summary>
+    <StrengthFields
+      bind:value
+      patterns={defaults?.infill_patterns}
+      machine={value.required_machine_profile_key}
+      process={value.process_profile_key}
+      {legacy}
+      {changed}
+    />
+  </details>
   {#if loading || reading}<p class="caption" role="status">
       印刷条件を確認しています…
     </p>{/if}

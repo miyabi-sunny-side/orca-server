@@ -113,7 +113,7 @@ docker logs orca-server
 稼働中のDBファイルだけをコピーしないでください。SCAD元データはscad-live側でも保管します。
 アップロード元STLは同じDBに含まれるため、DBの復元で再利用できます。
 
-現在のSQLite schema versionは9です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
+現在のSQLite schema versionは10です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
 プレート・キューには`plates`、`plate_items`、`print_jobs`を使います。
 初期設定は`default_settings`、通知は`print_notifications`で保持します。
 製品と色の分離では既存材料IDとキューを保持し、全設定が一致する製品だけをまとめます。[材料の移行条件](filaments.md#保存と移行)を確認してください。
@@ -121,6 +121,8 @@ docker logs orca-server
 SCAD由来は参照、直接アップロード由来はSTL本体を保管し、個数は1です。
 旧revision・スライス設定・生成物の履歴は新しい再利用プレートへ引き継ぎません。
 プレートに新設した4つの印刷条件はNULLのまま移行し、進行中の試行・固定入力は保持します。
+インフィル・充填率・壁の枚数も旧プレートではNULLのままとし、従来の工程設定を継承します。
+新規プレート用の初期値はadaptivecubic・15%・2周です。進行中の実行入力や生成物は書き換えません。
 移行後は[プレートの条件](plates.md#印刷条件を保存する)と材料設定を確認してから追加・印刷してください。
 
 公開済みの旧プレートが壊れていれば移行全体を取り消し、起動を拒否します。旧ファイルを自動削除・上書きしません。

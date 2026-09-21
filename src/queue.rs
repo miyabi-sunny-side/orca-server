@@ -88,6 +88,16 @@ pub(crate) struct Resolved {
     pub profiles: BTreeMap<String, serde_json::Map<String, Value>>,
     pub filament: crate::filament::Filament,
 }
+impl Resolved {
+    pub(crate) fn for_plate(mut self, plate: &crate::plates::Plate) -> Result<Self> {
+        plate.conditions.strength.apply(
+            self.profiles
+                .get_mut("process.json")
+                .ok_or(Error::Invalid("Resolved process is missing"))?,
+        )?;
+        Ok(self)
+    }
+}
 struct Preparation {
     job: Job,
     execution: Execution,
@@ -754,6 +764,7 @@ impl Service {
                 status,
                 &slicer.profiles,
             )?;
+            let settings = settings.for_plate(&plate)?;
             Execution {
                 plate,
                 settings,
@@ -1108,6 +1119,7 @@ mod tests {
                         filament_id: Some("pla".into()),
                         process_profile_key: Some(Selection::default().process),
                         bed_type: Some(crate::profiles::BEDS[0].into()),
+                        strength: crate::strength::Strength::default(),
                     },
                     name: "parts".into(),
                     version: None,

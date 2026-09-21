@@ -4,7 +4,12 @@ export type Selection = {
   filament: string;
   bed: string;
 };
-export type PlateConditions = {
+export type Strength = {
+  sparse_infill_pattern?: string | null;
+  sparse_infill_density?: number | null;
+  wall_loops?: number | null;
+};
+export type PlateConditions = Strength & {
   required_machine_profile_key: string | null;
   filament_id: string | null;
   process_profile_key: string | null;
@@ -13,6 +18,7 @@ export type PlateConditions = {
 export type DefaultSettings = {
   default_printer_id: string | null;
   conditions: PlateConditions;
+  infill_patterns: string[];
   reason:
     | "printer"
     | "printer_selection"

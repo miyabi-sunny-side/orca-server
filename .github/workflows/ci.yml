@@ -92,6 +92,9 @@ jobs:
       - name: Verify saved creation defaults and active input preservation
         run: DEFAULTS_BROWSER=1 python3 tests/plate_defaults.py target/debug/orca-server /tmp/orca-defaults-check
 
+      - name: Verify infill and shell settings, migration and browser editing
+        run: STRENGTH_BROWSER=1 python3 tests/strength_settings.py target/debug/orca-server /tmp/orca-strength-check
+
       - name: Verify material names do not block compatible nozzles
         run: python3 tests/nozzle_material.py target/debug/orca-server /tmp/orca-nozzle-check
 

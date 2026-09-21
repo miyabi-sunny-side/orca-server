@@ -33,7 +33,7 @@ def fake_slicer(root):
                     printer_model=machine.split(' 0.')[0], default_print_profile=PROCESS,
                     default_filament_profile=[FILAMENT])
         (profiles/'machine'/f'{i}.json').write_text(json.dumps(data))
-    (profiles/'process'/'standard.json').write_text(json.dumps(dict(name=PROCESS, instantiation='true', compatible_printers=machines)))
+    (profiles/'process'/'standard.json').write_text(json.dumps(dict(name=PROCESS, instantiation='true', compatible_printers=machines, sparse_infill_pattern='crosshatch', sparse_infill_density='15%', wall_loops='2', top_shell_layers='5', bottom_shell_layers='3', top_shell_thickness='1', bottom_shell_thickness='0')))
     for i, (name, material) in enumerate([(FILAMENT, 'PLA'), ('Generic PETG', 'PETG')]):
         (profiles/'filament'/f'{i}.json').write_text(json.dumps(dict(name=name, instantiation='true', compatible_printers=machines,
             filament_type=[material], nozzle_temperature=['220'], nozzle_temperature_initial_layer=['220'], required_nozzle_HRC=['0'])))
@@ -106,7 +106,7 @@ class Rig:
         with response:
             raw=response.read(); assert SECRET.encode() not in raw
             if expected is not None: assert response.status==expected,(path,response.status,raw)
-            value=json.loads(raw) if raw else None
+            value=(json.loads(raw) if 'application/json' in response.headers.get('Content-Type','') else raw.decode()) if raw else None
             return (response.status,value) if expected is None else value
 
     def launch(self):
@@ -146,7 +146,7 @@ class Rig:
     def send(self, action, expected=200):return self.api(body=self.command(action),expected=expected)
     def configure(self, specification=None, plate=None):
         plate=self.api('/api/plates/'+(plate or self.plate)['id'])
-        conditions={k:v for k,v in (specification or self.specification()).items() if k!='ams_slot_id'}
+        conditions={**plate['conditions'], **{k:v for k,v in (specification or self.specification()).items() if k!='ams_slot_id'}}
         if plate['conditions']!=conditions:
             plate=self.api('/api/plates/'+plate['id'],dict(name=plate['name'],version=plate['version'],models=plate['models'],conditions=conditions),'PUT')
         if self.plate and plate['id']==self.plate['id']:self.plate=plate

@@ -16,7 +16,13 @@ export function choosePrinter(printers: Device[], previous: string) {
     ? previous
     : (printers[0]?.id ?? "");
 }
+export const emptyStrength = {
+  sparse_infill_pattern: null,
+  sparse_infill_density: null,
+  wall_loops: null,
+};
 export const emptyConditions: PlateConditions = {
+  ...emptyStrength,
   required_machine_profile_key: null,
   filament_id: null,
   process_profile_key: null,
@@ -27,18 +33,22 @@ export function initialConditions(
   value: PlateConditions,
   defaults: PlateConditions,
   edited: Set<keyof PlateConditions>,
+  creation = true,
 ): PlateConditions {
   const result = { ...value };
   for (const key of Object.keys(emptyConditions) as (keyof PlateConditions)[]) {
+    const strength = key in emptyStrength;
     if (
-      result[key] === null &&
+      result[key] == null &&
       !edited.has(key) &&
-      (key === "required_machine_profile_key" ||
+      (!strength || creation) &&
+      (strength ||
+        key === "required_machine_profile_key" ||
         key === "bed_type" ||
         result.required_machine_profile_key ===
           defaults.required_machine_profile_key)
     )
-      result[key] = defaults[key];
+      Object.assign(result, { [key]: defaults[key] ?? null });
   }
   return result;
 }

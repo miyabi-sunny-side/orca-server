@@ -89,6 +89,7 @@ python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
 python3 tests/notifications.py /tmp/orca-notification-check
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 DEFAULTS_BROWSER=1 python3 tests/plate_defaults.py target/debug/orca-server /tmp/orca-defaults-check
+STRENGTH_BROWSER=1 python3 tests/strength_settings.py target/debug/orca-server /tmp/orca-strength-check
 PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
 REGISTRY_BROWSER=1 python3 tests/printer_registry.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-registry-check
 FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-filament-check
@@ -99,6 +100,8 @@ FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA
 生成元は同梱の20mm立方体STL 2個、プリンターはP1S 0.4mmです。
 工程は0.20mm Standard、材料はGeneric PLA High Speed、プレートはTextured PEI Plateです。
 初期値の検証ではSQLite移行・再起動・既定機選択、同期済みAMSの先頭、REST/MCPの一致、遅い取得と手動選択、印刷中の入力保全を確認します。
+強度設定では3項目のSQLite保存、旧工程の継承、試算失効と固定済み入力を確認します。
+Chromiumでは詳細の開閉、壁に連動する層数、保存失敗と遅い初期値取得時の入力保持を通します。
 プレート条件の検証ではnullable保存、所持機からの候補選択、実機別の装填照合、直接追加を確認します。
 キュー検証では準備時の最新データ固定、取り外し待ち、同時・重複操作、転送中AMS交換、開始前後の再起動とDB復元を通します。
 試算検証では印刷中の追加、編集・材料設定の失効、取消、再起動、CLI失敗と再試算、開始時の最新STL照合・キャッシュ破損を確認します。

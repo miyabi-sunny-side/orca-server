@@ -216,7 +216,47 @@ fn slice_args() -> Vec<OsString> {
 pub(crate) fn router(slicer: Option<Slicer>) -> Router {
     Router::new()
         .route("/api/slicer/profiles", get(choices))
+        .route("/api/slicer/process", get(process))
         .with_state(slicer)
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessQuery {
+    machine: String,
+    process: String,
+    sparse_infill_pattern: Option<String>,
+    sparse_infill_density: Option<f64>,
+    wall_loops: Option<u32>,
+}
+async fn process(
+    State(slicer): State<Option<Slicer>>,
+    Query(query): Query<ProcessQuery>,
+) -> Result<Json<serde_json::Map<String, serde_json::Value>>> {
+    let mut values = slicer
+        .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
+        .profiles
+        .resolve_process(
+            &query.machine,
+            &query.process,
+            &crate::strength::Strength {
+                sparse_infill_pattern: query.sparse_infill_pattern,
+                sparse_infill_density: query.sparse_infill_density,
+                wall_loops: query.wall_loops,
+            },
+        )?;
+    values.retain(|key, _| {
+        [
+            "sparse_infill_pattern",
+            "sparse_infill_density",
+            "wall_loops",
+            "top_shell_layers",
+            "bottom_shell_layers",
+            "top_shell_thickness",
+            "bottom_shell_thickness",
+        ]
+        .contains(&key.as_str())
+    });
+    Ok(Json(values))
 }
 #[derive(serde::Deserialize)]
 struct ProfileQuery {

@@ -37,7 +37,12 @@
         { signal: controller.signal },
       );
       if (!controller.signal.aborted) {
-        conditions = initialConditions(conditions, result.conditions, edited);
+        conditions = initialConditions(
+          conditions,
+          result.conditions,
+          edited,
+          !initial,
+        );
         defaults = result;
       }
     } catch (e) {
@@ -64,7 +69,7 @@
   const controller = new AbortController();
   onMount(() => {
     if (initial) {
-      conditions = { ...(initial.conditions ?? emptyConditions) };
+      conditions = { ...emptyConditions, ...initial.conditions };
       name = initial.name;
       selected = initial.models.map((m) => ({ ...m }));
       step = 2;
@@ -245,6 +250,7 @@
           合計 {total} 個 / 最大64個。SCADモデルは試算時と印刷開始時に最新データを取得します。
         </p>
         <PlateConditions
+          legacy={!!initial}
           bind:value={conditions}
           {defaults}
           {defaultsReading}

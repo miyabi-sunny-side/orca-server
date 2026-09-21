@@ -1,11 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import StrengthFields from "../lib/StrengthFields.svelte";
+  import { emptyStrength } from "../lib/plate";
   import {
     request,
     type Printer,
     type DefaultSettings,
     type Profiles,
     type Machine,
+    type Strength,
   } from "../lib/api";
   const part = window.location.pathname.split("/")[2];
   const editing = !!part;
@@ -14,6 +17,10 @@
   let machines = $state<Machine[]>([]);
   let defaultId = $state("");
   let defaultSaved = $state(false);
+  let strength = $state<Strength>({ ...emptyStrength });
+  let patterns = $state<string[]>([]);
+  let strengthSaved = $state(false);
+  const defaultPrinter = $derived(printers.find((p) => p.id === defaultId));
   let profiles = $state<Profiles>();
   let loading = $state(true);
   let busy = $state(false);
@@ -86,6 +93,13 @@
         ]);
         printers = devices;
         defaultId = defaults.default_printer_id ?? "";
+        patterns = defaults.infill_patterns;
+        strength = Object.fromEntries(
+          Object.keys(emptyStrength).map((key) => [
+            key,
+            defaults.conditions[key as keyof Strength],
+          ]),
+        );
       }
     } catch (cause) {
       if (!controller.signal.aborted) error = (cause as Error).message;
@@ -161,6 +175,27 @@
       busy = false;
     }
   }
+  async function saveStrength(event: SubmitEvent) {
+    event.preventDefault();
+    busy = true;
+    strengthSaved = false;
+    error = "";
+    try {
+      await request("/api/default-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          default_printer_id: defaultId || null,
+          ...strength,
+        }),
+      });
+      strengthSaved = true;
+    } catch (cause) {
+      error = (cause as Error).message;
+    } finally {
+      busy = false;
+    }
+  }
   const connection: Record<string, string> = {
     connected: "接続済み",
     connecting: "接続中",
@@ -216,6 +251,25 @@
           初期値に使うプリンターを保存しました。
         </p>{/if}
     {/if}
+    <details class="settings-details">
+      <summary>新規プレートの詳細初期値</summary>
+      <form onsubmit={saveStrength}>
+        <fieldset disabled={busy}>
+          <StrengthFields
+            required
+            bind:value={strength}
+            {patterns}
+            machine={defaultPrinter?.machine_profile_key}
+            process={defaultPrinter?.default_process_profile_key}
+            changed={() => (strengthSaved = false)}
+          />
+          <button class="btn" type="submit">初期値を保存</button>
+          {#if strengthSaved}<p role="status">
+              新規プレートの初期値を保存しました。
+            </p>{/if}
+        </fieldset>
+      </form>
+    </details>
     <ul class="plate-list">
       {#each printers as printer (printer.id)}<li class="printer-card">
           <a class="printer-title" href={`/printers/${printer.id}`}
@@ -363,7 +417,7 @@
             ? "アクセスコードと証明書は、空欄のまま保存すると現在の値を維持します。"
             : "プリンターから取得し、接続先を確認した証明書を入力してください。"}
         </p>
-        <details>
+        <details class="settings-details">
           <summary>接続の詳細</summary>
           <label class="field"
             ><span>MQTTポート</span><input

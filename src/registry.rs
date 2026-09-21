@@ -262,6 +262,7 @@ struct Defaults {
     default_printer_id: Option<String>,
     conditions: crate::plates::Conditions,
     reason: Option<&'static str>,
+    infill_patterns: &'static [&'static str],
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -272,6 +273,8 @@ struct DefaultQuery {
 #[serde(deny_unknown_fields)]
 struct DefaultChoice {
     default_printer_id: Option<String>,
+    #[serde(flatten)]
+    strength: crate::strength::Strength,
 }
 async fn read_defaults(
     State(registry): State<Arc<Registry>>,
@@ -286,7 +289,7 @@ async fn update_defaults(
     let _entries = registry.entries.lock().await;
     let db = registry.db.clone();
     crate::plate_api::blocking(move || {
-        db.set_default_printer(choice.default_printer_id.as_deref())
+        db.set_defaults(choice.default_printer_id.as_deref(), &choice.strength)
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -296,8 +299,12 @@ impl Registry {
         let entries = self.entries.lock().await;
         let mut result = Defaults {
             default_printer_id: self.db.default_printer()?,
-            conditions: crate::plates::Conditions::default(),
+            conditions: crate::plates::Conditions {
+                strength: self.db.default_strength()?,
+                ..Default::default()
+            },
             reason: None,
+            infill_patterns: crate::strength::PATTERNS,
         };
         let Some(entry) = result
             .default_printer_id
@@ -380,6 +387,16 @@ impl Registry {
             .take()
             .or(defaults.process_profile_key);
         value.bed_type = value.bed_type.take().or(defaults.bed_type);
+        value.strength.sparse_infill_pattern = value
+            .strength
+            .sparse_infill_pattern
+            .take()
+            .or(defaults.strength.sparse_infill_pattern);
+        value.strength.sparse_infill_density = value
+            .strength
+            .sparse_infill_density
+            .or(defaults.strength.sparse_infill_density);
+        value.strength.wall_loops = value.strength.wall_loops.or(defaults.strength.wall_loops);
         Ok(())
     }
 }

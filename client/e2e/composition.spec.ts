@@ -20,7 +20,7 @@ test('a plate saves model references and quantities with nullable print conditio
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await expect(page).toHaveURL(/plates\/11111111-1111-4111-8111-111111111111$/);
   await expect(page.getByRole('button', { name: '印刷キューへ' })).toBeVisible();
-  expect(saved).toEqual({ name: '机の箱', conditions: {required_machine_profile_key:null,filament_id:null,process_profile_key:null,bed_type:null}, models: [{ name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] });
+  expect(saved).toEqual({ name: '机の箱', conditions: {required_machine_profile_key:null,filament_id:null,process_profile_key:null,bed_type:null,sparse_infill_pattern:null,sparse_infill_density:null,wall_loops:null}, models: [{ name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] });
   await expect(page.getByRole('button', { name: /parts\/box.stl.*3個/ })).toBeVisible();
   await expect(page.getByText('3個', { exact: true })).toBeVisible();
 });

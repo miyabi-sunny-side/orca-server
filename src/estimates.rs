@@ -109,7 +109,7 @@ fn plan(c: &Connection, job: &str, profiles: &Profiles) -> Result<(Plate, Resolv
         bed_type: required(&plate.conditions.bed_type)?,
     };
     // Resolving slice settings does not require an idle printer or perform an AMS switch.
-    let settings = queue::resolve(c, &pid, &specification, profiles)?;
+    let settings = queue::resolve(c, &pid, &specification, profiles)?.for_plate(&plate)?;
     Ok((plate, settings))
 }
 pub(crate) fn view(c: &Connection, job: &Job, profiles: Option<&Profiles>) -> Result<Value> {

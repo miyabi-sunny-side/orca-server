@@ -248,3 +248,5 @@ mod tests {
         assert!(body.starts_with(b"<!doctype html>"));
     }
 }
+
+mod strength;

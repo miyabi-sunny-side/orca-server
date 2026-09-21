@@ -16,7 +16,7 @@ test('saved defaults start complete and manual material survives at desktop and 
     await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/defaults-${width}-${colorScheme}.png`,fullPage:true});
     await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);
     const id=new URL(page.url()).pathname.split('/')[2];const saved=await (await request.get('/api/plates/'+id)).json();
-    expect(saved.conditions).toEqual({required_machine_profile_key:ctx.machine,filament_id:width===900?ctx.second:ctx.first,process_profile_key:ctx.process,bed_type:ctx.bed});
+    expect(saved.conditions).toEqual({required_machine_profile_key:ctx.machine,filament_id:width===900?ctx.second:ctx.first,process_profile_key:ctx.process,bed_type:ctx.bed,sparse_infill_pattern:'adaptivecubic',sparse_infill_density:15,wall_loops:2});
     expect(saved.models[0].quantity).toBe(10);
     await page.getByRole('button',{name:'構成を編集'}).click();
     await expect(fields()[1]).toHaveValue(saved.conditions.filament_id);

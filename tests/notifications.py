@@ -160,7 +160,7 @@ def run(output):
         rig.stop(); rig.env['NOTIFICATION_TEST_ENABLED'] = '0'; rig.launch()
         rig.start_job(); rig.finish(); count = len(requests); before = len(rig.rows()); time.sleep(1.2)
         assert len(requests) == count and len(rig.rows()) == before
-        rig.stop(); rig.sql('DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=7;')
+        rig.stop(); rig.sql('ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; ALTER TABLE default_settings DROP COLUMN sparse_infill_pattern; ALTER TABLE default_settings DROP COLUMN sparse_infill_density; ALTER TABLE default_settings DROP COLUMN wall_loops; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=7;')
         rig.env['NOTIFICATION_TEST_ENABLED'] = '1'; rig.launch(); rig.report('FINISH'); rig.phase('awaiting_removal'); time.sleep(1.2)
         assert not rig.rows() and len(requests) == count
         rig.remove_current(); results['unset_disables_and_schema_upgrade_does_not_backfill'] = True

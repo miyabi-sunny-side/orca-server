@@ -73,7 +73,10 @@ CLIは試算と印刷準備を合わせてサーバー内で1件ずつ実行し�
 
 実行バイナリと同じ配布物の`resources/profiles/BBL`を読みます。
 `inherits`の親から子へ設定を展開し、配列も子の値で置き換えます。親の欠落・循環は拒否します。
-展開した基本設定に、DBに保存したノズル・ベッド温度の明示的な上書きだけを適用します。
+展開した基本設定に、DBへ保存したノズル・ベッド温度と、[プレートのインフィル・壁設定](plates.md#インフィルと壁を変更する)を適用します。
+工程の層高や速度は保持します。壁に連動する上下面は毎回元の工程から計算し、同梱ファイルを書き換えません。
+`GET /api/slicer/process?machine=機種key&process=工程key`で詳細3項目と上下面の実効値を取得できます。
+任意の`sparse_infill_pattern`・`sparse_infill_density`・`wall_loops`を付けると、上書き後の値を返します。
 任意のファイルパス・CLI引数・G-codeをAPIから指定する機能はありません。
 
 ## CLI連携の検証
@@ -84,6 +87,7 @@ CLIは試算と印刷準備を合わせてサーバー内で1件ずつ実行し�
 cargo build --locked
 python3 tests/slicer_cli.py "$ORCA_APPDIR" /tmp/orca-cli-check
 python3 tests/estimate_cli.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-estimate-cli-check
+python3 tests/strength_cli.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-strength-cli-check
 ```
 
 P1S 0.4mmとA1 mini 0.2mmのプロファイルで、2個のモデルの配置・座標・温度設定・印刷データを検査します。
@@ -91,4 +95,6 @@ P1S 0.4mmとA1 mini 0.2mmのプロファイルで、2個のモデルの配置・
 CLI終了失敗・時間超過はRustの隔離ランチャーテストで確認します。
 試算の検証ではキュー追加から1個・2個・異なる積層条件を実行し、APIの秒数と3MF/G-codeを照合します。
 試算中の転送・開始命令がないこと、再起動後の結果保持、同一入力での生成物再利用も確認します。
+強度設定の検証は20mm立方体を使い、方式・充填率・壁数・0%/100%を変えて実行します。
+3MFの設定に加え、G-codeの内部充填経路、外周の吐出量、上下面の層範囲を確認します。プリンターへ転送・開始しません。
 結果・3MF・ログを指定先へ保存します。これらは物理的な印刷品質や他機種の実通信を保証する検証ではありません。

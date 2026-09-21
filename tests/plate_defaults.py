@@ -29,7 +29,7 @@ def main():
         def edit(plate, conditions):
             return rig.api('/api/plates/'+plate['id'],dict(name=plate['name'],version=plate['version'],models=plate['models'],conditions=conditions),'PUT')
         first=defaults(); assert first['default_printer_id']=='p1'
-        assert first['conditions']==dict(required_machine_profile_key=MACHINE,filament_id=rig.materials[0]['id'],process_profile_key=PROCESS,bed_type=BED)
+        assert first['conditions']==dict(required_machine_profile_key=MACHINE,filament_id=rig.materials[0]['id'],process_profile_key=PROCESS,bed_type=BED,sparse_infill_pattern='adaptivecubic',sparse_infill_density=15,wall_loops=2)
         assert first['reason'] is None
         current=settings(); current['bed_type']='Cool Plate'; requests=len(rig.broker.requests)
         rig.api('/api/printers/p1',current,'PUT')
@@ -101,8 +101,8 @@ def main():
         rig.api('/api/printers/'+other,method='DELETE',expected=204)
         assert defaults()['default_printer_id']=='p1'
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
-            assert c.execute('PRAGMA user_version').fetchone()==(9,)
-            assert [r[1] for r in c.execute('PRAGMA table_info(default_settings)')]==['id','default_printer_id']
+            assert c.execute('PRAGMA user_version').fetchone()==(10,)
+            assert [r[1] for r in c.execute('PRAGMA table_info(default_settings)')]==['id','default_printer_id','sparse_infill_pattern','sparse_infill_density','wall_loops']
             assert c.execute('SELECT default_printer_id FROM default_settings').fetchall()==[('p1',)]
         assert len(rig.broker.prints)==1 and all(not p.prints for p in peers)
         (rig.output/'verified.json').write_text(json.dumps(dict(defaults_persist=True,manual_values_preserved=True,update_null_clears=True,current_ams_only=True,active_input_preserved=True,same_model_devices=True,mcp=True),indent=2))

@@ -88,13 +88,17 @@ async fn client_saves_references_and_shares_the_rest_validation() {
     let rest = read(&server.base, &path).await;
     assert_eq!(rest, saved["data"]);
     assert_eq!(rest["models"][0]["quantity"], 10);
-    assert!(
-        rest["conditions"]
-            .as_object()
-            .unwrap()
-            .values()
-            .all(Value::is_null)
-    );
+    for key in [
+        "required_machine_profile_key",
+        "filament_id",
+        "process_profile_key",
+        "bed_type",
+    ] {
+        assert!(rest["conditions"][key].is_null());
+    }
+    assert_eq!(rest["conditions"]["sparse_infill_pattern"], "adaptivecubic");
+    assert_eq!(rest["conditions"]["sparse_infill_density"], 15.0);
+    assert_eq!(rest["conditions"]["wall_loops"], 2);
     assert_eq!(
         call(&client, "plate_get", json!({"id":id}), false).await["data"],
         rest
@@ -481,6 +485,12 @@ async fn creation_defaults_match_rest() {
                 .all(Value::is_null)
         );
     }
+    edit["conditions"] =
+        json!({"sparse_infill_pattern":"gyroid","sparse_infill_density":0,"wall_loops":4});
+    let explicit = call(&client, "plate_save", json!({"plate":edit}), false).await["data"].clone();
+    assert_eq!(explicit["conditions"]["sparse_infill_pattern"], "gyroid");
+    assert_eq!(explicit["conditions"]["sparse_infill_density"], 0.0);
+    assert_eq!(explicit["conditions"]["wall_loops"], 4);
     client.cancel().await.unwrap();
 }
 

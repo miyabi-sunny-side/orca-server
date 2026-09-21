@@ -108,13 +108,15 @@ pub struct Model {
     pub source: Option<String>,
     pub quantity: u16,
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Conditions {
     pub required_machine_profile_key: Option<String>,
     pub filament_id: Option<String>,
     pub process_profile_key: Option<String>,
     pub bed_type: Option<String>,
+    #[serde(flatten)]
+    pub strength: crate::strength::Strength,
 }
 impl Conditions {
     fn validate(
@@ -122,6 +124,7 @@ impl Conditions {
         c: &rusqlite::Connection,
         profiles: Option<&crate::profiles::Profiles>,
     ) -> Result<()> {
+        self.strength.validate()?;
         if self
             .bed_type
             .as_ref()
@@ -145,7 +148,7 @@ impl Conditions {
             let profiles = profiles.ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
             profiles.machine(machine)?;
             if let Some(process) = &self.process_profile_key {
-                profiles.validate_process(machine, process)?;
+                profiles.resolve_process(machine, process, &self.strength)?;
             }
             if let Some(id) = &self.filament_id {
                 let setting = crate::products::load_setting(c, id, machine)?;
@@ -420,8 +423,8 @@ impl Store {
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
     let (name, version, conditions) = c
-        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type FROM plates WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)? }))
+        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? } }))
         })
         .optional()?
         .ok_or(Error::NotFound)?;
@@ -447,7 +450,7 @@ pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 fn save_conditions(c: &rusqlite::Connection, id: &str, v: &Conditions) -> Result<()> {
-    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id])?;
+    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops])?;
     Ok(())
 }
 fn insert_item(
@@ -562,6 +565,27 @@ mod tests {
         }
     }
     #[test]
+    fn strength_conditions_round_trip_and_reject_unknown_input() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut body = serde_json::to_value(edit("Strength", 1)).unwrap();
+        body["conditions"] = serde_json::json!({"sparse_infill_pattern":"gyroid","sparse_infill_density":22.5,"wall_loops":4});
+        let saved = store
+            .edit(None, serde_json::from_value(body.clone()).unwrap())
+            .unwrap();
+        let loaded = load(&store.db.connection().unwrap(), &saved.id).unwrap();
+        let values = serde_json::to_value(loaded.conditions).unwrap();
+        for key in [
+            "sparse_infill_pattern",
+            "sparse_infill_density",
+            "wall_loops",
+        ] {
+            assert_eq!(values[key], body["conditions"][key]);
+        }
+        body["conditions"]["unknown"] = true.into();
+        assert!(serde_json::from_value::<Edit>(body).is_err());
+    }
+    #[test]
     fn nullable_conditions_survive_save_reload_and_legacy_snapshots() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -571,7 +595,7 @@ mod tests {
             .unwrap();
         let value = serde_json::to_value(&saved).unwrap();
         assert!(value["conditions"].is_object());
-        assert_eq!(value["conditions"].as_object().unwrap().len(), 4);
+        assert_eq!(value["conditions"].as_object().unwrap().len(), 7);
         assert!(
             value["conditions"]
                 .as_object()
