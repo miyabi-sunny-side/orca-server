@@ -140,6 +140,18 @@ pub(crate) fn product_id(c: &Connection, filament_id: &str) -> Result<String> {
     .optional()?
     .ok_or(Error::NotFound)
 }
+pub(crate) fn load_setting(
+    c: &Connection,
+    filament: &str,
+    machine: &str,
+) -> Result<crate::filament::SettingData> {
+    let (base,raw):(String,String)=c.query_row("SELECT s.base_profile_key,s.overrides_json FROM filament_settings s JOIN filaments f ON f.product_id=s.product_id WHERE f.id=?1 AND s.machine_profile_key=?2",params![filament,machine],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::Conflict("Configure this material for the required machine and nozzle first"))?;
+    Ok(crate::filament::SettingData {
+        machine_profile_key: machine.to_owned(),
+        base_profile_key: base,
+        overrides_json: serde_json::from_str(&raw).map_err(std::io::Error::other)?,
+    })
+}
 pub(crate) fn settings(c: &Connection, id: &str) -> Result<Vec<ProductSetting>> {
     Ok(c.prepare("SELECT id,machine_profile_key,base_profile_key,overrides_json FROM filament_settings WHERE product_id=?1 ORDER BY machine_profile_key")?
         .query_map([id], |r| {

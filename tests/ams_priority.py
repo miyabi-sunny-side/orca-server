@@ -57,10 +57,18 @@ def main():
                 subprocess.run(['npm','run','test:e2e','--','--workers=1'],cwd=Path(__file__).resolve().parents[1]/'client',env=env,check=True)
             finally:control.shutdown();control.server_close()
         # Backup changes the physical tray, never the job identity, artifact or print send count.
-        job=rig.add(0);rig.next(job);until(lambda:len(rig.broker.prints)==1);rig.report("RUNNING");rig.phase("printing")
-        before=rig.api()['current'];rig.broker.send(dict(print=dict(command='push_status',msg=1,ams=dict(tray_now='1'),mc_percent=20)))
-        until(lambda:rig.api()['printer']['ams']['current_tray']==1)
-        after=rig.api()['current'];assert after['id']==before['id'] and after['attempt_id']==before['attempt_id'] and after['state']=='printing'
+        rig.full=report
+        preferred=resolve()['preferred_slot'];job=rig.add(0)
+        assert job['ams_slot_id']==preferred['id']
+        rig.next(job);until(lambda:len(rig.broker.prints)==1)
+        assert rig.broker.prints[0]['ams_mapping']==[preferred['slot_index']]
+        rig.full['print']['ams']['tray_now']=str(preferred['slot_index'])
+        rig.report("RUNNING");rig.phase("printing")
+        before=rig.api()['current'];switched=1 if preferred['slot_index']==0 else 0
+        rig.broker.send(dict(print=dict(command='push_status',msg=1,ams=dict(tray_now=str(switched)),mc_percent=20)))
+        until(lambda:rig.api()['current']['actual_ams_slot']==switched)
+        after=rig.api()['current'];assert after['ams_slot_id']==before['ams_slot_id']
+        assert after['id']==before['id'] and after['attempt_id']==before['attempt_id'] and after['state']=='printing'
         assert len(rig.broker.prints)==1 and len(rig.ftp.contents)==1
         sent=len(options)
         rig.stop();rig.launch();assert not inv()['current']

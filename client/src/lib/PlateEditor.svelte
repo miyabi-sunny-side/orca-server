@@ -1,4 +1,6 @@
 <script lang="ts">
+  import PlateConditions from "./PlateConditions.svelte";
+  import { emptyConditions } from "./plate";
   import { onMount } from "svelte";
   import { request, type Plate } from "./api";
   let {
@@ -13,6 +15,7 @@
     source: string | null;
     quantity: number;
   };
+  let conditions = $state({ ...emptyConditions });
   let step = $state(1),
     name = $state(""),
     selected = $state<Item[]>([]);
@@ -31,6 +34,7 @@
   const controller = new AbortController();
   onMount(() => {
     if (initial) {
+      conditions = { ...(initial.conditions ?? emptyConditions) };
       name = initial.name;
       selected = initial.models.map((m) => ({ ...m }));
       step = 2;
@@ -91,6 +95,7 @@
             name: name.trim(),
             ...(initial ? { version: initial.version } : {}),
             models: selected,
+            conditions,
           }),
         },
       );
@@ -196,6 +201,7 @@
       <p class="caption">
         合計 {total} 個 / 最大64個。SCADモデルは印刷準備の開始時に最新データを取得します。
       </p>
+      <PlateConditions bind:value={conditions} />
     </fieldset>
     {#if error}<div class="notice">
         <p role="alert">{error}</p>

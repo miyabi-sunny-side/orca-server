@@ -32,10 +32,11 @@ pub fn app_with_source(store: plates::Store, source: Option<scad::Source>) -> Ro
 }
 
 pub fn app_with_slicer(
-    store: plates::Store,
+    mut store: plates::Store,
     source: Option<scad::Source>,
     slicer: Option<slicer::Slicer>,
 ) -> Router {
+    store.profiles = slicer.as_ref().map(|s| s.profiles.clone());
     app()
         .merge(plate_api::router(store.clone()))
         .merge(scad::router(store, source))

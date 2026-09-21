@@ -98,6 +98,7 @@ pub(crate) fn validate_stl(data: &[u8]) -> Result<()> {
 pub struct Store {
     pub(crate) root: PathBuf,
     pub(crate) db: crate::database::Database,
+    pub(crate) profiles: Option<std::sync::Arc<crate::profiles::Profiles>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Model {
@@ -106,11 +107,68 @@ pub struct Model {
     pub source: Option<String>,
     pub quantity: u16,
 }
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Conditions {
+    pub required_machine_profile_key: Option<String>,
+    pub filament_id: Option<String>,
+    pub process_profile_key: Option<String>,
+    pub bed_type: Option<String>,
+}
+impl Conditions {
+    fn validate(
+        &self,
+        c: &rusqlite::Connection,
+        profiles: Option<&crate::profiles::Profiles>,
+    ) -> Result<()> {
+        if self
+            .bed_type
+            .as_ref()
+            .is_some_and(|bed| !crate::profiles::BEDS.contains(&bed.as_str()))
+        {
+            return Err(Error::Invalid("Unknown bed type"));
+        }
+        if let Some(id) = &self.filament_id {
+            crate::products::product_id(c, id)?;
+        }
+        if let Some(machine) = &self.required_machine_profile_key {
+            if !c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM printers WHERE machine_profile_key=?1)",
+                [machine],
+                |r| r.get::<_, bool>(0),
+            )? {
+                return Err(Error::Conflict(
+                    "Register a matching machine and nozzle before saving these conditions",
+                ));
+            }
+            let profiles = profiles.ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
+            profiles.machine(machine)?;
+            if let Some(process) = &self.process_profile_key {
+                profiles.validate_process(machine, process)?;
+            }
+            if let Some(id) = &self.filament_id {
+                let setting = crate::products::load_setting(c, id, machine)?;
+                let filament = crate::database::load_filaments(c)?
+                    .into_iter()
+                    .find(|f| f.id == *id)
+                    .ok_or(Error::NotFound)?;
+                profiles.resolve_filament(&setting, &filament.data.material)?;
+            }
+        } else if self.process_profile_key.is_some() {
+            return Err(Error::Invalid(
+                "Select the required machine before a process profile",
+            ));
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Plate {
     pub id: String,
     pub version: i64,
     pub name: String,
+    #[serde(default)]
+    pub conditions: Conditions,
     pub models: Vec<Model>,
 }
 #[derive(Clone, Deserialize)]
@@ -124,6 +182,8 @@ pub struct ItemEdit {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edit {
+    #[serde(default)]
+    pub conditions: Conditions,
     pub name: String,
     pub version: Option<i64>,
     pub models: Vec<ItemEdit>,
@@ -134,6 +194,7 @@ pub struct ModelInput {
     pub data: Vec<u8>,
 }
 pub struct Input {
+    pub conditions: Conditions,
     pub name: String,
     pub models: Vec<ModelInput>,
 }
@@ -195,6 +256,7 @@ impl Store {
         Ok(Self {
             root: fs::canonicalize(root)?,
             db,
+            profiles: None,
         })
     }
     /// Save uploaded STL originals or model references in `SQLite`.
@@ -224,10 +286,12 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let mut c = self.db.connection()?;
         let tx = c.transaction()?;
+        input.conditions.validate(&tx, self.profiles.as_deref())?;
         tx.execute(
             "INSERT INTO plates(id,name) VALUES (?1,?2)",
             rusqlite::params![id, input.name.trim()],
         )?;
+        save_conditions(&tx, &id, &input.conditions)?;
         for (position, (m, data)) in models.iter().enumerate() {
             insert_item(
                 &tx,
@@ -250,6 +314,7 @@ impl Store {
     /// Rejects unknown items, invalid quantities and concurrent edits.
     pub fn edit(&self, id: Option<&str>, edit: Edit) -> Result<Plate> {
         let Edit {
+            conditions,
             name,
             version,
             models,
@@ -258,6 +323,7 @@ impl Store {
         validate_items(&models)?;
         let mut c = self.db.connection()?;
         let tx = c.transaction()?;
+        conditions.validate(&tx, self.profiles.as_deref())?;
         let id = if let Some(id) = id {
             valid_id(id)?;
             if tx.execute(
@@ -279,6 +345,9 @@ impl Store {
             )?;
             id
         };
+        save_conditions(&tx, &id, &conditions)?;
+        // Invalidate queue command fences when a waiting plate changes. Active snapshots stay intact.
+        tx.execute("UPDATE printers SET queue_generation=queue_generation+1,queue_request=NULL WHERE id IN (SELECT printer_id FROM print_jobs WHERE plate_id=?1 AND state='queued')", [&id])?;
         let mut inputs = Vec::new();
         for m in &models {
             let original =
@@ -349,9 +418,9 @@ impl Store {
     }
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
-    let (name, version) = c
-        .query_row("SELECT name,version FROM plates WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
+    let (name, version, conditions) = c
+        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)? }))
         })
         .optional()?
         .ok_or(Error::NotFound)?;
@@ -361,8 +430,24 @@ pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
         id: id.into(),
         name,
         version,
+        conditions,
         models,
     })
+}
+pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {
+    c.execute_batch(
+        "ALTER TABLE plates ADD COLUMN required_machine_profile_key TEXT;
+        ALTER TABLE plates ADD COLUMN filament_id TEXT REFERENCES filaments(id);
+        ALTER TABLE plates ADD COLUMN process_profile_key TEXT;
+        ALTER TABLE plates ADD COLUMN bed_type TEXT;
+        UPDATE printers SET queue_request=NULL,queue_generation=queue_generation+1;
+        PRAGMA user_version=6;",
+    )?;
+    Ok(())
+}
+fn save_conditions(c: &rusqlite::Connection, id: &str, v: &Conditions) -> Result<()> {
+    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id])?;
+    Ok(())
 }
 fn insert_item(
     c: &rusqlite::Connection,
@@ -464,6 +549,7 @@ mod tests {
     use super::*;
     fn edit(name: &str, quantity: u16) -> Edit {
         Edit {
+            conditions: Conditions::default(),
             name: name.into(),
             version: None,
             models: vec![ItemEdit {
@@ -473,6 +559,46 @@ mod tests {
                 quantity,
             }],
         }
+    }
+    #[test]
+    fn nullable_conditions_survive_save_reload_and_legacy_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let raw = serde_json::json!({"name":"unconfigured", "models":[{"name":"part.stl","source":"part.stl","quantity":1}], "conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null}});
+        let saved = store
+            .edit(None, serde_json::from_value(raw).unwrap())
+            .unwrap();
+        let value = serde_json::to_value(&saved).unwrap();
+        assert!(value["conditions"].is_object());
+        assert_eq!(value["conditions"].as_object().unwrap().len(), 4);
+        assert!(
+            value["conditions"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(serde_json::Value::is_null)
+        );
+        assert_eq!(
+            Store::open(root.path()).unwrap().get(&saved.id).unwrap(),
+            saved
+        );
+        let mut legacy = value;
+        legacy.as_object_mut().unwrap().remove("conditions");
+        assert_eq!(serde_json::from_value::<Plate>(legacy).unwrap(), saved);
+        let c = store.db.connection().unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT required_machine_profile_key,filament_id,bed_type FROM plates",
+                [],
+                |r| Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?
+                ))
+            )
+            .unwrap(),
+            (None, None, None)
+        );
     }
     #[test]
     fn plate_storage_is_database_owned_and_does_not_freeze_scad_bytes() {
@@ -503,6 +629,7 @@ mod tests {
         let bytes = include_bytes!("../tests/fixtures/triangle.stl").to_vec();
         let plate = store
             .save(Input {
+                conditions: Conditions::default(),
                 name: "original".into(),
                 models: vec![ModelInput {
                     name: "part.stl".into(),
@@ -512,6 +639,7 @@ mod tests {
             })
             .unwrap();
         let request = |quantity| Edit {
+            conditions: Conditions::default(),
             name: "edited".into(),
             version: Some(plate.version),
             models: vec![ItemEdit {

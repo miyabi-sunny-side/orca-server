@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test('a plate saves model references and quantities without print settings', async ({ page }) => {
+test('a plate saves model references and quantities with nullable print conditions', async ({ page }) => {
   let saved: any;
   const plate = { id: '11111111-1111-4111-8111-111111111111', version: 1, name: '机の箱', models: [{ id: 'item-reference', name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] };
   await page.route('**/api/**', async route => {
@@ -17,8 +17,8 @@ test('a plate saves model references and quantities without print settings', asy
   await page.getByLabel('parts/box.stl の個数').fill('3');
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await expect(page).toHaveURL(/plates\/11111111-1111-4111-8111-111111111111$/);
-  await expect(page.getByRole('link', { name: '印刷キューへ' })).toBeVisible();
-  expect(saved).toEqual({ name: '机の箱', models: [{ name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] });
+  await expect(page.getByRole('button', { name: '印刷キューへ' })).toBeVisible();
+  expect(saved).toEqual({ name: '机の箱', conditions: {required_machine_profile_key:null,filament_id:null,process_profile_key:null,bed_type:null}, models: [{ name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] });
   await expect(page.getByText('parts/box.stl', { exact: true })).toBeVisible();
   await expect(page.getByText('3個', { exact: true })).toBeVisible();
 });

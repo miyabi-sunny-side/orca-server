@@ -21,24 +21,31 @@ def main():
     try:
         rig.launch();rig.seed()
         first=rig.add();second=rig.add(0)
-        request=rig.command(dict(type='add',plate_id=rig.plate['id'],specification=rig.specification()))
+        request=rig.command(rig.add_action())
         rig.api(body=request);rig.api(body=request)
         assert len(rig.api()['waiting'])==3
         last=rig.api()['waiting'][-1]
         rig.send(dict(type='move',job_id=last['id'],index=0));assert rig.api()['waiting'][0]['id']==last['id']
         rig.send(dict(type='remove',job_id=last['id']))
-        # Materials and nozzle requirements remain planned intent, distinct from physical slots.
-        stale=rig.command(dict(type='edit',job_id=first['id'],specification=rig.specification()))
-        mismatch=rig.specification(material=rig.materials[0]['id'])
-        rig.send(dict(type='edit',job_id=first['id'],specification=mismatch))
+        # Waiting jobs use current plate conditions. Incompatible or unloaded conditions hold Next.
+        stale=rig.command(dict(type='next',expected_job=first['id'],removed_job=None,cleared=True))
+        altered=rig.api('/api/plates/'+rig.plate['id']);altered.pop('id');altered['conditions']['filament_id']=None
+        rig.plate=rig.api('/api/plates/'+rig.plate['id'],altered,'PUT')
         rig.api(body=stale,expected=409);rig.next(first,409)
         assert rig.api()['waiting'][0]['state']=='queued' and rig.api()['waiting'][0]['hold_reason']
-        machine='Bambu Lab P1S 0.2 nozzle'
-        rig.api(f'/api/filaments/{rig.materials[1]["id"]}/settings',dict(machine_profile_key=machine,base_profile_key=FILAMENT,overrides_json={}),expected=201)
-        mismatch=rig.specification();mismatch['required_machine_profile_key']=machine
-        rig.send(dict(type='edit',job_id=first['id'],specification=mismatch));rig.next(first,409)
-        assert 'nozzle' in rig.api()['waiting'][0]['hold_reason']
-        rig.send(dict(type='edit',job_id=first['id'],specification=rig.specification()))
+        rig.configure()
+        settings={k:v for k,v in rig.api('/api/printers/p1').items() if k not in ('id','status','machine','configuration_error')}
+        requests=len(rig.broker.requests)
+        changed=dict(settings,machine_profile_key='Bambu Lab P1S 0.2 nozzle')
+        rig.api('/api/printers/p1',changed,'PUT');until(lambda:len(rig.broker.requests)>requests);rig.idle()
+        rig.next(first,409);assert 'nozzle' in rig.api()['waiting'][0]['hold_reason']
+        requests=len(rig.broker.requests)
+        rig.api('/api/printers/p1',settings,'PUT');until(lambda:len(rig.broker.requests)>requests);rig.idle()
+        # Connection changes invalidate manual AMS assignments; explicitly restore both slots.
+        for slot in rig.api('/api/printers/p1/ams')['slots']:
+            if slot['slot_index'] in (0,3):
+                material=rig.materials[0 if slot['slot_index']==0 else 1]
+                rig.api(f'/api/printers/p1/ams/{slot["id"]}',dict(revision=slot['revision'],filament_id=material['id']),'PUT',204)
         results['waiting_material_and_nozzle_mismatch_stays_editable']=True
         # Fresh bytes are selected at preparation, not enqueue; a failed source has no fallback.
         original=rig.files['parts/cube.stl'];rig.files.clear()

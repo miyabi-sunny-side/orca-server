@@ -67,7 +67,7 @@ cargo build --locked
 python3 tests/browser_cli.py "$ORCA_APPDIR" /tmp/orca-browser-check
 ```
 
-一時保存先とscad-live互換のHTTP応答を用意し、モデル選択・個数保存・待機設定の編集・印刷・取り外しを操作します。
+一時保存先とscad-live互換のHTTP応答を用意し、モデル選択・個数と条件の保存・直接追加・印刷・取り外しを操作します。
 RustサーバーとOrcaSlicerは実際に実行します。スクリーンショットと操作結果は指定した出力先へ保存します。
 MQTT/FTPSは隔離した接続先を使い、実プリンターには接続しません。起動したサーバーと一時データは終了時に片付けます。
 
@@ -81,6 +81,7 @@ python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
 python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
+PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
 REGISTRY_BROWSER=1 python3 tests/printer_registry.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-registry-check
 FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-filament-check
 ```
@@ -89,6 +90,7 @@ FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA
 `tests/fixtures/p1_print.gcode.3mf`はOrcaSlicer 2.4.2で生成した通信検証用ファイルです。
 生成元は同梱の20mm立方体STL 2個、プリンターはP1S 0.4mmです。
 工程は0.20mm Standard、材料はGeneric PLA High Speed、プレートはTextured PEI Plateです。
+プレート条件の検証ではnullable保存、所持機からの候補選択、実機別の装填照合、直接追加を確認します。
 キュー検証では準備時の最新データ固定、取り外し待ち、同時・重複操作、転送中AMS交換、開始前後の再起動とDB復元を通します。
 `print_fixture.py`のCLI代替は入力・状態遷移の検証用です。実際の配置・スライスは`tests/slicer_cli.py`とコンテナ検証で公式Orcaを実行します。
 CIでもMQTT・FTPS・キューの経路を検証します。実機や利用者のアクセスコードには接続しません。

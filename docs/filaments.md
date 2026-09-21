@@ -164,7 +164,7 @@ slotの`backup_peers`は機器が報告した補充候補の物理tray番号で�
 
 ## 保存と移行
 
-`<PLATES_DIR>/orca.sqlite3`のschema versionは5です。
+`<PLATES_DIR>/orca.sqlite3`のschema versionは6です。
 `filament_products`が製品の共通情報、`filaments`が色と製品への参照、`filament_settings`が製品の機種別設定を持ちます。
 `(product_id, machine_profile_key)`は一意です。`ams_slots`の`(printer_id, ams_id, slot_index)`も一意です。
 

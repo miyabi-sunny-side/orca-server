@@ -138,7 +138,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=5 => {}
+            1..=6 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -202,6 +202,9 @@ impl Database {
         }
         if version < 5 {
             crate::ams::migrate(&tx)?;
+        }
+        if version < 6 {
+            crate::plates::migrate_conditions(&tx)?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -499,6 +502,17 @@ mod tests {
             .unwrap(),
             "white"
         );
+        let conditions: (Option<String>,Option<String>,Option<String>,Option<String>)=c.query_row("SELECT required_machine_profile_key,filament_id,process_profile_key,bed_type FROM plates WHERE id='plate'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(conditions, (None, None, None, None));
+        assert_eq!(
+            c.query_row(
+                "SELECT attempt_id FROM print_jobs WHERE id='job'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "attempt"
+        );
         let job:(String,String,String,String)=c.query_row("SELECT filament_id,state,execution_json,attempt_json FROM print_jobs WHERE id='job'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
         assert_eq!(
             job,
@@ -668,7 +682,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

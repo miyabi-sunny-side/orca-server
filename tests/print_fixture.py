@@ -90,7 +90,7 @@ class Rig:
         self.full['print']['ams']['ams'][0]['tray'][3].update(tray_type='PLA', tray_color='00FFFFFF')
         self.process = None; self.log = (self.output/'server.log').open('a'); self.materials = []; self.plate = None
 
-    def api(self, path='/api/queue', body=None, method=None, expected=200, origin=None):
+    def api(self, path='/api/queue?printer_id=p1', body=None, method=None, expected=200, origin=None):
         headers = {'Content-Type':'application/json'}
         if origin: headers['Origin'] = origin
         req = urllib.request.Request(self.base+path,data=None if body is None else json.dumps(body).encode(),headers=headers,method=method)
@@ -137,7 +137,21 @@ class Rig:
         return dict(epoch=base['epoch'],generation=base['generation'],request_id=base['request_id'],action=action)
 
     def send(self, action, expected=200):return self.api(body=self.command(action),expected=expected)
-    def add(self, slot=3):return self.send(dict(type='add',plate_id=self.plate['id'],specification=self.specification(slot)))['waiting'][-1]
+    def configure(self, specification=None, plate=None):
+        plate=self.api('/api/plates/'+(plate or self.plate)['id'])
+        conditions={k:v for k,v in (specification or self.specification()).items() if k!='ams_slot_id'}
+        if plate['conditions']!=conditions:
+            plate=self.api('/api/plates/'+plate['id'],dict(name=plate['name'],version=plate['version'],models=plate['models'],conditions=conditions),'PUT')
+        if self.plate and plate['id']==self.plate['id']:self.plate=plate
+        return plate
+    def add_action(self, specification=None, plate=None):
+        plate=self.configure(specification,plate)
+        return dict(type='add',plate_id=plate['id'],plate_version=plate['version'])
+    def add(self, slot=3):
+        plate=self.plate
+        if slot!=3:
+            plate=self.api('/api/plates/import',dict(name=plate['name']+' white',models=[{k:v for k,v in m.items() if k!='id'} for m in plate['models']]),expected=201)
+        return self.send(self.add_action(self.specification(slot),plate))['waiting'][-1]
     def next(self, job, expected=200):
         q=self.api()
         return self.api(body=self.command(dict(type='next',expected_job=job['id'],removed_job=q['current']['id'] if q['current'] else None,cleared=True),q),expected=expected)

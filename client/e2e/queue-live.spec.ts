@@ -34,15 +34,21 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     required_machine_profile_key: 'Bambu Lab P1S 0.4 nozzle', process_profile_key: '0.20mm Standard @BBL X1C', bed_type: 'Textured PEI Plate' });
   const plates: Plate[] = (await (await request.get("/api/plates")).json()).sort((a: Plate, b: Plate) => a.name.localeCompare(b.name));
   let displayTheme = "dark";
+  const configure = async(index:number,slot:number) => {
+    const existing=await (await request.get(`/api/plates/${plates[index].id}`)).json();
+    const {ams_slot_id,...conditions}=specification(slot);
+    const response=await request.put(`/api/plates/${existing.id}`,{data:{name:existing.name,version:existing.version,models:existing.models,conditions}});
+    expect(response.status()).toBe(200);plates[index]=await response.json();
+  };
   const add = async (index: number, slot: number) => {
+    await configure(index,slot);
     await page.goto(`/plates/${plates[index].id}`);
-    await page.getByRole("link", { name: "印刷キューへ" }).click();
-    await page.getByRole("combobox", { name: "使用するAMSスロット" }).selectOption(specification(slot).ams_slot_id);
-    await page.getByRole('combobox', { name: '使用予定の材料' }).selectOption(specification(slot).filament_id);
     if (index === 0) await capture(`add-${displayTheme}`);
-    await page.getByRole("button", { name: "キューに追加", exact: true }).click();
+    await page.getByRole("button", { name: "印刷キューへ", exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/plates/${plates[index].id}$`));
+    await expect(page.getByRole("status")).toContainText("キューに追加しました");
+    await page.getByRole('link',{name:'キューを見る',exact:true}).click();
     await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
-    await expect(page.getByRole("status")).toHaveText("キューに追加しました");
   };
   const confirm = () => page.getByRole("checkbox", { name: "造形物を取り外し、空のビルドプレートを戻しました" });
   const next = () => page.getByRole("button", { name: "次を印刷", exact: true });
@@ -59,13 +65,12 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
     await page.emulateMedia({ colorScheme });
     const before = (await peer()).prints.length;
     await add(0, 0);
-    await page.getByRole('button', { name: '材料・印刷条件を変更' }).click();
-    await page.getByRole('combobox', { name: '使用予定の材料' }).selectOption(specification(3).filament_id);
-    await page.getByRole('combobox', { name: '使用するAMSスロット' }).selectOption(specification(3).ams_slot_id);
-    await expect(page.getByRole('button', { name: '待機設定を保存' })).toBeEnabled();
+    await page.getByRole('link', { name: 'プレートの条件を編集' }).click();
+    await page.getByRole('combobox', { name: 'フィラメント',exact:true }).selectOption(specification(3).filament_id);
     await capture(`edit-${colorScheme}`);
-    await page.getByRole('button', { name: '待機設定を保存' }).click();
-    await expect(page.getByRole('combobox', { name: '使用予定の材料' })).toHaveCount(0);
+    await page.getByRole('button', { name: '保存',exact:true }).click();
+    await expect(page.getByRole('button',{name:'構成を編集'})).toBeVisible();
+    await page.goto('/queue?printer_id=p1');
     await add(1, 0);
     await page.getByRole("button", { name: `${plates[1].name}を前へ` }).click();
     await expect(page.getByRole("listitem").first()).toContainText(plates[1].name);
@@ -149,7 +154,8 @@ test("mobile queue drives isolated P1 once per confirmed action", async ({ page,
   let staleReads = true;
   await page.route("**/api/queue?*", route => staleReads && route.request().method() === "GET" ? route.fulfill({ json: stale }) : route.continue());
   await confirm().check();
-  await command({ type: "add", plate_id: plates[0].id, specification: specification(3) });
+  await configure(0,3);
+  await command({ type: "add", plate_id: plates[0].id, plate_version: plates[0].version });
   await command({ type: "next", expected_job: stale.waiting[0].id, removed_job: stale.current?.id ?? null, cleared: true });
   await expect.poll(async () => (await peer()).prints.length).toBe(6);
   await report("RUNNING"); await report("FINISH");

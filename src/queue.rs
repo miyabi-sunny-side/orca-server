@@ -48,11 +48,7 @@ pub(crate) struct Command {
 enum Action {
     Add {
         plate_id: String,
-        specification: Specification,
-    },
-    Edit {
-        job_id: String,
-        specification: Specification,
+        plate_version: i64,
     },
     Move {
         job_id: String,
@@ -147,14 +143,6 @@ fn record(c: &Connection, pid: &str, command: &Command) -> Result<()> {
     )?;
     Ok(())
 }
-fn load_setting(c: &Connection, s: &Specification) -> Result<crate::filament::SettingData> {
-    let (base,raw):(String,String)=c.query_row("SELECT s.base_profile_key,s.overrides_json FROM filament_settings s JOIN filaments f ON f.product_id=s.product_id WHERE f.id=?1 AND s.machine_profile_key=?2",params![s.filament_id,s.required_machine_profile_key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::Conflict("Configure this material for the required machine and nozzle first"))?;
-    Ok(crate::filament::SettingData {
-        machine_profile_key: s.required_machine_profile_key.clone(),
-        base_profile_key: base,
-        overrides_json: serde_json::from_str(&raw).map_err(std::io::Error::other)?,
-    })
-}
 fn resolve(c: &Connection, pid: &str, s: &Specification, profiles: &Profiles) -> Result<Resolved> {
     let exists: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM ams_slots WHERE id=?1 AND printer_id=?2)",
@@ -166,7 +154,8 @@ fn resolve(c: &Connection, pid: &str, s: &Specification, profiles: &Profiles) ->
             "Select an AMS slot belonging to this printer",
         ));
     }
-    let setting = load_setting(c, s)?;
+    let setting =
+        crate::products::load_setting(c, &s.filament_id, &s.required_machine_profile_key)?;
     let filament = crate::database::load_filaments(c)?
         .into_iter()
         .find(|f| f.id == s.filament_id)
@@ -188,15 +177,15 @@ fn resolve(c: &Connection, pid: &str, s: &Specification, profiles: &Profiles) ->
         filament,
     })
 }
-fn ready(
+fn available(
     c: &Connection,
     device: &Device,
     s: &Specification,
     status: &Status,
     profiles: &Profiles,
 ) -> Result<(Resolved, i64, u8)> {
-    if !status.ready_to_print || !status.synchronized {
-        return Err(Error::Conflict("Wait for a current, ready printer report"));
+    if !status.synchronized {
+        return Err(Error::Conflict("Wait for a current printer report"));
     }
     let current: String = c.query_row(
         "SELECT machine_profile_key FROM printers WHERE id=?1",
@@ -230,7 +219,18 @@ fn ready(
         ));
     }
     let (ams,slot,assigned,present,revision):(u16,u8,Option<String>,Option<bool>,i64)=c.query_row("SELECT ams_id,slot_index,filament_id,present,revision FROM ams_slots WHERE printer_id=?1 AND id=?2",params![device.id,s.ams_slot_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
-    if assigned.as_deref() != Some(&s.filament_id) || present != Some(true) || ams >= 4 {
+    if assigned.is_none()
+        || present != Some(true)
+        || ams >= 4
+        || !crate::ams::resolve(
+            c,
+            &device.id,
+            &s.filament_id,
+            &s.required_machine_profile_key,
+        )?
+        .iter()
+        .any(|candidate| candidate.id == s.ams_slot_id)
+    {
         return Err(Error::Conflict(
             "Selected AMS slot does not contain the planned material",
         ));
@@ -247,6 +247,48 @@ fn ready(
         ));
     }
     Ok((resolved, revision, number))
+}
+fn ready(
+    c: &Connection,
+    device: &Device,
+    s: &Specification,
+    status: &Status,
+    profiles: &Profiles,
+) -> Result<(Resolved, i64, u8)> {
+    if !status.ready_to_print {
+        return Err(Error::Conflict("Wait for a current, ready printer report"));
+    }
+    available(c, device, s, status, profiles)
+}
+fn planned(c: &Connection, device: &Device, plate: &crate::plates::Plate) -> Result<Specification> {
+    let condition = &plate.conditions;
+    let missing =
+        || Error::Conflict("Complete the plate machine, material, process and bed conditions");
+    let machine = condition
+        .required_machine_profile_key
+        .as_ref()
+        .ok_or_else(missing)?;
+    let filament = condition.filament_id.as_ref().ok_or_else(missing)?;
+    let process = condition.process_profile_key.as_ref().ok_or_else(missing)?;
+    let bed = condition.bed_type.as_ref().ok_or_else(missing)?;
+    if machine != &device.settings.machine_profile_key {
+        return Err(Error::Conflict(
+            "Required machine or nozzle differs from the registered configuration",
+        ));
+    }
+    let slot = crate::ams::resolve(c, &device.id, filament, machine)?
+        .into_iter()
+        .find(|s| s.ams_id < 4)
+        .ok_or(Error::Conflict(
+            "No confirmed AMS slot contains the plate material",
+        ))?;
+    Ok(Specification {
+        ams_slot_id: slot.id,
+        filament_id: filament.clone(),
+        required_machine_profile_key: machine.clone(),
+        process_profile_key: process.clone(),
+        bed_type: bed.clone(),
+    })
 }
 fn message(error: &Error) -> String {
     match error {
@@ -307,22 +349,29 @@ impl Service {
             .and_then(|c| jobs(&c, &self.device.id))
             .map_or(true, |j| j.iter().any(|j| j.state != "queued"))
     }
-    pub(crate) async fn read(&self) -> Result<Value> {
-        let status = self.printer.status().await;
-        if !self.device.id.is_empty() {
-            self.printer.ams_inventory(None).await?;
-        }
+    pub(crate) async fn read(&self, plate_id: Option<&str>) -> Result<Value> {
+        let (_observation, status) = self.printer.observed_status().await?;
         let c = self.store.db.connection()?;
         let list = jobs(&c, &self.device.id)?;
         let current = list.iter().find(|j| j.state != "queued");
         let mut waiting = Vec::new();
         for job in list.iter().filter(|j| j.state == "queued") {
             let mut value = json!(job);
-            let hold = self
-                .slicer
-                .as_ref()
-                .ok_or(Error::Unavailable("OrcaSlicer is not configured"))
-                .and_then(|s| ready(&c, &self.device, &job.specification, &status, &s.profiles));
+            let plate = crate::plates::load(&c, &job.plate_id)?;
+            value["name"] = json!(plate.name);
+            value["plate_version"] = json!(plate.version);
+            for key in [
+                "required_machine_profile_key",
+                "filament_id",
+                "process_profile_key",
+                "bed_type",
+            ] {
+                value[key] = json!(plate.conditions)[key].clone();
+            }
+            value["ams_slot_id"] = Value::Null;
+            let hold = self.plan(&c, &plate, &status).map(|spec| {
+                value["ams_slot_id"] = json!(spec.ams_slot_id);
+            });
             value["hold_reason"] = hold.err().map_or(Value::Null, |e| json!(message(&e)));
             waiting.push(value);
         }
@@ -341,15 +390,36 @@ impl Service {
             && current.is_some_and(|j| {
                 matches!(j.state.as_str(), "needs_attention" | "awaiting_removal")
             });
+        let admission = plate_id.map(|id| -> Result<Value> {
+            let plate = crate::plates::load(&c, id)?;
+            let result = self.admission(&c, &plate, &status);
+            Ok(json!({"plate_version":plate.version,"allowed":result.is_ok(),"reason":result.err().map(|e|message(&e))}))
+        }).transpose()?;
+        let current_view = current.map(|job| {
+            let mut value = json!(job);
+            value["actual_ams_slot"] = if job.state == "printing" && status.synchronized {
+                json!(
+                    status
+                        .ams
+                        .as_ref()
+                        .and_then(|ams| ams.current_tray)
+                        .filter(|n| *n < 16)
+                )
+            } else {
+                Value::Null
+            };
+            value
+        });
         Ok(
-            json!({"epoch":self.epoch,"generation":generation(&c,&self.device.id)?,"request_id":uuid::Uuid::new_v4().to_string(),"current":current,"waiting":waiting,"printer":status,"allowed":{"next":next,"retry":retry,"discard":discard}}),
+            json!({"epoch":self.epoch,"generation":generation(&c,&self.device.id)?,"request_id":uuid::Uuid::new_v4().to_string(),"current":current_view,"admission":admission,"waiting":waiting,"printer":status,"allowed":{"next":next,"retry":retry,"discard":discard}}),
         )
     }
     pub(crate) async fn apply(self: &Arc<Self>, command: Command) -> Result<Value> {
         let _guard = self.lock.lock().await;
-        let status = self.printer.status().await;
-        self.printer.ams_inventory(None).await?;
-        let preparation = self.mutate(&command, &status)?;
+        let preparation = {
+            let (_observation, status) = self.printer.observed_status().await?;
+            self.mutate(&command, &status)?
+        };
         self.printer.forget_retired().await?;
         if let Some(preparation) = preparation {
             let service = self.clone();
@@ -366,7 +436,7 @@ impl Service {
             });
         }
         self.cleanup()?;
-        self.read().await
+        self.read(None).await
     }
     fn check_request(&self, c: &Connection, command: &Command) -> Result<bool> {
         // A replaced registry entry must not admit work with old machine/nozzle settings.
@@ -411,7 +481,7 @@ impl Service {
         let all = jobs(&tx, &self.device.id)?;
         let waiting: Vec<_> = all.iter().filter(|j| j.state == "queued").collect();
         let current = all.iter().find(|j| j.state != "queued");
-        if self.change_waiting(&tx, &command.action, &waiting)? {
+        if self.change_waiting(&tx, &command.action, &waiting, status)? {
             record(&tx, &self.device.id, command)?;
             tx.commit()?;
             return Ok(None);
@@ -485,7 +555,13 @@ impl Service {
         tx.commit()?;
         Ok(preparation)
     }
-    fn change_waiting(&self, tx: &Connection, action: &Action, waiting: &[&Job]) -> Result<bool> {
+    fn change_waiting(
+        &self,
+        tx: &Connection,
+        action: &Action,
+        waiting: &[&Job],
+        status: &Status,
+    ) -> Result<bool> {
         let selected = |id: &str| {
             waiting
                 .iter()
@@ -496,32 +572,14 @@ impl Service {
         match action {
             Action::Add {
                 plate_id,
-                specification,
+                plate_version,
             } => {
-                let slicer = self
-                    .slicer
-                    .as_ref()
-                    .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
-                resolve(tx, &self.device.id, specification, &slicer.profiles)?;
                 let plate = crate::plates::load(tx, plate_id)?;
-                if waiting.len() >= 100 {
-                    return Err(Error::Conflict("Queue holds at most 100 waiting jobs"));
+                if plate.version != *plate_version {
+                    return Err(Error::Conflict("Plate changed; reload before adding"));
                 }
-                let s = specification;
+                let s = self.admission(tx, &plate, status)?;
                 tx.execute("INSERT INTO print_jobs(id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,state,position) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',coalesce((SELECT max(position)+1 FROM print_jobs WHERE printer_id=?2),0))",params![uuid::Uuid::new_v4().to_string(),self.device.id,plate_id,plate.name,s.ams_slot_id,s.filament_id,s.required_machine_profile_key,s.process_profile_key,s.bed_type])?;
-            }
-            Action::Edit {
-                job_id,
-                specification,
-            } => {
-                selected(job_id)?;
-                let slicer = self
-                    .slicer
-                    .as_ref()
-                    .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
-                resolve(tx, &self.device.id, specification, &slicer.profiles)?;
-                let s = specification;
-                tx.execute("UPDATE print_jobs SET ams_slot_id=?1,filament_id=?2,required_machine_profile_key=?3,process_profile_key=?4,bed_type=?5,last_error=NULL WHERE id=?6",params![s.ams_slot_id,s.filament_id,s.required_machine_profile_key,s.process_profile_key,s.bed_type,job_id])?;
             }
             Action::Move { job_id, index } => {
                 selected(job_id)?;
@@ -552,6 +610,36 @@ impl Service {
         }
         Ok(true)
     }
+    fn admission(
+        &self,
+        c: &Connection,
+        plate: &crate::plates::Plate,
+        status: &Status,
+    ) -> Result<Specification> {
+        let count: i64 = c.query_row(
+            "SELECT count(*) FROM print_jobs WHERE printer_id=?1 AND state='queued'",
+            [&self.device.id],
+            |r| r.get(0),
+        )?;
+        if count >= 100 {
+            return Err(Error::Conflict("Queue holds at most 100 waiting jobs"));
+        }
+        self.plan(c, plate, status)
+    }
+    fn plan(
+        &self,
+        c: &Connection,
+        plate: &crate::plates::Plate,
+        status: &Status,
+    ) -> Result<Specification> {
+        let slicer = self
+            .slicer
+            .as_ref()
+            .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
+        let specification = planned(c, &self.device, plate)?;
+        available(c, &self.device, &specification, status, &slicer.profiles)?;
+        Ok(specification)
+    }
     fn reserve(
         &self,
         c: &Connection,
@@ -563,24 +651,73 @@ impl Service {
             .slicer
             .as_ref()
             .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
-        let (settings, slot_revision, ams_slot) = ready(
-            c,
-            &self.device,
-            &job.specification,
-            status,
-            &slicer.profiles,
-        )?;
-        let execution = Execution {
-            plate: crate::plates::load(c, &job.plate_id)?,
-            settings,
-            slot_revision,
-            ams_slot,
-        };
-        let originals = c
-            .prepare("SELECT original FROM plate_items WHERE plate_id=?1 ORDER BY position")?
-            .query_map([&job.plate_id], |r| r.get::<_, Option<Vec<u8>>>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut job = job.clone();
+        let execution = if job.state == "queued" {
+            let plate = crate::plates::load(c, &job.plate_id)?;
+            job.specification = planned(c, &self.device, &plate)?;
+            let (settings, slot_revision, ams_slot) = ready(
+                c,
+                &self.device,
+                &job.specification,
+                status,
+                &slicer.profiles,
+            )?;
+            Execution {
+                plate,
+                settings,
+                slot_revision,
+                ams_slot,
+            }
+        } else {
+            let (_, revision, _) = ready(
+                c,
+                &self.device,
+                &job.specification,
+                status,
+                &slicer.profiles,
+            )?;
+            let raw: String = c.query_row(
+                "SELECT execution_json FROM print_jobs WHERE id=?1",
+                [&job.id],
+                |r| r.get(0),
+            )?;
+            let mut execution: Execution =
+                serde_json::from_str(&raw).map_err(std::io::Error::other)?;
+            execution.slot_revision = revision;
+            execution
+        };
+        let mut originals = Vec::new();
+        let mut index = 0;
+        for model in &execution.plate.models {
+            let cached = job
+                .attempt_id
+                .as_ref()
+                .map(|attempt| directory(&self.store, &job.id, attempt))
+                .transpose()?
+                .map(|path| path.join(format!("{index}.stl")))
+                .filter(|path| path.is_file())
+                .map(std::fs::read)
+                .transpose()?;
+            let original = if cached.is_some() {
+                cached
+            } else if model.source.is_none() {
+                c.query_row(
+                    "SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2",
+                    params![job.plate_id, model.id],
+                    |r| r.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()?
+                .flatten()
+                .ok_or(Error::Conflict(
+                    "Original model for this attempt is unavailable",
+                ))?
+                .into()
+            } else {
+                None
+            };
+            originals.push(original);
+            index += usize::from(model.quantity);
+        }
         job.state = "preparing".into();
         job.name.clone_from(&execution.plate.name);
         let attempt = uuid::Uuid::new_v4().to_string();
@@ -590,7 +727,7 @@ impl Service {
         if let Some(id) = completed {
             c.execute("UPDATE print_jobs SET state='completed' WHERE id=?1", [id])?;
         }
-        c.execute("UPDATE print_jobs SET name=?1,state='preparing',attempt_id=?2,artifact_path=?3,execution_json=?4,attempt_json=NULL,last_error=NULL WHERE id=?5",params![job.name,attempt,job.artifact_path,serde_json::to_string(&execution).map_err(std::io::Error::other)?,job.id])?;
+        c.execute("UPDATE print_jobs SET name=?1,state='preparing',attempt_id=?2,artifact_path=?3,execution_json=?4,attempt_json=NULL,last_error=NULL,ams_slot_id=?6,filament_id=?7,required_machine_profile_key=?8,process_profile_key=?9,bed_type=?10 WHERE id=?5",params![job.name,attempt,job.artifact_path,serde_json::to_string(&execution).map_err(std::io::Error::other)?,job.id,job.specification.ams_slot_id,job.specification.filament_id,job.specification.required_machine_profile_key,job.specification.process_profile_key,job.specification.bed_type])?;
         Ok(Preparation {
             job,
             execution,
@@ -609,14 +746,16 @@ impl Service {
         let mut count = 0;
         let mut remaining = crate::plates::MAX_UPLOAD;
         for (model, original) in execution.plate.models.iter().zip(originals) {
-            let bytes = if let Some(source) = &model.source {
+            let bytes = if let Some(bytes) = original {
+                bytes
+            } else if let Some(source) = &model.source {
                 self.source
                     .as_ref()
                     .ok_or(Error::Unavailable("SCAD_LIVE_URL is not configured"))?
                     .model(source, remaining)
                     .await?
             } else {
-                original.ok_or(Error::Unavailable("Uploaded original is unavailable"))?
+                return Err(Error::Unavailable("Uploaded original is unavailable"));
             };
             let size = bytes
                 .len()
@@ -757,7 +896,10 @@ impl Database {
             .into_iter()
             .find(|f| f.id == filament_id)
             .ok_or(Error::NotFound)?;
-        if assigned.as_deref() != Some(&filament_id)
+        if assigned.is_none()
+            || !crate::ams::resolve(&c, &device.id, &filament_id, &machine)?
+                .iter()
+                .any(|s| s.id == slot_id)
             || revision != execution.slot_revision
             || present != Some(true)
             || serde_json::to_value(material).ok()
@@ -809,7 +951,7 @@ mod tests {
     }
     async fn service(root: &std::path::Path, id: &str) -> Service {
         use std::os::unix::fs::PermissionsExt;
-        let store = Store::open(root.join("data")).unwrap();
+        let mut store = Store::open(root.join("data")).unwrap();
         let device = Device {
             id: id.into(),
             settings: crate::database::Settings {
@@ -877,6 +1019,7 @@ mod tests {
         let slicer = Slicer::new(app, std::time::Duration::from_secs(1))
             .await
             .unwrap();
+        store.profiles = Some(slicer.profiles.clone());
         Service::new(
             store,
             device,
@@ -884,17 +1027,6 @@ mod tests {
             Some(slicer),
             None,
         )
-    }
-    fn specification(service: &Service) -> Specification {
-        Specification {
-            ams_slot_id: service.store.db.ams_slots(&service.device.id).unwrap()[0]
-                .id
-                .clone(),
-            filament_id: "pla".into(),
-            required_machine_profile_key: MACHINE.into(),
-            process_profile_key: Selection::default().process,
-            bed_type: crate::profiles::BEDS[0].into(),
-        }
     }
     fn command(s: &Service, action: Action) -> Command {
         Command {
@@ -910,6 +1042,12 @@ mod tests {
             .edit(
                 None,
                 crate::plates::Edit {
+                    conditions: crate::plates::Conditions {
+                        required_machine_profile_key: Some(MACHINE.into()),
+                        filament_id: Some("pla".into()),
+                        process_profile_key: Some(Selection::default().process),
+                        bed_type: Some(crate::profiles::BEDS[0].into()),
+                    },
                     name: "parts".into(),
                     version: None,
                     models: vec![crate::plates::ItemEdit {
@@ -925,7 +1063,7 @@ mod tests {
             s,
             Action::Add {
                 plate_id: plate.id,
-                specification: specification(s),
+                plate_version: plate.version,
             },
         );
         s.mutate(&command, &status()).unwrap();
@@ -935,6 +1073,157 @@ mod tests {
             .unwrap()
             .id
             .clone()
+    }
+    fn edit_conditions(s: &Service, id: &str, conditions: Value) -> crate::plates::Plate {
+        let mut edit = json!(s.store.get(id).unwrap());
+        edit.as_object_mut().unwrap().remove("id");
+        edit["conditions"] = conditions;
+        s.store
+            .edit(Some(id), serde_json::from_value(edit).unwrap())
+            .unwrap()
+    }
+    #[tokio::test]
+    async fn plate_conditions_gate_addition_and_freeze_only_at_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let raw =
+            json!({"name":"front","models":[{"name":"part.stl","source":"part.stl","quantity":2}]});
+        let plate = s
+            .store
+            .edit(None, serde_json::from_value(raw).unwrap())
+            .unwrap();
+        let add = || {
+            command(&s, serde_json::from_value(json!({"type":"add","plate_id":plate.id,"plate_version":s.store.get(&plate.id).unwrap().version})).unwrap())
+        };
+        assert!(s.mutate(&add(), &status()).is_err());
+        let configured = json!({"required_machine_profile_key":MACHINE,"filament_id":"pla","process_profile_key":Selection::default().process,"bed_type":crate::profiles::BEDS[0]});
+        for missing in [
+            "required_machine_profile_key",
+            "filament_id",
+            "bed_type",
+            "process_profile_key",
+        ] {
+            let mut conditions = configured.clone();
+            conditions[missing] = Value::Null;
+            if missing == "required_machine_profile_key" {
+                conditions["process_profile_key"] = Value::Null;
+            }
+            edit_conditions(&s, &plate.id, conditions);
+            assert!(s.mutate(&add(), &status()).is_err(), "{missing}");
+        }
+        let set_conditions = |bed: &str| {
+            let mut value = configured.clone();
+            value["bed_type"] = json!(bed);
+            edit_conditions(&s, &plate.id, value)
+        };
+        set_conditions(crate::profiles::BEDS[0]);
+        let mut stale = status();
+        stale.synchronized = false;
+        assert!(s.mutate(&add(), &stale).is_err());
+        let slot = s.store.db.ams_slots("one").unwrap().remove(0);
+        s.store
+            .db
+            .map_slot("one", &slot.id, slot.revision, None)
+            .unwrap();
+        assert!(s.mutate(&add(), &status()).is_err());
+        let slot = s.store.db.ams_slots("one").unwrap().remove(0);
+        s.store
+            .db
+            .map_slot("one", &slot.id, slot.revision, Some("pla"))
+            .unwrap();
+        let mut busy = status();
+        busy.ready_to_print = false;
+        let request = add();
+        s.mutate(&request, &busy).unwrap();
+        s.mutate(&request, &busy).unwrap();
+        let old = jobs(&s.store.db.connection().unwrap(), "one").unwrap();
+        assert_eq!(old.len(), 1);
+        let before = command(
+            &s,
+            Action::Next {
+                expected_job: old[0].id.clone(),
+                removed_job: None,
+                cleared: true,
+            },
+        );
+        let changed = set_conditions(crate::profiles::BEDS[3]);
+        assert!(s.mutate(&before, &status()).is_err());
+        let prep = s
+            .mutate(&command(&s, before.action.clone()), &status())
+            .unwrap()
+            .unwrap();
+        assert_eq!(prep.execution.plate.version, changed.version);
+        assert_eq!(
+            prep.execution.settings.selection.bed,
+            crate::profiles::BEDS[3]
+        );
+        assert_eq!(prep.job.specification.bed_type, crate::profiles::BEDS[3]);
+        let snapshot = || {
+            s.store
+                .db
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT execution_json FROM print_jobs WHERE id=?1",
+                    [&old[0].id],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        let frozen = snapshot();
+        set_conditions(crate::profiles::BEDS[0]);
+        assert_eq!(snapshot(), frozen);
+        s.mutate(&add(), &busy).unwrap();
+        assert_eq!(
+            jobs(&s.store.db.connection().unwrap(), "one")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    #[tokio::test]
+    async fn addition_limit_matches_admission_and_recovers_after_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let mut last = String::new();
+        for _ in 0..99 {
+            last = add(&s);
+        }
+        let job = jobs(&s.store.db.connection().unwrap(), "one")
+            .unwrap()
+            .into_iter()
+            .find(|j| j.id == last)
+            .unwrap();
+        let plate = s.store.get(&job.plate_id).unwrap();
+        assert!(
+            s.admission(&s.store.db.connection().unwrap(), &plate, &status())
+                .is_ok()
+        );
+        add(&s);
+        assert!(
+            s.admission(&s.store.db.connection().unwrap(), &plate, &status())
+                .is_err()
+        );
+        let rejected = command(
+            &s,
+            Action::Add {
+                plate_id: plate.id.clone(),
+                plate_version: plate.version,
+            },
+        );
+        assert!(s.mutate(&rejected, &status()).is_err());
+        assert_eq!(
+            jobs(&s.store.db.connection().unwrap(), "one")
+                .unwrap()
+                .len(),
+            100
+        );
+        s.mutate(&command(&s, Action::Remove { job_id: last }), &status())
+            .unwrap();
+        assert!(
+            s.admission(&s.store.db.connection().unwrap(), &plate, &status())
+                .is_ok()
+        );
     }
     #[test]
     fn command_fences_reject_stale_reordered_modified_and_restored_requests() {
@@ -966,16 +1255,6 @@ mod tests {
         let id = add(&first);
         let next = add(&first);
         let other = add(&second);
-        let mut spec = specification(&first);
-        spec.ams_slot_id = specification(&second).ams_slot_id;
-        let edit = command(
-            &first,
-            Action::Edit {
-                job_id: id.clone(),
-                specification: spec,
-            },
-        );
-        assert!(first.mutate(&edit, &status()).is_err());
         let stale = command(&first, Action::Remove { job_id: id.clone() });
         first
             .mutate(

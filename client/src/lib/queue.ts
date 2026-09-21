@@ -5,7 +5,13 @@ export type Specification = {
   process_profile_key: string;
   bed_type: string;
 };
-export type Job = Specification & {
+export type Job = {
+  ams_slot_id: string | null;
+  filament_id: string | null;
+  required_machine_profile_key: string | null;
+  process_profile_key: string | null;
+  bed_type: string | null;
+  actual_ams_slot?: number | null;
   id: string;
   plate_id: string;
   name: string;
@@ -46,10 +52,14 @@ export type QueueState = {
   waiting: Job[];
   current: Job | null;
   printer: Printer;
+  admission?: {
+    plate_version: number;
+    allowed: boolean;
+    reason: string | null;
+  } | null;
 };
 export type Action =
-  | { type: "add"; plate_id: string; specification: Specification }
-  | { type: "edit"; job_id: string; specification: Specification }
+  | { type: "add"; plate_id: string; plate_version: number }
   | { type: "move"; job_id: string; index: number }
   | { type: "remove"; job_id: string }
   | {
@@ -98,10 +108,21 @@ export const phaseText = {
   needs_attention: "確認が必要です",
 };
 export const failureText: Record<string, string> = {
+  "Queue holds at most 100 waiting jobs":
+    "待機キューは100件までです。不要な待機分を削除してください。",
+  "Complete the plate machine, material, process and bed conditions":
+    "プレートの機種・材料・工程・ビルドプレートを設定してください。",
+  "No confirmed AMS slot contains the plate material":
+    "この実機のAMSに指定材料の装填を確認できません。AMSの材料を確認してください。",
+  "Wait for a current printer report":
+    "プリンターの接続・装填状態を確認中です。",
+  "Configure this material for the required machine and nozzle first":
+    "要求する機種・ノズル用の材料設定を登録してください。",
+
   "Wait for a current, ready printer report":
     "プリンターの同期・待機状態を確認中です。",
   "Required machine or nozzle differs from the registered configuration":
-    "要求する機種・ノズルが登録値と異なります。機器または待機設定を確認してください。",
+    "要求する機種・ノズルが登録値と異なります。機器またはプレート条件を確認してください。",
   "Selected AMS slot does not contain the planned material":
     "AMSの現在の材料が使用予定と異なるか、装填を確認できません。",
   "Selected AMS slot is not confirmed present":

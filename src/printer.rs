@@ -437,6 +437,22 @@ impl Printer {
         self.state.lock().await.status(now())
     }
 
+    // Keep report updates and AMS edits outside the queue admission transaction.
+    pub(crate) async fn observed_status(
+        &self,
+    ) -> Result<(
+        tokio::sync::MutexGuard<'_, State>,
+        crate::printer_state::Status,
+    )> {
+        let state = self.state.lock().await;
+        let status = state.status(now());
+        if let Some((db, device)) = self.inventory.clone() {
+            let observed = state.status(now());
+            crate::plate_api::blocking(move || db.observe_ams(&device, &observed)).await?;
+        }
+        Ok((state, status))
+    }
+
     pub(crate) async fn ams_inventory(
         &self,
         change: Option<crate::ams::Change>,

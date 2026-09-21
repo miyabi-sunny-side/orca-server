@@ -1,8 +1,8 @@
 # プレートAPI
 
-プレートは再利用するモデルの構成です。名前と、モデルの参照・個数を保存します。
+プレートは再利用するモデルの構成です。名前、モデルの参照・個数、印刷条件を保存します。
 SCADモデルのSTLは印刷準備の開始時に取得します。直接アップロードしたSTLはSQLite内に保管します。
-起動方法は[README](../README.md)、印刷条件の指定は[キューAPI](queue.md)を参照してください。
+起動方法は[README](../README.md)、キューへの追加は[キューAPI](queue.md)を参照してください。
 
 ## 保存と検索
 
@@ -17,7 +17,8 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 新規保存は201とプレートJSONを返します。`id`は固定の識別子、`version`は編集の競合を防ぐ整数です。
 `models`には各項目の`id`、`name`、`source`、`quantity`を返します。
 `source`はSCADの相対パス、直接アップロードでは`null`です。アップロード直後の個数は1です。
-工程・材料設定・生成3MF・過去のrevisionはプレートに含みません。
+`conditions`は要求する機種/ノズル、材料、工程、ビルドプレートを持ちます。未指定の値は`null`です。
+材料の温度は共通設定を参照し、プレートへコピーしません。生成3MFや過去のrevisionも含みません。
 
 `q`は名前とモデル名を大文字・小文字を区別せず部分列で絞り込みます。
 連続一致・単語の先頭・ファイル名の一致を優先し、同順位は表示名、IDの順に並びます。
@@ -43,12 +44,12 @@ URL内の資格情報・query・fragment、リダイレクトは受け付けま�
 curl --fail http://127.0.0.1:3000/api/scad/models
 curl --fail http://127.0.0.1:3000/api/plates/import \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Desk parts","models":[{"name":"Box","source":"parts/box.stl","quantity":2}]}'
+  -d '{"name":"Desk parts","models":[{"name":"box.stl","source":"parts/box.stl","quantity":2}]}'
 ```
 
 一覧には`q`で部分列検索を指定できます。`source`には一覧の相対パスをそのまま渡します。
 空白・日本語・`%`のURL符号化はサーバーが行います。
-保存時は参照と個数だけを登録し、STL取得やスライスは行いません。
+保存時は構成と条件を登録し、STL取得やスライスは行いません。
 参照先が印刷時に消失・取得失敗した場合は要確認となり、以前のSTLで代用しません。
 一覧未設定は503、上流の通信・一覧異常は502です。各上流要求は15秒、一覧は1 MiBまでです。
 
@@ -60,9 +61,15 @@ curl --fail http://127.0.0.1:3000/api/plates/import \
 {
   "version": 1,
   "name": "Desk parts",
+  "conditions": {
+    "required_machine_profile_key": null,
+    "filament_id": null,
+    "process_profile_key": null,
+    "bed_type": null
+  },
   "models": [
-    {"id": "既存のモデルID", "name": "Box", "source": "parts/box.stl", "quantity": 3},
-    {"name": "Holder", "source": "parts/holder.stl", "quantity": 1}
+    {"id": "既存のモデルID", "name": "box.stl", "source": "parts/box.stl", "quantity": 3},
+    {"name": "holder.stl", "source": "parts/holder.stl", "quantity": 1}
   ]
 }
 ```
@@ -72,6 +79,27 @@ curl --fail http://127.0.0.1:3000/api/plates/import \
 編集APIから別プレートのアップロードデータを参照したり、STL本体を差し替えたりはできません。
 保存成功は200と更新後のJSON、古い版での保存は409です。読み直して構成を確認してください。
 待機ジョブは準備開始時の構成を使います。既に準備を始めたジョブの入力は変更しません。
+
+## 印刷条件を保存する
+
+`POST /api/plates/import`と`PUT /api/plates/{id}`の`conditions`に4項目を渡します。
+取得したプレートを編集する場合は、保持する条件も送ってください。`conditions`を省略したPUTは全項目を未設定へ戻します。
+STLアップロードでも、multipartの`conditions`フィールドへ同じJSONを指定できます。
+
+| 項目 | 値と取得先 |
+| --- | --- |
+| `required_machine_profile_key` | `GET /api/printers`の`machine_profile_key`を重複除去した候補。実機IDではありません。 |
+| `filament_id` | `GET /api/filaments`の製品/色ID。機種指定時はその機種に対応する共通材料設定が必要です。 |
+| `process_profile_key` | [プロファイルAPI](slicing.md#設定と生成物)の対応する`processes`。 |
+| `bed_type` | 同APIの`beds`。 |
+
+4項目はDB/APIでnullableです。機種未設定なら工程も未設定にします。保存時は登録実機、存在する材料、
+工程と機種の組合せ、温度設定、ベッド種別を確認します。異なるノズル用profileや未登録機種へ自動変更しません。
+材料の装填と実機の同期は保存条件ではなく、[キュー追加時](queue.md#プレートを追加する)に確認します。
+
+旧プレートは条件がすべてNULLのまま移行します。過去の印刷や既定のP1Sで補いません。
+待機中のジョブはプレートの現在の条件を参照し、条件変更で開始先の実機を自動変更しません。
+機種が合わなくなった待機分は理由を表示して保留します。準備開始後の版・条件・試行・出力は保持します。
 
 ## 制限と保存先
 

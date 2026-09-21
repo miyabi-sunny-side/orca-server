@@ -4,7 +4,14 @@ export type Selection = {
   filament: string;
   bed: string;
 };
+export type PlateConditions = {
+  required_machine_profile_key: string | null;
+  filament_id: string | null;
+  process_profile_key: string | null;
+  bed_type: string | null;
+};
 export type Plate = {
+  conditions: PlateConditions;
   id: string;
   version: number;
   name: string;

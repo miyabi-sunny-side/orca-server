@@ -135,6 +135,7 @@ async fn file(
 
 async fn form(mut multipart: Multipart) -> Result<Input> {
     let mut name = None;
+    let mut conditions = None;
     let mut models = Vec::new();
     while let Some(field) = multipart
         .next_field()
@@ -148,6 +149,17 @@ async fn form(mut multipart: Multipart) -> Result<Input> {
                         .text()
                         .await
                         .map_err(|_| Error::Invalid("Invalid name"))?,
+                );
+            }
+            "conditions" if conditions.is_none() => {
+                conditions = Some(
+                    serde_json::from_str::<crate::plates::Conditions>(
+                        &field
+                            .text()
+                            .await
+                            .map_err(|_| Error::Invalid("Invalid conditions"))?,
+                    )
+                    .map_err(|_| Error::Invalid("Invalid conditions"))?,
                 );
             }
             "models" if models.len() < 64 => {
@@ -170,6 +182,7 @@ async fn form(mut multipart: Multipart) -> Result<Input> {
         }
     }
     Ok(Input {
+        conditions: conditions.unwrap_or_default(),
         name: name.ok_or(Error::Invalid("Missing plate name"))?,
         models,
     })

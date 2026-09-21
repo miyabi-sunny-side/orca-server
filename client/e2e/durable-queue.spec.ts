@@ -1,48 +1,48 @@
 import { test, expect } from '@playwright/test';
-
-const machine = 'Bambu Lab P1S 0.4 nozzle';
-const quality = '0.20mm Standard @BBL X1C';
-const bed = 'Textured PEI Plate';
-for (const theme of ['dark', 'light'] as const) {
-  test(`${theme}: waiting settings retain their version while another screen changes the queue`, async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 812 }); await page.emulateMedia({ colorScheme: theme });
-    const specification = { filament_id: 'white', ams_slot_id: 'slot', required_machine_profile_key: machine, process_profile_key: quality, bed_type: bed };
-    const job = { id: 'job', plate_id: 'plate', name: '長い名前の配線整理・ケーブルホルダー', state: 'queued', ...specification, hold_reason: null, attempt_id: null, artifact_path: null, last_error: null };
-    let generation = 1, sent: any, reads = 0;
-    const printer = { id: 'p1', name: 'P1S', machine_profile_key: machine, default_process_profile_key: quality, bed_type: bed };
-    const materials = ['white', 'blue'].map((id, i) => ({ id, name: i ? 'PLA 青' : 'PLA 白', vendor: 'Fixture', material: 'PLA', color: i ? '00FFFFFF' : 'FFFFFFFF' }));
-    await page.route('**/api/**', async route => {
-      const path = new URL(route.request().url()).pathname;
-      if (path === '/api/printers') return route.fulfill({ json: [printer] });
-      if (path === '/api/printers/profiles') return route.fulfill({ json: [{ key: machine, model: 'P1S', nozzle_diameter: '0.4' }] });
-      if (path === '/api/filaments') return route.fulfill({ json: materials });
-      if (path.startsWith('/api/filaments/')) return route.fulfill({ json: { settings: [{ machine_profile_key: machine }] } });
-      if (path === '/api/slicer/profiles') return route.fulfill({ json: { processes: [quality], beds: [bed], defaults: { process: quality, bed } } });
-      if (path === '/api/printers/p1/ams') return route.fulfill({ json: { current: true, slots: [{ id: 'slot', ams_id: 0, slot_index: 3, filament: materials[0] }] } });
-      if (path === '/api/queue') {
-        if (route.request().method() === 'POST') { sent = route.request().postDataJSON(); return route.fulfill({ status: 409, json: { error: 'queue changed' } }); }
+const machine='Bambu Lab P1S 0.4 nozzle', mini='Bambu Lab A1 mini 0.2 nozzle', quality='Standard', bed='Textured PEI Plate';
+for(const colorScheme of ['dark','light'] as const) {
+  test(`${colorScheme}: detail adds directly and preserves an unknown request through reload`,async({page})=>{
+    await page.setViewportSize({width:375,height:812});await page.emulateMedia({colorScheme});
+    const plate={id:'11111111-1111-4111-8111-111111111111',version:1,name:'繰り返し印刷するプレート',models:[{id:'item',name:'part.stl',source:'part.stl',quantity:10}],conditions:{required_machine_profile_key:machine,filament_id:'white',process_profile_key:quality,bed_type:bed}};
+    const printers=[{id:'p1',name:'P1S',machine_profile_key:machine},...[3,1,2].map(n=>({id:`a${n}`,name:`A1 mini ${n}`,machine_profile_key:mini}))];
+    let requests:any[]=[],waiting:any[]=[],reads=0,fail=true;
+    await page.route('**/api/**',async route=>{
+      const path=new URL(route.request().url()).pathname;
+      if(path==='/api/plates/11111111-1111-4111-8111-111111111111') return route.fulfill({json:plate});
+      if(path==='/api/printers')return route.fulfill({json:printers});
+      if(path==='/api/filaments')return route.fulfill({json:[{id:'white',name:'PLA 白',vendor:'Fixture',material:'PLA'}]});
+      if(path==='/api/queue'){
+        if(route.request().method()==='POST'){
+          const data=route.request().postDataJSON();requests.push(data);
+          if(!waiting.length)waiting.push({id:'job',plate_id:'11111111-1111-4111-8111-111111111111'});
+          if(fail){fail=false;return route.abort('failed');}
+        }
         reads++;
-        return route.fulfill({ json: { epoch: 'epoch', generation, request_id: `request-${reads}`, current: null, waiting: [job], allowed: { next: true, retry: false, discard: false }, printer: { ready_to_print: true, connection: 'connected', synchronized: true, print: { error: 0 } } } });
+        return route.fulfill({json:{epoch:'epoch',generation:waiting.length,request_id:`request-${reads}`,waiting,current:null,allowed:{next:false},admission:{allowed:true,plate_version:1,reason:null}}});
       }
-      return route.fulfill({ json: [] });
+      return route.fulfill({json:[]});
     });
-    await page.goto('/queue?printer_id=p1');
-    await page.getByRole('button', { name: '材料・印刷条件を変更' }).click();
-    await page.getByLabel('使用予定の材料').selectOption('blue');
-    await expect(page.getByRole('button', { name: '待機設定を保存' })).toBeEnabled();
-    generation = 2; const previousReads = reads;
-    await expect.poll(() => reads).toBeGreaterThan(previousReads);
-    await page.getByRole('button', { name: '待機設定を保存' }).click();
-    await expect(page.getByRole('alert')).toContainText('状態が変わりました');
-    expect(sent.generation).toBe(1); expect(sent.epoch).toBe('epoch');
-    expect(sent.action.specification).toEqual({ ...specification, filament_id: 'blue' });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    expect(await page.locator('.btn.primary').count()).toBe(1);
-    await page.evaluate(() => scrollTo(0, 0));
-    if (process.env.E2E_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.E2E_EVIDENCE_DIR}/waiting-edit-${theme}.png`, fullPage: true });
-    await page.getByRole('button', { name: '最新状態を読み直す' }).click();
-    await expect(page.getByLabel('使用予定の材料')).toHaveCount(0);
-    await page.getByRole('button', { name: '材料・印刷条件を変更' }).click();
-    await expect(page.getByLabel('使用予定の材料')).toHaveValue('white');
+    await page.goto('/plates/11111111-1111-4111-8111-111111111111');
+    const add=page.getByRole('button',{name:'印刷キューへ',exact:true});
+    await expect(add).toBeEnabled();await expect(page.getByLabel('追加先のプリンター')).toHaveCount(0);
+    await add.evaluate((button:HTMLButtonElement)=>{button.click();button.click();});
+    await expect(page.getByText('追加の結果が不明です。キューを確認し、同じ要求の結果を再確認してください。')).toBeVisible();
+    expect(requests).toHaveLength(1);expect(requests[0].action).toEqual({type:'add',plate_id:'11111111-1111-4111-8111-111111111111',plate_version:1});
+    await page.reload();await expect(add).toBeDisabled();
+    await page.getByRole('button',{name:'同じ要求を再確認'}).click();
+    await expect(page.getByRole('status')).toContainText('キューに追加しました');
+    expect(requests).toHaveLength(2);expect(requests[1]).toEqual(requests[0]);expect(waiting).toHaveLength(1);
+    await expect(page).toHaveURL(/\/plates\/11111111-1111-4111-8111-111111111111$/);
+    await expect(page.getByLabel('使用するAMSスロット')).toHaveCount(0);
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    // The same machine profile can match three physical printers; remember only a valid choice.
+    plate.conditions.required_machine_profile_key=mini;
+    await page.reload();await expect(page.getByLabel('追加先のプリンター')).toHaveValue('a1');
+    await expect(page.getByLabel('追加先のプリンター').locator('option')).toHaveCount(3);
+    await page.getByLabel('追加先のプリンター').selectOption('a2');await page.reload();
+    await expect(page.getByLabel('追加先のプリンター')).toHaveValue('a2');
+    printers.splice(printers.findIndex(p=>p.id==='a2'),1);await page.reload();
+    await expect(page.getByLabel('追加先のプリンター')).toHaveValue('a1');
+    if(process.env.E2E_EVIDENCE_DIR) await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/plate-direct-${colorScheme}.png`,fullPage:true});
   });
 }

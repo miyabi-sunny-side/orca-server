@@ -60,7 +60,7 @@ def main():
                 base=next(p['key'] for p in choices if p['key'].startswith('Generic PLA'))
                 rig.api(f'/api/filaments/{rig.materials[1]["id"]}/settings',dict(machine_profile_key=machine,base_profile_key=base,overrides_json={'nozzle_temperature':215}),expected=201)
             spec=rig.specification();spec.update(required_machine_profile_key=machine,process_profile_key=selection['process'])
-            job=rig.send(dict(type='add',plate_id=rig.plate['id'],specification=spec))['waiting'][-1]
+            job=rig.send(rig.add_action(spec))['waiting'][-1]
             rig.next(job);until(lambda:len(rig.broker.prints)==index+1,90)
             current=rig.api()['current'];directory=rig.store/current['artifact_path']
             project=(directory/'project.3mf').read_bytes();printed=(directory/'print.gcode.3mf').read_bytes()
@@ -88,7 +88,7 @@ def main():
             for offset in range(96+triangle*50,132+triangle*50,4):
                 struct.pack_into('<f',cube,offset,struct.unpack_from('<f',cube,offset)[0]*20)
         rig.files['parts/cube.stl']=bytes(cube)
-        job=rig.send(dict(type='add',plate_id=rig.plate['id'],specification=spec))['waiting'][-1]
+        job=rig.send(rig.add_action(spec))['waiting'][-1]
         rig.next(job);rig.phase('needs_attention');assert len(rig.broker.prints)==2
         assert rig.api('/api/plates/'+rig.plate['id'])==rig.plate
         results['impossible_layout_preserves_composition_without_start']=True

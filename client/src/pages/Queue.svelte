@@ -3,7 +3,6 @@
   import {
     ApiError,
     request,
-    type Plate,
     type Printer,
     type Filament,
     type AmsInventory,
@@ -12,30 +11,13 @@
     failureText,
     phaseText,
     printerText,
-    type Job,
     type Action,
     type Command,
     type QueueState,
   } from "../lib/queue";
-  import JobForm from "../lib/JobForm.svelte";
   let printers = $state<Printer[]>([]);
   let filaments = $state<Filament[]>([]);
   let inventory = $state<AmsInventory>();
-  let editing = $state<{ job: Job; basis: Omit<Command, "action"> }>();
-  const printer = $derived(printers.find((p) => p.id === printerId));
-  function beginEdit(job: Job) {
-    if (queue)
-      editing = {
-        job: { ...job },
-        basis: {
-          epoch: queue.epoch,
-          generation: queue.generation,
-          request_id: queue.request_id,
-        },
-      };
-    cleared = false;
-  }
-
   let printerId = $state(
     new URLSearchParams(window.location.search).get("printer_id") ?? "",
   );
@@ -44,10 +26,6 @@
     `/api/queue?printer_id=${encodeURIComponent(printerId)}`,
   );
   let queue = $state<QueueState>();
-  let selectedId = $state(
-    new URLSearchParams(window.location.search).get("plate"),
-  );
-  let plate = $state<Plate>();
   let cleared = $state(false);
   let busy = $state(false);
   let pending = $state<Command>();
@@ -82,7 +60,6 @@
   function changePrinter() {
     sequence++;
     queue = undefined;
-    editing = undefined;
     inventory = undefined;
     cleared = false;
     error = "";
@@ -128,21 +105,8 @@
       reading = false;
     }
   }
-  async function loadPlate() {
-    if (!selectedId) return;
-    try {
-      const saved = await request<Plate>(
-        `/api/plates/${encodeURIComponent(selectedId)}`,
-        { signal: controller.signal },
-      );
-      if (!controller.signal.aborted) plate = saved;
-    } catch (cause) {
-      if (!controller.signal.aborted) error = (cause as Error).message;
-    }
-  }
   onMount(() => {
     void loadPrinters();
-    void loadPlate();
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();
     }, 2000);
@@ -178,19 +142,6 @@
       if (controller.signal.aborted) return;
       receive(value);
       pending = undefined;
-      if (command.action.type === "edit") editing = undefined;
-      if (command.action.type === "add") {
-        selectedId = null;
-        plate = undefined;
-        editing = undefined;
-        inventory = undefined;
-        history.replaceState(
-          null,
-          "",
-          `/queue?printer_id=${encodeURIComponent(printerId)}`,
-        );
-        notice = "キューに追加しました";
-      }
     } catch (cause) {
       if (controller.signal.aborted) return;
       error = (cause as Error).message;
@@ -206,7 +157,6 @@
       busy = false;
       if (rejected) {
         void refresh();
-        if (command.action.type === "add") void loadPlate();
       }
     }
   }
@@ -215,10 +165,8 @@
 <svelte:head><title>印刷キュー · OrcaServer</title></svelte:head>
 <section class="content" aria-label="印刷キュー">
   <div class="page-heading">
-    <h1>{selectedId ? "キューに追加" : "印刷キュー"}</h1>
-    <a href={selectedId ? "/queue" : "/"}
-      >{selectedId ? "キューへ戻る" : "プレートを選ぶ"}</a
-    >
+    <h1>印刷キュー</h1>
+    <a href="/">プレートを選ぶ</a>
   </div>
   <label class="field"
     ><span>プリンター</span><select
@@ -251,9 +199,7 @@
           disabled={busy}
           onclick={() => {
             error = "";
-            editing = undefined;
             void loadPrinters();
-            void loadPlate();
           }}>最新状態を読み直す</button
         >
       {/if}
@@ -261,25 +207,7 @@
   {/if}
   {#if busy}<p class="state" role="status">操作を送信しています…</p>{/if}
   {#if notice}<p class="caption" role="status">{notice}</p>{/if}
-  {#if selectedId}
-    {#if plate}
-      <h2 class="job-name">{plate.name}</h2>
-      {#if printer}
-        {#key printer.id}<JobForm
-            {printer}
-            {disabled}
-            label="キューに追加"
-            submit={(specification) =>
-              void send({ type: "add", plate_id: plate!.id, specification })}
-          />{/key}
-      {/if}
-      <div class="actions">
-        <a class="btn" href={`/plates/${plate.id}`}>プレートへ戻る</a>
-      </div>
-    {:else if !error}<p class="state" role="status">
-        プレートを読み込んでいます…
-      </p>{/if}
-  {:else if queue}
+  {#if queue}
     <p class="printer-state" aria-live="polite">{printerText(queue.printer)}</p>
     {#if queue.current}
       <section class="current" aria-label="現在の印刷">
@@ -292,6 +220,12 @@
             ?.name ?? "材料を確認"} · {queue.current
             .required_machine_profile_key}
         </p>
+        {#if queue.current.actual_ams_slot !== null && queue.current.actual_ams_slot !== undefined}<p
+            class="caption"
+          >
+            使用中: AMS {Math.floor(queue.current.actual_ams_slot / 4) + 1} / スロット
+            {(queue.current.actual_ams_slot % 4) + 1}
+          </p>{/if}
         {#if queue.current.state === "printing" && queue.printer.synchronized}
           <p>
             {queue.printer.print.percent ??
@@ -316,7 +250,7 @@
     {#if queue.waiting[0]}<p class="next">
         次: <strong>{queue.waiting[0].name}</strong>
       </p>{/if}
-    {#if !editing && (choices.next || choices.retry || choices.discard)}
+    {#if choices.next || choices.retry || choices.discard}
       <label class="confirm"
         ><input type="checkbox" bind:checked={cleared} {disabled} /><span
           >造形物を取り外し、空のビルドプレートを戻しました</span
@@ -383,26 +317,11 @@
           {#if job.hold_reason}<p class="help">
               保留: {failureText[job.hold_reason] ?? job.hold_reason}
             </p>{/if}
-          {#if editing?.job.id === job.id && printer}
-            <JobForm
-              {printer}
-              initial={editing.job}
-              {disabled}
-              label="待機設定を保存"
-              submit={(specification) =>
-                void send(
-                  { type: "edit", job_id: job.id, specification },
-                  editing!.basis,
-                )}
-              cancel={() => (editing = undefined)}
-            />
-          {/if}
           <div class="row-actions">
-            {#if editing?.job.id !== job.id}<button
-                class="btn"
-                {disabled}
-                onclick={() => beginEdit(job)}>材料・印刷条件を変更</button
-              >{/if}
+            <a class="btn" href={`/plates/${job.plate_id}?edit=1`}
+              >プレートの条件を編集</a
+            >
+            <a class="btn" href={`/printers/${printerId}/ams`}>AMSを確認</a>
             <button
               class="btn"
               disabled={disabled || index === 0}

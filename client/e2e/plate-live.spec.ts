@@ -1,0 +1,45 @@
+import {test,expect} from '@playwright/test';
+import {mkdirSync} from 'node:fs';
+const ctx=JSON.parse(process.env.E2E_PLATE_CONTEXT ?? '{}');
+test('owned machine conditions persist and enqueue directly at desktop and narrow widths',async({page,request})=>{
+  test.setTimeout(90_000);page.setDefaultTimeout(10_000);
+  mkdirSync(process.env.E2E_EVIDENCE_DIR!,{recursive:true});
+  for(const [width,colorScheme] of [[320,'dark'],[900,'light']] as const){
+    await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
+    await page.goto('/plates/new');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();
+    await page.getByLabel('プレート名',{exact:true}).fill(`Gridfinity ${width===320?'前':'後'}`);
+    await page.getByLabel('parts/cube.stl の個数').fill('10');
+    const machine=page.getByLabel('要求する機種・ノズル');
+    await expect(machine.locator('option')).toHaveCount(3);
+    await machine.selectOption(ctx.mini);
+    await page.getByRole('combobox',{name:'フィラメント',exact:true}).selectOption(ctx.filament);
+    await page.getByLabel('工程（品質）').selectOption(ctx.process);await page.getByRole('combobox',{name:'ビルドプレート',exact:true}).selectOption(ctx.bed);
+    await page.getByRole('button',{name:'保存',exact:true}).click();
+    await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);const path=new URL(page.url()).pathname;
+    await expect(page.getByLabel('追加先のプリンター').locator('option')).toHaveCount(3);
+    await page.getByLabel('追加先のプリンター').selectOption(ctx.devices[1]);await page.reload();
+    await expect(page.getByLabel('追加先のプリンター')).toHaveValue(ctx.devices[1]);
+    const queue=async()=> (await request.get(`/api/queue?printer_id=${ctx.devices[1]}`)).json();
+    const count=(await queue()).waiting.length;
+    const add=page.getByRole('button',{name:'印刷キューへ',exact:true});await expect(add).toBeEnabled();
+    await add.evaluate((button:HTMLButtonElement)=>{button.click();button.click();});
+    await expect(page.getByRole('status')).toContainText('キューに追加しました');expect((await queue()).waiting.length).toBe(count+1);
+    await expect(page).toHaveURL(new RegExp(path+'$'));await page.reload();await add.click();
+    await expect(page.getByRole('status')).toContainText('キューに追加しました');expect((await queue()).waiting.length).toBe(count+2);
+    expect((await queue()).current).toBeNull();
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/plate-${width}-${colorScheme}.png`,fullPage:true});
+    await page.getByRole('button',{name:'構成を編集'}).click();
+    await page.getByLabel('要求する機種・ノズル').selectOption(ctx.machine);
+    await page.getByRole('combobox',{name:'フィラメント',exact:true}).selectOption({label:'未設定'});
+    await page.getByRole('button',{name:'保存',exact:true}).click();
+    await expect(add).toBeDisabled();await expect(page.getByLabel('追加先のプリンター')).toHaveCount(0);
+    const waiting=(await queue()).waiting.filter((job:any)=>`/plates/${job.plate_id}`===path);
+    expect(waiting).toHaveLength(2);expect(waiting.every((job:any)=>job.filament_id===null && job.hold_reason)).toBe(true);
+    await page.getByRole('button',{name:'構成を編集'}).click();
+    await page.getByRole('combobox',{name:'フィラメント',exact:true}).selectOption(ctx.filament);await page.getByRole('button',{name:'保存',exact:true}).click();
+    await expect(add).toBeEnabled();
+    await page.addStyleTag({content:'html {font-size:200% !important}'});
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  }
+});

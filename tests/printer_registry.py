@@ -99,24 +99,26 @@ def main():
             for id in ids:
                 slot=next(s for s in api(f'/api/printers/{id}/ams')['slots'] if s['ams_id']==0 and s['slot_index']==0)
                 api(f'/api/printers/{id}/ams/{slot["id"]}',dict(revision=slot['revision'],filament_id=material['id']),'PUT',204);slots.append(slot)
-            spec=dict(ams_slot_id=slots[1]['id'],filament_id=material['id'],required_machine_profile_key=p1,process_profile_key=p1_profiles['defaults']['process'],bed_type=p1_profiles['defaults']['bed'])
-            add=dict(type='add',plate_id=plate_id,specification=spec)
-            command(ids[0],add,400) # A slot belongs to exactly one printer.
-            view=command(ids[1],add);job=view['waiting'][0]
-            assert job['hold_reason'] and not view['allowed']['next']
-            command(ids[1],dict(type='next',expected_job=job['id'],removed_job=None,cleared=True),409)
+            saved=api('/api/plates/'+plate_id)
+            assert all(value is None for value in saved['conditions'].values())
+            saved.pop('id');saved['conditions']=dict(filament_id=material['id'],required_machine_profile_key=p1,process_profile_key=p1_profiles['defaults']['process'],bed_type=p1_profiles['defaults']['bed'])
+            saved=api('/api/plates/'+plate_id,saved,'PUT')
+            add=dict(type='add',plate_id=plate_id,plate_version=saved['version'])
+            command(ids[1],add,409) # A plate cannot be sent to a different machine/nozzle.
+            view=command(ids[0],add);other=view['waiting'][0]
             changed=copy.deepcopy(settings[1]);changed.update(machine_profile_key=p1,default_process_profile_key=p1_profiles['defaults']['process'],access_code='',tls_certificate='')
             api('/api/printers/'+ids[1],changed,'PUT') # Waiting jobs do not prevent a registered nozzle change.
             until(lambda:len(brokers[1].requests)==2);brokers[1].send(full)
             until(lambda:status(ids[1])['ready_to_print'])
-            view=queue(ids[1]);assert len(view['waiting'])==1 and queue(ids[0])['waiting']==[]
+            slot=next(s for s in api(f'/api/printers/{ids[1]}/ams')['slots'] if s['ams_id']==0 and s['slot_index']==0)
+            api(f'/api/printers/{ids[1]}/ams/{slot["id"]}',dict(revision=slot['revision'],filament_id=material['id']),'PUT',204)
+            view=command(ids[1],add);job=view['waiting'][0]
+            assert len(view['waiting'])==1 and len(queue(ids[0])['waiting'])==1
             assert view['waiting'][0]['required_machine_profile_key']==p1
             api('/api/printers/'+ids[1],method='DELETE',expected=409)
             changed['name']='Second edited';api('/api/printers/'+ids[1],changed,'PUT')
             command(ids[1],dict(type='next',expected_job=job['id'],removed_job=None,cleared=True))
             api('/api/printers/'+ids[1],settings[1],'PUT',409)
-            spec=copy.deepcopy(spec);spec['ams_slot_id']=slots[0]['id']
-            other=command(ids[0],dict(type='add',plate_id=plate_id,specification=spec))['waiting'][0]
             command(ids[0],dict(type='next',expected_job=other['id'],removed_job=None,cleared=True))
             until(lambda:len(brokers[1].prints)==len(brokers[0].prints)==1,60)
             assert [len(f.uploads) for f in ftps]==[1,1]

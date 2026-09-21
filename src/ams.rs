@@ -44,7 +44,12 @@ pub(crate) struct Priority {
     pub order: Vec<SlotRevision>,
 }
 
-fn resolve(c: &Connection, printer: &str, filament: &str, machine: &str) -> Result<Vec<AmsSlot>> {
+pub(crate) fn resolve(
+    c: &Connection,
+    printer: &str,
+    filament: &str,
+    machine: &str,
+) -> Result<Vec<AmsSlot>> {
     let product = crate::products::product_id(c, filament)?;
     let mut q=c.prepare("SELECT f.id FROM filaments f JOIN filaments requested ON requested.id=?1 WHERE f.product_id=?2 AND UPPER(f.color)=UPPER(requested.color) AND EXISTS(SELECT 1 FROM filament_settings s WHERE s.product_id=f.product_id AND s.machine_profile_key=?3)")?;
     let colors = q
