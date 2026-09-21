@@ -6,7 +6,13 @@ test('owned machine conditions persist and enqueue directly at desktop and narro
   mkdirSync(process.env.E2E_EVIDENCE_DIR!,{recursive:true});
   for(const [width,colorScheme] of [[320,'dark'],[900,'light']] as const){
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
-    await page.goto('/plates/new');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();
+    await page.goto('/plates/new');
+    const before=(await (await request.get('/api/plates')).json());
+    await page.locator('[data-stl-preview]').hover();
+    await expect(page.getByRole('tooltip').getByRole('status')).toHaveText('20.0 × 20.0 × 20.0 mm');
+    expect(await (await request.get('/api/plates')).json()).toEqual(before);
+    await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/hover-live-${width}-${colorScheme}.png`});
+    await page.mouse.move(0,0);await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();
     await page.getByLabel('プレート名',{exact:true}).fill(`Gridfinity ${width===320?'前':'後'}`);
     await page.getByLabel('parts/cube.stl の個数').fill('10');
     const machine=page.getByLabel('要求する機種・ノズル');

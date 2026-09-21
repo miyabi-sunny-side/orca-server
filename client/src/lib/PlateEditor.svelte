@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HoverPreview from "./HoverPreview.svelte";
   import PlateConditions from "./PlateConditions.svelte";
   import { emptyConditions } from "./plate";
   import { onMount } from "svelte";
@@ -15,6 +16,7 @@
     source: string | null;
     quantity: number;
   };
+  let root = $state<HTMLDivElement>();
   let conditions = $state({ ...emptyConditions });
   let step = $state(1),
     name = $state(""),
@@ -108,129 +110,141 @@
   }
 </script>
 
-{#if step === 1}
-  <div class="model-search">
-    <div class="page-heading">
-      <h2>STLを選択</h2>
-      <button
-        class="btn primary"
-        disabled={!selected.length}
-        onclick={() => (step = 2)}>構成を確認（{selected.length}）</button
-      >
-    </div>
-    <label class="field"
-      ><span>モデル名で検索</span><input
-        type="search"
-        bind:value={query}
-        bind:this={search}
-        onkeydown={(e) => {
-          if (e.key === "ArrowDown") {
-            e.preventDefault();
-            list?.querySelector("input")?.focus();
-          }
-        }}
-      /></label
-    >
-  </div>
-  {#if loading}<p class="state" role="status">モデルを読み込んでいます…</p>
-  {:else if loadError}<div class="notice">
-      <p role="alert">{loadError}</p>
-      <button class="btn" onclick={() => retry++}>再試行</button>
-    </div>
-  {:else if !models.length}<p class="state">
-      {query ? "一致するモデルがありません" : "モデルがありません"}
-    </p>
-  {:else}<ul class="plate-list" bind:this={list}>
-      {#each models as model}<li>
-          <label
-            class="plate-row model-row"
-            class:selected={selected.some((m) => m.source === model)}
-          >
-            <input
-              type="checkbox"
-              checked={selected.some((m) => m.source === model)}
-              disabled={selected.length >= 64 &&
-                !selected.some((m) => m.source === model)}
-              onchange={(e) =>
-                (selected = e.currentTarget.checked
-                  ? [...selected, { name: model, source: model, quantity: 1 }]
-                  : selected.filter((m) => m.source !== model))}
-              onkeydown={move}
-            /><span>{model}</span>
-          </label>
-        </li>{/each}
-    </ul>{/if}
-  {#if cancel}<div class="actions">
-      <button class="btn" onclick={cancel}>編集をやめる</button>
-    </div>{/if}
-{:else}
-  <form onsubmit={save}>
-    <fieldset disabled={busy}>
+<div bind:this={root}>
+  {#if step === 1}
+    <div class="model-search">
+      <div class="page-heading">
+        <h2>STLを選択</h2>
+        <button
+          class="btn primary"
+          disabled={!selected.length}
+          onclick={() => (step = 2)}>構成を確認（{selected.length}）</button
+        >
+      </div>
       <label class="field"
-        ><span>プレート名</span><input
-          bind:value={name}
-          required
-          maxlength="256"
-          placeholder="例: 机の小物入れ"
+        ><span>モデル名で検索</span><input
+          type="search"
+          bind:value={query}
+          bind:this={search}
+          onkeydown={(e) => {
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              list?.querySelector("input")?.focus();
+            }
+          }}
         /></label
       >
-      <ul class="plate-list">
-        {#each selected as model, index}<li class="plate-row">
-            <strong>{model.name}</strong>
-            <div class="item-actions">
-              <label class="field"
-                ><span>個数</span><input
-                  type="number"
-                  min="1"
-                  max="64"
-                  step="1"
-                  required
-                  bind:value={model.quantity}
-                  aria-label={`${model.name} の個数`}
-                /></label
-              >
-              <button
-                class="btn"
-                type="button"
-                aria-label={`${model.name}を構成から外す`}
-                onclick={() =>
-                  (selected = selected.filter((_, i) => i !== index))}
-                >外す</button
-              >
-            </div>
-          </li>{/each}
-      </ul>
-      <p class="caption">
-        合計 {total} 個 / 最大64個。SCADモデルは印刷準備の開始時に最新データを取得します。
+    </div>
+    {#if loading}<p class="state" role="status">モデルを読み込んでいます…</p>
+    {:else if loadError}<div class="notice">
+        <p role="alert">{loadError}</p>
+        <button class="btn" onclick={() => retry++}>再試行</button>
+      </div>
+    {:else if !models.length}<p class="state">
+        {query ? "一致するモデルがありません" : "モデルがありません"}
       </p>
-      <PlateConditions bind:value={conditions} />
-    </fieldset>
-    {#if error}<div class="notice">
-        <p role="alert">{error}</p>
-        {#if initial}<button class="btn" type="button" onclick={cancel}
-            >保存済みの構成へ戻る</button
-          >{/if}
+    {:else}<ul class="plate-list" bind:this={list}>
+        {#each models as model}<li>
+            <label
+              class="plate-row model-row"
+              class:selected={selected.some((m) => m.source === model)}
+            >
+              <input
+                type="checkbox"
+                checked={selected.some((m) => m.source === model)}
+                disabled={selected.length >= 64 &&
+                  !selected.some((m) => m.source === model)}
+                onchange={(e) =>
+                  (selected = e.currentTarget.checked
+                    ? [...selected, { name: model, source: model, quantity: 1 }]
+                    : selected.filter((m) => m.source !== model))}
+                onkeydown={move}
+              /><span
+                data-stl-preview={`/api/scad/model?path=${encodeURIComponent(model)}`}
+                >{model}</span
+              >
+            </label>
+          </li>{/each}
+      </ul>{/if}
+    {#if cancel}<div class="actions">
+        <button class="btn" onclick={cancel}>編集をやめる</button>
       </div>{/if}
-    {#if busy}<p role="status">保存しています…</p>{/if}
-    <div class="actions">
-      <button
-        class="btn primary"
-        type="submit"
-        disabled={busy || !selected.length || total > 64}>保存</button
-      ><button
-        class="btn"
-        type="button"
-        disabled={busy}
-        onclick={() => (step = 1)}>モデル選択へ</button
-      >{#if cancel}<button
+  {:else}
+    <form onsubmit={save}>
+      <fieldset disabled={busy}>
+        <label class="field"
+          ><span>プレート名</span><input
+            bind:value={name}
+            required
+            maxlength="256"
+            placeholder="例: 机の小物入れ"
+          /></label
+        >
+        <ul class="plate-list">
+          {#each selected as model, index}<li class="plate-row">
+              <strong
+                data-stl-preview={model.source
+                  ? `/api/scad/model?path=${encodeURIComponent(model.source)}`
+                  : initial && model.id
+                    ? `/api/plates/${initial.id}/models/${model.id}`
+                    : undefined}>{model.name}</strong
+              >
+              <div class="item-actions">
+                <label class="field"
+                  ><span>個数</span><input
+                    type="number"
+                    min="1"
+                    max="64"
+                    step="1"
+                    required
+                    bind:value={model.quantity}
+                    aria-label={`${model.name} の個数`}
+                  /></label
+                >
+                <button
+                  class="btn"
+                  type="button"
+                  aria-label={`${model.name}を構成から外す`}
+                  onclick={() =>
+                    (selected = selected.filter((_, i) => i !== index))}
+                  >外す</button
+                >
+              </div>
+            </li>{/each}
+        </ul>
+        <p class="caption">
+          合計 {total} 個 / 最大64個。SCADモデルは印刷準備の開始時に最新データを取得します。
+        </p>
+        <PlateConditions bind:value={conditions} />
+      </fieldset>
+      {#if error}<div class="notice">
+          <p role="alert">{error}</p>
+          {#if initial}<button class="btn" type="button" onclick={cancel}
+              >保存済みの構成へ戻る</button
+            >{/if}
+        </div>{/if}
+      {#if busy}<p role="status">保存しています…</p>{/if}
+      <div class="actions">
+        <button
+          class="btn primary"
+          type="submit"
+          disabled={busy || !selected.length || total > 64}>保存</button
+        ><button
           class="btn"
           type="button"
           disabled={busy}
-          onclick={cancel}>編集をやめる</button
-        >{/if}
-    </div>
-  </form>
-{/if}
+          onclick={() => (step = 1)}>モデル選択へ</button
+        >{#if cancel}<button
+            class="btn"
+            type="button"
+            disabled={busy}
+            onclick={cancel}>編集をやめる</button
+          >{/if}
+      </div>
+    </form>
+  {/if}
+</div>
+{#key step}<HoverPreview {root} />{/key}
 
 <style lang="sass">
   .model-search

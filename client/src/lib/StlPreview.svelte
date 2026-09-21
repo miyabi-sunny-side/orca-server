@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { createThreeViewer } from "./three-viewer";
-  let { url, name }: { url: string; name: string } = $props();
+  let {
+    url,
+    name,
+    passive = false,
+  }: { url: string; name: string; passive?: boolean } = $props();
   let mount: HTMLDivElement;
   let viewer = $state<ReturnType<typeof createThreeViewer>>();
   let error = $state("");
@@ -12,7 +16,7 @@
     let gone = false;
     void import("./three-viewer")
       .then(({ createThreeViewer }) => {
-        if (!gone) viewer = createThreeViewer(mount);
+        if (!gone) viewer = createThreeViewer(mount, !passive);
       })
       .catch(() => {
         if (!gone) {
@@ -50,30 +54,32 @@
   });
 </script>
 
-<aside class="preview" aria-label="STLプレビュー">
-  <h2>{name}</h2>
+<aside class="preview" class:passive aria-label="STLプレビュー">
+  {#if !passive}<h2>{name}</h2>{/if}
   <div class="viewport" bind:this={mount}></div>
   {#if loading}<p role="status">モデルを読み込んでいます…</p>{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if dimensions}<p class="dimensions" role="status">{dimensions}</p>{/if}
-  <div class="actions">
-    <button class="btn" disabled={!dimensions} onclick={() => viewer?.fit()}
-      >全体を表示</button
-    >
-    <button class="btn" disabled={!dimensions} onclick={() => viewer?.zoom(0.8)}
-      >拡大</button
-    >
-    <button
-      class="btn"
-      disabled={!dimensions}
-      onclick={() => viewer?.zoom(1.25)}>縮小</button
-    >
-    {#if viewer}<button class="btn" onclick={() => attempt++}>読み直す</button
-      >{/if}
-  </div>
-  <p class="caption">
-    ドラッグで回転、ホイールで拡大縮小。表示はモデル単体です。配置・スライス結果ではありません。
-  </p>
+  {#if !passive}<div class="actions">
+      <button class="btn" disabled={!dimensions} onclick={() => viewer?.fit()}
+        >全体を表示</button
+      >
+      <button
+        class="btn"
+        disabled={!dimensions}
+        onclick={() => viewer?.zoom(0.8)}>拡大</button
+      >
+      <button
+        class="btn"
+        disabled={!dimensions}
+        onclick={() => viewer?.zoom(1.25)}>縮小</button
+      >
+      {#if viewer}<button class="btn" onclick={() => attempt++}>読み直す</button
+        >{/if}
+    </div>
+    <p class="caption">
+      ドラッグで回転、ホイールで拡大縮小。表示はモデル単体です。配置・スライス結果ではありません。
+    </p>{/if}
 </aside>
 
 <style lang="sass">
@@ -98,6 +104,16 @@
       display: block
       touch-action: none
       max-width: 100%
+  .preview.passive
+    height: 100%
+    display: grid
+    grid-template-rows: minmax(0, 1fr) auto
+    .viewport
+      height: 100%
+      min-height: 0
+    p
+      font-size: var(--fs-xs)
+      margin: var(--sp-1) 0 0
   .dimensions
     font-variant-numeric: tabular-nums
 </style>

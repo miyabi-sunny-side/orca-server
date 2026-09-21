@@ -4,23 +4,30 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { LatestRequest } from "./latest-request";
 
-export function createThreeViewer(mount: HTMLElement) {
+export function createThreeViewer(mount: HTMLElement, interactive = true) {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100000);
   camera.up.set(0, 0, 1);
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.domElement.tabIndex = 0;
-  renderer.domElement.setAttribute("role", "application");
+  renderer.domElement.setAttribute("role", interactive ? "application" : "img");
   renderer.domElement.setAttribute(
     "aria-label",
-    "3Dモデル。ドラッグで回転、ホイールで拡大縮小。矢印キーで移動、Shiftと矢印キーで回転。",
+    interactive
+      ? "3Dモデル。ドラッグで回転、ホイールで拡大縮小。矢印キーで移動、Shiftと矢印キーで回転。"
+      : "斜め上から見たSTLモデル",
   );
   mount.appendChild(renderer.domElement);
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.screenSpacePanning = false;
-  controls.listenToKeyEvents(renderer.domElement);
+  const controls = interactive
+    ? new OrbitControls(camera, renderer.domElement)
+    : undefined;
+  if (controls) {
+    renderer.domElement.tabIndex = 0;
+    controls.screenSpacePanning = false;
+    controls.listenToKeyEvents(renderer.domElement);
+  }
+  const target = new THREE.Vector3();
   scene.add(new THREE.HemisphereLight(0xffffff, 0x777777, 2.4));
   const light = new THREE.DirectionalLight(0xffffff, 2.2);
   light.position.set(60, -70, 110);
@@ -34,10 +41,12 @@ export function createThreeViewer(mount: HTMLElement) {
     roughness: 0.72,
     metalness: 0.04,
   });
+  const render = () => renderer.render(scene, camera);
   const theme = () => {
     const style = getComputedStyle(mount);
     material.color.set(style.getPropertyValue("--c-muted").trim());
     grid.material.color.set(style.getPropertyValue("--c-border").trim());
+    render();
   };
   theme();
   const observer = new MutationObserver(theme);
@@ -54,7 +63,8 @@ export function createThreeViewer(mount: HTMLElement) {
       ((maximum / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)))) *
         1.55) /
       Math.min(camera.aspect, 1);
-    controls.target.set(0, 0, size.z * 0.35);
+    target.set(0, 0, size.z * 0.35);
+    controls?.target.copy(target);
     camera.position.set(
       distance * 0.8,
       -distance * 0.8,
@@ -63,37 +73,46 @@ export function createThreeViewer(mount: HTMLElement) {
     camera.near = Math.max(distance / 1000, 0.01);
     camera.far = distance * 100;
     camera.updateProjectionMatrix();
-    controls.update();
+    if (controls) controls.update();
+    else camera.lookAt(target);
+    render();
   };
   const resize = new ResizeObserver(() => {
     camera.aspect =
       Math.max(mount.clientWidth, 1) / Math.max(mount.clientHeight, 1);
     camera.updateProjectionMatrix();
     renderer.setSize(mount.clientWidth, mount.clientHeight);
+    if (!interactive && mesh) fit();
+    else render();
   });
   resize.observe(mount);
   const loader = new STLLoader();
   const requests = new LatestRequest();
   // The vendored JavaScript owns these GPU resources; keep them in this lifecycle.
   let mesh: any;
+  let read: AbortController | undefined;
   const clear = () => {
     requests.invalidate();
+    read?.abort();
     if (mesh) {
       scene.remove(mesh);
       mesh.geometry.dispose();
       mesh = undefined;
     }
+    render();
   };
   const loadModel = async (url: string) => {
     clear();
     const request = requests.begin();
+    const controller = new AbortController();
+    read = controller;
     let geometry: any;
     try {
-      geometry = await loader.loadAsync(url);
-      if (!request.isCurrent()) {
-        geometry.dispose();
-        return { kind: "stale" } as const;
-      }
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) throw new Error("STL request failed");
+      const bytes = await response.arrayBuffer();
+      if (!request.isCurrent()) return { kind: "stale" } as const;
+      geometry = loader.parse(bytes);
       geometry.computeBoundingBox();
       const box = geometry.boundingBox;
       if (!box || box.isEmpty()) throw new Error("Model has no geometry");
@@ -115,25 +134,24 @@ export function createThreeViewer(mount: HTMLElement) {
       throw error;
     }
   };
-  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+  if (interactive) renderer.setAnimationLoop(render);
   return {
     loadModel,
     fit,
     zoom: (factor: number) => {
-      camera.position
-        .sub(controls.target)
-        .multiplyScalar(factor)
-        .add(controls.target);
-      controls.update();
+      const center = controls?.target ?? target;
+      camera.position.sub(center).multiplyScalar(factor).add(center);
+      controls?.update();
+      render();
     },
-    cancelLoad: () => requests.invalidate(),
+    cancelLoad: clear,
     destroy: () => {
       clear();
       renderer.setAnimationLoop(null);
       resize.disconnect();
       observer.disconnect();
       scheme.removeEventListener("change", theme);
-      controls.dispose();
+      controls?.dispose();
       grid.geometry.dispose();
       grid.material.dispose();
       material.dispose();

@@ -19,6 +19,7 @@ struct ImportState {
 pub(crate) fn router(store: crate::plates::Store, source: Option<Source>) -> Router {
     Router::new()
         .route("/api/scad/models", get(list_models))
+        .route("/api/scad/model", get(public_preview))
         .route("/api/plates/import", post(import))
         .route("/api/plates/{id}", put(replace))
         .route("/api/plates/{id}/models/{model_id}", get(preview))
@@ -51,7 +52,11 @@ async fn preview(
     } else {
         crate::plate_api::blocking(move || store.read_file(&id, &model.id)).await?
     };
-    Ok((
+    Ok(stl_response(bytes))
+}
+
+fn stl_response(bytes: Vec<u8>) -> Response {
+    (
         [
             (header::CONTENT_TYPE, "application/octet-stream"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
@@ -59,7 +64,29 @@ async fn preview(
         ],
         bytes,
     )
-        .into_response())
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct ModelPath {
+    path: String,
+}
+
+async fn public_preview(
+    State(state): State<ImportState>,
+    Query(query): Query<ModelPath>,
+) -> Result<Response> {
+    if !valid_model_name(&query.path) {
+        return Err(Error::Invalid("Invalid STL model path"));
+    }
+    let source = require_source(state.source)?;
+    if source.models().await?.binary_search(&query.path).is_err() {
+        return Err(Error::NotFound);
+    }
+    source
+        .model(&query.path, crate::plates::MAX_UPLOAD)
+        .await
+        .map(stl_response)
 }
 
 #[derive(Deserialize)]
@@ -420,6 +447,93 @@ mod tests {
             serve(Router::new().route("/api/models", get(|| async { "<html>not JSON</html>" })))
                 .await;
         assert!(Source::new(&html.base).unwrap().models().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unsaved_preview_reads_only_current_published_models_without_saving() {
+        use axum::body::to_bytes;
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::plates::Store::open(root.path()).unwrap();
+        let fixture = Fixture::default();
+        let triangle = include_bytes!("../tests/fixtures/triangle.stl").to_vec();
+        fixture.files.lock().unwrap().extend([
+            ("parts/public.stl".into(), triangle.clone()),
+            ("private.stl".into(), triangle.clone()),
+        ]);
+        let server = serve(
+            Router::new()
+                .route(
+                    "/api/models",
+                    get(|| async { Json(vec!["parts/public.stl"]) }),
+                )
+                .route("/models/{*path}", get(file))
+                .with_state(fixture.clone()),
+        )
+        .await;
+        let app = crate::app_with_source(store.clone(), Some(Source::new(&server.base).unwrap()));
+        let request = |path: &str| {
+            Request::builder()
+                .uri(format!("/api/scad/model?path={path}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let get = async |path: &str| app.clone().oneshot(request(path)).await.unwrap();
+        let response = get("parts%2Fpublic.stl").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            triangle
+        );
+        let cube = include_bytes!("../tests/fixtures/cube.stl").to_vec();
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("parts/public.stl".into(), cube.clone());
+        let response = get("parts%2Fpublic.stl").await;
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            cube
+        );
+        for path in ["private.stl", "missing.stl"] {
+            assert_eq!(get(path).await.status(), StatusCode::NOT_FOUND);
+        }
+        for path in [
+            "..%2Fprivate.stl",
+            "%2Fprivate.stl",
+            "http%3A%2F%2Fevil%2Fx.stl",
+            "x.txt",
+        ] {
+            assert_eq!(get(path).await.status(), StatusCode::BAD_REQUEST);
+        }
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("parts/public.stl".into(), b"broken".to_vec());
+        assert_eq!(
+            get("parts%2Fpublic.stl").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        fixture.files.lock().unwrap().clear();
+        assert_eq!(
+            get("parts%2Fpublic.stl").await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            crate::app_with_source(store.clone(), None)
+                .oneshot(request("parts%2Fpublic.stl"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(store.list("").unwrap().is_empty());
     }
 
     #[tokio::test]

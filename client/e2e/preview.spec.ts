@@ -47,8 +47,9 @@ test('real WebGL distinguishes models, ignores stale reads and survives errors a
   if(output)await preview.screenshot({path:`${output}/triangle.png`});
   await chooseCube.click();await expect(preview.getByRole('status')).toContainText('20.0');
   mode='slow';await chooseTriangle.click();await expect.poll(()=>slow).toBe(true);
-  await chooseCube.click();await expect(preview.getByRole('status')).toContainText('20.0');
-  const finished=page.waitForResponse(r=>r.url().endsWith('/models/triangle'));release();await (await finished).finished();
+  const aborted=page.waitForEvent('requestfailed',r=>r.url().endsWith('/models/triangle'));
+  await chooseCube.click();await aborted;await expect(preview.getByRole('status')).toContainText('20.0');
+  release();
   await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));
   await expect(preview.getByRole('status')).toHaveText('20.0 × 20.0 × 20.0 mm');
   for(mode of ['missing','broken','network']){
@@ -62,7 +63,7 @@ test('real WebGL distinguishes models, ignores stale reads and survives errors a
   await preview.getByRole('button',{name:'拡大',exact:true}).click();
   await expect.poll(async()=>before.equals(await preview.locator('canvas').screenshot())).toBe(false);
   await preview.getByRole('application').focus();await page.keyboard.press('Shift+ArrowRight');
-  await page.getByRole('button',{name:'構成を編集',exact:true}).click();await expect(page.locator('canvas')).toHaveCount(0);
+  await page.getByRole('button',{name:'構成を編集',exact:true}).click();await page.mouse.move(0,0);await expect(page.locator('canvas')).toHaveCount(0);
   await page.getByRole('button',{name:'編集をやめる',exact:true}).click();await expect(preview.getByRole('status')).toContainText('20.0');
   await expect(page.locator('canvas')).toHaveCount(1);
   await page.goto('/');await expect(page.locator('canvas')).toHaveCount(0);
