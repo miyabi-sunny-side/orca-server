@@ -7,6 +7,7 @@ import subprocess
 import sys
 import uuid
 import zipfile
+import xml.etree.ElementTree as ET
 from print_fixture import Rig, REPO, until
 from slicer_cli import boxes
 
@@ -59,6 +60,9 @@ def main():
         req=urllib.request.Request(rig.base+'/api/plates',data=body,headers={'Content-Type':'multipart/form-data; boundary=orca-boundary'})
         rig.plate=json.loads(urllib.request.urlopen(req).read())
         job=rig.add(3); plate=rig.plate
+        until(lambda:rig.api()['waiting'][0]['estimate']['state']=='ready',120)
+        estimate=rig.api()['waiting'][0]['estimate']['seconds']
+        assert estimate>0 and not rig.broker.prints and not rig.ftp.uploads
         waiting=rig.send(rig.add_action(rig.specification(0), reference))['waiting'][-1]
         rig.next(job)
         until(lambda:len(rig.broker.prints)==1,90)
@@ -74,6 +78,8 @@ def main():
         assert any(bounds[0][a][1]<=bounds[1][a][0] or bounds[1][a][1]<=bounds[0][a][0] for a in (0,1))
         assert all(abs(x-y)<.001 for a,b in zip(bounds,printed) for c,d in zip(a,b) for x,y in zip(c,d))
         archive=zipfile.ZipFile(io.BytesIO(data['print']))
+        prediction=int(ET.fromstring(archive.read('Metadata/slice_info.config')).find("plate/metadata[@key='prediction']").attrib['value'])
+        assert estimate==prediction==rig.api()['current']['estimate']['seconds']
         gcode=archive.read('Metadata/plate_1.gcode')
         assert len(gcode)>1000
         settings=json.loads(archive.read('Metadata/project_settings.config'))
@@ -92,7 +98,7 @@ def main():
             assert urllib.request.urlopen(rig.base+f'/api/plates/{plate["id"]}/files/{model["id"]}').read()==cube
         rig.idle();assert len(rig.broker.prints)==1
         until(lambda:docker('inspect','--format','{{.State.Health.Status}}',rig.name)=='healthy',45)
-        result=dict(image=rig.image,uid=10001,version='2.4.2',headless=True,world_bounds=bounds,persistent_composition_uploads_queue=True,uncertain_restart_no_resend=True,bed_temperature_override_gcode=65,healthy=True)
+        result=dict(image=rig.image,uid=10001,version='2.4.2',headless=True,estimated_seconds=estimate,estimate_before_start=True,world_bounds=bounds,persistent_composition_uploads_queue=True,uncertain_restart_no_resend=True,bed_temperature_override_gcode=65,healthy=True)
         (rig.output/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
     finally:
         try:(rig.output/'server.log').write_text(docker('logs',rig.name))

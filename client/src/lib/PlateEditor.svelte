@@ -242,7 +242,7 @@
             </li>{/each}
         </ul>
         <p class="caption">
-          合計 {total} 個 / 最大64個。SCADモデルは印刷準備の開始時に最新データを取得します。
+          合計 {total} 個 / 最大64個。SCADモデルは試算時と印刷開始時に最新データを取得します。
         </p>
         <PlateConditions
           bind:value={conditions}

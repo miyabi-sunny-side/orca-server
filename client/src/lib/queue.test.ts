@@ -1,4 +1,5 @@
-import { expect, it } from "vitest";
+import { estimateText } from "./queue";
+import { describe, expect, it } from "vitest";
 import { slotLabel, printerText, type Printer } from "./queue";
 const printer: Printer = {
   connection: "connected",
@@ -53,4 +54,27 @@ it("does not present unsynchronized or failed printers as ready", () => {
       print: { ...printer.print, error: 42 },
     }),
   ).toContain("42");
+});
+
+describe("queue estimates", () => {
+  it("keeps pending and failed distinct from approximate elapsed time", () => {
+    expect(estimateText()).toBe("試算待ち");
+    expect(
+      estimateText({ state: "calculating", seconds: null, error: null }),
+    ).toBe("試算中…");
+    expect(
+      estimateText({ state: "failed", seconds: null, error: "upstream" }),
+    ).toBe("試算できませんでした");
+    for (const [seconds, expected] of [
+      [1, "約1分"],
+      [1140, "約19分"],
+      [3600, "約1時間"],
+      [4800, "約1時間20分"],
+      [3601, "約1時間1分"],
+    ] as const) {
+      expect(estimateText({ state: "ready", seconds, error: null })).toBe(
+        expected,
+      );
+    }
+  });
 });

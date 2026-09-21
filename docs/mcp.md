@@ -48,7 +48,7 @@ SCAD参照の作成・更新には、サーバーの[SCAD_LIVE_URL](container.md
 
 保存結果の`data`には`id`、`version`、`name`、`models`、`conditions`が入ります。
 `ui_path`は`/plates/保存されたID`です。モデルの個数合計は1〜64個です。
-保存時はscad-liveの一覧で存在を確認し、STL本体は印刷準備時に取得します。SCAD自体の公開はscad-live側で行ってください。
+保存時はscad-liveの一覧で存在を確認し、STL本体はキュー追加後の試算と印刷準備時に取得します。SCAD自体の公開はscad-live側で行ってください。
 
 更新する場合は`plate_get`に`{"id":"取得したプレートID"}`を渡し、現在の構成・版を読みます。
 `plate_save`の外側に同じ`id`を指定し、`plate.version`と保存する全モデル・全条件を送ります。

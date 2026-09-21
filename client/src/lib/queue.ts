@@ -25,6 +25,7 @@ export type Job = {
   artifact_path: string | null;
   last_error: string | null;
   hold_reason?: string | null;
+  estimate?: Estimate;
 };
 type Ams = {
   units: {
@@ -62,6 +63,7 @@ export type Action =
   | { type: "add"; plate_id: string; plate_version: number }
   | { type: "move"; job_id: string; index: number }
   | { type: "remove"; job_id: string }
+  | { type: "reestimate"; job_id: string }
   | {
       type: "next";
       expected_job: string;
@@ -155,3 +157,19 @@ export const failureText: Record<string, string> = {
   "Print ended without a completion report; inspect the printer":
     "完了報告なしに印刷が終了しました。本体を確認してください。",
 };
+
+export type Estimate = {
+  state: "pending" | "calculating" | "ready" | "failed";
+  seconds: number | null;
+  error: string | null;
+};
+export function estimateText(estimate?: Estimate): string {
+  if (!estimate || estimate.state === "pending") return "試算待ち";
+  if (estimate.state === "calculating") return "試算中…";
+  if (estimate.state === "failed" || !estimate.seconds)
+    return "試算できませんでした";
+  const minutes = Math.ceil(estimate.seconds / 60);
+  const hours = Math.floor(minutes / 60),
+    rest = minutes % 60;
+  return `約${hours ? `${hours}時間` : ""}${rest ? `${rest}分` : ""}`;
+}

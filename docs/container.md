@@ -94,8 +94,8 @@ bind mountを使う場合は、ホスト上の保存先をこのUID/GIDで書き
 
 `/data/plates/orca.sqlite3`にプレート構成・アップロード元STL・プリンター・材料・AMS・印刷キューを保存します。
 DBにはアクセスコードも含むため、保存先とバックアップを非公開にしてください。
-準備中以降の固定入力と生成物は`/data/plates/jobs/`へ保存し、完了・取消後に片付けます。
-待機ジョブはSTLの複製を持ちません。準備時のSTL・生成物に必要な空き容量を確保してください。
+試算・印刷準備の固定入力と生成物は`/data/plates/jobs/`へ保存し、完了・取消後に片付けます。
+待機ジョブにも試算用のSTL・生成物を保存します。待機件数に応じた空き容量を確保してください。
 
 HTTPは既定3000番です。`PORT`を変えた場合はDockerの公開先ポートも合わせます。
 `GET /healthz`は`ok`、`GET /api/health`は`{"status":"ok"}`を返します。
@@ -113,7 +113,7 @@ docker logs orca-server
 稼働中のDBファイルだけをコピーしないでください。SCAD元データはscad-live側でも保管します。
 アップロード元STLは同じDBに含まれるため、DBの復元で再利用できます。
 
-現在のSQLite schema versionは8です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
+現在のSQLite schema versionは9です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
 プレート・キューには`plates`、`plate_items`、`print_jobs`を使います。
 初期設定は`default_settings`、通知は`print_notifications`で保持します。
 製品と色の分離では既存材料IDとキューを保持し、全設定が一致する製品だけをまとめます。[材料の移行条件](filaments.md#保存と移行)を確認してください。

@@ -8,6 +8,7 @@
     type AmsInventory,
   } from "../lib/api";
   import {
+    estimateText,
     failureText,
     phaseText,
     printerText,
@@ -214,6 +215,9 @@
           {phaseText[queue.current.state]}
         </p>
         <h2 class="job-name">{queue.current.name}</h2>
+        <p class="caption" aria-live="polite">
+          推定所要時間: {estimateText(queue.current.estimate)}
+        </p>
         <p class="help">
           予定材料: {filaments.find((f) => f.id === queue!.current!.filament_id)
             ?.name ?? "材料を確認"} · {queue.current
@@ -315,6 +319,13 @@
         {@const slot = inventory?.slots.find((s) => s.id === job.ams_slot_id)}
         <li class="plate-row" aria-label={job.name}>
           <strong>{index + 1}. {job.name}</strong>
+          <span class="caption" aria-live="polite"
+            >推定所要時間: {estimateText(job.estimate)}</span
+          >
+          {#if job.estimate?.state === "failed"}<p class="help">
+              {failureText[job.estimate.error ?? ""] ??
+                "モデルと印刷条件を確認して再試算してください。"}
+            </p>{/if}
           <span class="caption"
             >予定材料: {filaments.find((f) => f.id === job.filament_id)?.name ??
               "材料を確認"}</span
@@ -330,6 +341,14 @@
               保留: {failureText[job.hold_reason] ?? job.hold_reason}
             </p>{/if}
           <div class="row-actions">
+            {#if job.estimate?.state === "failed"}<button
+                class="btn"
+                {disabled}
+                aria-label={`${job.name}を再試算`}
+                onclick={() =>
+                  void send({ type: "reestimate", job_id: job.id })}
+                >再試算</button
+              >{/if}
             <a class="btn" href={`/plates/${job.plate_id}?edit=1`}
               >プレートの条件を編集</a
             >

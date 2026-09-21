@@ -38,7 +38,7 @@ impl std::error::Error for Error {}
 pub const MAX_UPLOAD: usize = 64 * 1024 * 1024;
 const MAX_METADATA: usize = 256 * 1024;
 
-fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
+pub(crate) fn read_limited(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     fs::File::open(path)?
         .take(u64::try_from(limit).unwrap_or(u64::MAX) + 1)

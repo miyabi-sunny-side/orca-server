@@ -101,7 +101,7 @@ def main():
         rig.api('/api/printers/'+other,method='DELETE',expected=204)
         assert defaults()['default_printer_id']=='p1'
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
-            assert c.execute('PRAGMA user_version').fetchone()==(8,)
+            assert c.execute('PRAGMA user_version').fetchone()==(9,)
             assert [r[1] for r in c.execute('PRAGMA table_info(default_settings)')]==['id','default_printer_id']
             assert c.execute('SELECT default_printer_id FROM default_settings').fetchall()==[('p1',)]
         assert len(rig.broker.prints)==1 and all(not p.prints for p in peers)

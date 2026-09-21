@@ -50,6 +50,9 @@ enum Action {
         plate_id: String,
         plate_version: i64,
     },
+    Reestimate {
+        job_id: String,
+    },
     Move {
         job_id: String,
         index: usize,
@@ -143,7 +146,12 @@ fn record(c: &Connection, pid: &str, command: &Command) -> Result<()> {
     )?;
     Ok(())
 }
-fn resolve(c: &Connection, pid: &str, s: &Specification, profiles: &Profiles) -> Result<Resolved> {
+pub(crate) fn resolve(
+    c: &Connection,
+    pid: &str,
+    s: &Specification,
+    profiles: &Profiles,
+) -> Result<Resolved> {
     let exists: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM ams_slots WHERE id=?1 AND printer_id=?2)",
         params![s.ams_slot_id, pid],
@@ -274,7 +282,7 @@ fn planned(c: &Connection, device: &Device, plate: &crate::plates::Plate) -> Res
         bed_type: bed.clone(),
     })
 }
-fn message(error: &Error) -> String {
+pub(crate) fn message(error: &Error) -> String {
     match error {
         Error::Invalid(s) | Error::Unavailable(s) | Error::Conflict(s) | Error::Upstream(s) => {
             (*s).into()
@@ -290,6 +298,93 @@ fn directory(store: &Store, job: &str, attempt: &str) -> Result<PathBuf> {
         }
     }
     Ok(store.root.join("jobs").join(job).join(attempt))
+}
+
+pub(crate) fn originals(
+    c: &Connection,
+    plate: &crate::plates::Plate,
+    cached: Option<&std::path::Path>,
+) -> Result<Vec<Option<Vec<u8>>>> {
+    let mut originals = Vec::new();
+    let mut index = 0;
+    for model in &plate.models {
+        let cached = cached
+            .map(|path| path.join(format!("{index}.stl")))
+            .filter(|path| path.is_file())
+            .map(std::fs::read)
+            .transpose()?;
+        let original = if cached.is_some() {
+            cached
+        } else if model.source.is_none() {
+            c.query_row(
+                "SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2",
+                params![plate.id, model.id],
+                |r| r.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()?
+            .flatten()
+            .ok_or(Error::Conflict(
+                "Original model for this attempt is unavailable",
+            ))?
+            .into()
+        } else {
+            None
+        };
+        originals.push(original);
+        index += usize::from(model.quantity);
+    }
+    Ok(originals)
+}
+
+pub(crate) async fn write_inputs(
+    path: &std::path::Path,
+    plate: &crate::plates::Plate,
+    settings: &Resolved,
+    originals: Vec<Option<Vec<u8>>>,
+    provider: Option<&Source>,
+) -> Result<usize> {
+    let mut count = 0;
+    let mut remaining = crate::plates::MAX_UPLOAD;
+    for (model, original) in plate.models.iter().zip(originals) {
+        let bytes = if let Some(bytes) = original {
+            bytes
+        } else if let Some(source) = &model.source {
+            provider
+                .ok_or(Error::Unavailable("SCAD_LIVE_URL is not configured"))?
+                .model(source, remaining)
+                .await?
+        } else {
+            return Err(Error::Unavailable("Uploaded original is unavailable"));
+        };
+        let size = bytes
+            .len()
+            .checked_mul(usize::from(model.quantity))
+            .ok_or(Error::Invalid("Models exceed 64 MiB"))?;
+        remaining = remaining
+            .checked_sub(size)
+            .ok_or(Error::Invalid("Models exceed 64 MiB"))?;
+        for _ in 0..model.quantity {
+            std::fs::write(path.join(format!("{count}.stl")), &bytes)?;
+            count += 1;
+        }
+    }
+    for (name, profile) in &settings.profiles {
+        serde_json::to_writer(std::fs::File::create(path.join(name))?, profile)
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(count)
+}
+
+pub(crate) fn sync_files(path: &std::path::Path) -> Result<()> {
+    // Flush immutable inputs and outputs before persisting the upload/start attempt.
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            std::fs::File::open(entry.path())?.sync_all()?;
+        }
+    }
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
 }
 
 pub(crate) struct Service {
@@ -341,6 +436,8 @@ impl Service {
         let mut waiting = Vec::new();
         for job in list.iter().filter(|j| j.state == "queued") {
             let mut value = json!(job);
+            value["estimate"] =
+                crate::estimates::view(&c, job, self.slicer.as_ref().map(|s| s.profiles.as_ref()))?;
             let plate = crate::plates::load(&c, &job.plate_id)?;
             value["name"] = json!(plate.name);
             value["plate_version"] = json!(plate.version);
@@ -379,21 +476,28 @@ impl Service {
             let result = self.admission(&c, &plate, &status);
             Ok(json!({"plate_version":plate.version,"allowed":result.is_ok(),"reason":result.err().map(|e|message(&e))}))
         }).transpose()?;
-        let current_view = current.map(|job| {
-            let mut value = json!(job);
-            value["actual_ams_slot"] = if job.state == "printing" && status.synchronized {
-                json!(
-                    status
-                        .ams
-                        .as_ref()
-                        .and_then(|ams| ams.current_tray)
-                        .filter(|n| *n < 16)
-                )
-            } else {
-                Value::Null
-            };
-            value
-        });
+        let current_view = current
+            .map(|job| -> Result<Value> {
+                let mut value = json!(job);
+                value["estimate"] = crate::estimates::view(
+                    &c,
+                    job,
+                    self.slicer.as_ref().map(|s| s.profiles.as_ref()),
+                )?;
+                value["actual_ams_slot"] = if job.state == "printing" && status.synchronized {
+                    json!(
+                        status
+                            .ams
+                            .as_ref()
+                            .and_then(|ams| ams.current_tray)
+                            .filter(|n| *n < 16)
+                    )
+                } else {
+                    Value::Null
+                };
+                Ok(value)
+            })
+            .transpose()?;
         Ok(
             json!({"epoch":self.epoch,"generation":generation(&c,&self.device.id)?,"request_id":uuid::Uuid::new_v4().to_string(),"current":current_view,"admission":admission,"waiting":waiting,"printer":status,"allowed":{"next":next,"retry":retry,"discard":discard}}),
         )
@@ -565,6 +669,10 @@ impl Service {
                 let s = self.admission(tx, &plate, status)?;
                 tx.execute("INSERT INTO print_jobs(id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,state,position) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',coalesce((SELECT max(position)+1 FROM print_jobs WHERE printer_id=?2),0))",params![uuid::Uuid::new_v4().to_string(),self.device.id,plate_id,plate.name,s.ams_slot_id,s.filament_id,s.required_machine_profile_key,s.process_profile_key,s.bed_type])?;
             }
+            Action::Reestimate { job_id } => {
+                selected(job_id)?;
+                crate::estimates::retry(tx, &self.store, job_id)?;
+            }
             Action::Move { job_id, index } => {
                 selected(job_id)?;
                 if *index >= waiting.len() {
@@ -670,38 +778,12 @@ impl Service {
             execution.slot_revision = revision;
             execution
         };
-        let mut originals = Vec::new();
-        let mut index = 0;
-        for model in &execution.plate.models {
-            let cached = job
-                .attempt_id
-                .as_ref()
-                .map(|attempt| directory(&self.store, &job.id, attempt))
-                .transpose()?
-                .map(|path| path.join(format!("{index}.stl")))
-                .filter(|path| path.is_file())
-                .map(std::fs::read)
-                .transpose()?;
-            let original = if cached.is_some() {
-                cached
-            } else if model.source.is_none() {
-                c.query_row(
-                    "SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2",
-                    params![job.plate_id, model.id],
-                    |r| r.get::<_, Option<Vec<u8>>>(0),
-                )
-                .optional()?
-                .flatten()
-                .ok_or(Error::Conflict(
-                    "Original model for this attempt is unavailable",
-                ))?
-                .into()
-            } else {
-                None
-            };
-            originals.push(original);
-            index += usize::from(model.quantity);
-        }
+        let cached = job
+            .attempt_id
+            .as_ref()
+            .map(|id| directory(&self.store, &job.id, id))
+            .transpose()?;
+        let originals = originals(c, &execution.plate, cached.as_deref())?;
         job.state = "preparing".into();
         job.name.clone_from(&execution.plate.name);
         let attempt = uuid::Uuid::new_v4().to_string();
@@ -727,46 +809,40 @@ impl Service {
         let attempt_id = job.attempt_id.as_deref().expect("reserved attempt");
         let path = directory(&self.store, &job.id, attempt_id)?;
         std::fs::create_dir_all(&path)?;
-        let mut count = 0;
-        let mut remaining = crate::plates::MAX_UPLOAD;
-        for (model, original) in execution.plate.models.iter().zip(originals) {
-            let bytes = if let Some(bytes) = original {
-                bytes
-            } else if let Some(source) = &model.source {
-                self.source
-                    .as_ref()
-                    .ok_or(Error::Unavailable("SCAD_LIVE_URL is not configured"))?
-                    .model(source, remaining)
-                    .await?
-            } else {
-                return Err(Error::Unavailable("Uploaded original is unavailable"));
-            };
-            let size = bytes
-                .len()
-                .checked_mul(usize::from(model.quantity))
-                .ok_or(Error::Invalid("Models exceed 64 MiB"))?;
-            remaining = remaining
-                .checked_sub(size)
-                .ok_or(Error::Invalid("Models exceed 64 MiB"))?;
-            for _ in 0..model.quantity {
-                std::fs::write(path.join(format!("{count}.stl")), &bytes)?;
-                count += 1;
-            }
+        let count = write_inputs(
+            &path,
+            &execution.plate,
+            &execution.settings,
+            originals,
+            self.source.as_ref(),
+        )
+        .await?;
+        if !crate::estimates::reuse_for(
+            &self.store,
+            &job.id,
+            &execution.plate,
+            &execution.settings,
+            &path,
+            count,
+        ) {
+            self.slicer
+                .as_ref()
+                .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
+                .slice(
+                    path.clone(),
+                    count,
+                    execution.settings.selection.clone(),
+                    &job.id,
+                )
+                .await?;
         }
-        for (name, profile) in &execution.settings.profiles {
-            serde_json::to_writer(std::fs::File::create(path.join(name))?, profile)
-                .map_err(std::io::Error::other)?;
-        }
-        self.slicer
-            .as_ref()
-            .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
-            .slice(
-                path.clone(),
-                count,
-                execution.settings.selection.clone(),
-                &job.id,
-            )
-            .await?;
+        crate::estimates::actual(
+            &self.store,
+            &job,
+            &execution.plate,
+            &execution.settings,
+            &path,
+        )?;
         let bytes = std::fs::read(path.join("print.gcode.3mf"))?;
         let material =
             crate::print_start::material_for(&bytes, &execution.settings.selection.machine)?;
@@ -778,14 +854,7 @@ impl Service {
                 "Sliced material differs from the execution profile",
             ));
         }
-        // Flush immutable inputs and outputs before persisting the upload/start attempt.
-        for entry in std::fs::read_dir(&path)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                std::fs::File::open(entry.path())?.sync_all()?;
-            }
-        }
-        std::fs::File::open(&path)?.sync_all()?;
+        sync_files(&path)?;
         let mut attempt = Attempt::new(
             job.plate_id.clone(),
             job.id.clone(),

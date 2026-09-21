@@ -50,7 +50,7 @@ def main():
         # Fresh bytes are selected at preparation, not enqueue; a failed source has no fallback.
         original=rig.files['parts/cube.stl'];rig.files.clear()
         rig.next(first);rig.phase('needs_attention');assert not rig.broker.prints
-        rig.files['parts/cube.stl']=original.replace(b'facet normal',b'facet  normal')
+        rig.files['parts/cube.stl']=b'Updated'+original[7:]
         changed=hashlib.sha256(rig.files['parts/cube.stl']).hexdigest()
         rig.ftp.actions.put('wait')
         retry=rig.command(dict(type='retry',expected_job=first['id'],cleared=True))

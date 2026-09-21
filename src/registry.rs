@@ -205,6 +205,11 @@ pub fn router(
             .get_mut()
             .insert(entry.device.id.clone(), entry);
     }
+    crate::estimates::start(
+        registry.store.clone(),
+        registry.slicer.clone(),
+        registry.source.clone(),
+    )?;
     let registry = Arc::new(registry);
     let routes = Router::new()
         .route(

@@ -1,6 +1,7 @@
 mod ams;
 mod artifacts;
 mod database;
+mod estimates;
 mod filament;
 mod mcp;
 pub mod notifications;

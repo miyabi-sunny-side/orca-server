@@ -119,12 +119,79 @@ pub fn validate(path: &Path, models: usize, selection: &Selection, sliced: bool)
     Ok(())
 }
 
+fn prediction(xml: &str) -> Result<u64> {
+    let invalid = || Error::Invalid("OrcaSlicer estimate is unavailable");
+    let document = Document::parse(xml).map_err(|_| invalid())?;
+    let plates: Vec<_> = document
+        .root_element()
+        .children()
+        .filter(|n| n.has_tag_name("plate"))
+        .collect();
+    if plates.len() != 1 {
+        return Err(invalid());
+    }
+    let values: Vec<_> = plates[0]
+        .children()
+        .filter(|n| n.has_tag_name("metadata") && n.attribute("key") == Some("prediction"))
+        .collect();
+    if values.len() != 1 {
+        return Err(invalid());
+    }
+    let seconds = values[0]
+        .attribute("value")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .ok_or_else(invalid)?;
+    Ok(u64::from(seconds))
+}
+
+pub(crate) fn estimated_seconds(path: &Path) -> Result<u64> {
+    let invalid = || Error::Invalid("OrcaSlicer estimate is unavailable");
+    let mut archive = zip::ZipArchive::new(File::open(path)?).map_err(|_| invalid())?;
+    let file = archive
+        .by_name("Metadata/slice_info.config")
+        .map_err(|_| invalid())?;
+    let mut xml = String::new();
+    file.take(4 * 1024 * 1024 + 1).read_to_string(&mut xml)?;
+    if xml.len() > 4 * 1024 * 1024 {
+        return Err(invalid());
+    }
+    prediction(&xml)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const LAYOUT: &str = r#"<config><object id="2"/><object id="4"/><plate><metadata key="plater_id" value="1"/><model_instance><metadata key="object_id" value="2"/></model_instance><model_instance><metadata key="object_id" value="4"/></model_instance></plate></config>"#;
     const SLICE: &str = r#"<config><header><header_item key="OrcaSlicer-Version" value="2.4.2"/></header><plate><metadata key="outside" value="false"/><object skipped="false"/><object skipped="false"/></plate></config>"#;
+
+    #[test]
+    fn prediction_uses_single_plate_total_seconds_and_rejects_unknown_values() {
+        assert_eq!(
+            prediction(
+                r#"<config><plate><metadata key="prediction" value="1140"/></plate></config>"#
+            )
+            .unwrap(),
+            1140
+        );
+        for bad in ["", "0", "-1", "NaN", "1.5", "4294967296"] {
+            assert!(
+                prediction(&format!(
+                    r#"<config><plate><metadata key="prediction" value="{bad}"/></plate></config>"#
+                ))
+                .is_err()
+            );
+        }
+        for bad in [
+            "broken",
+            "<config><plate/></config>",
+            r#"<config><plate><metadata key="prediction" value="1140"/><metadata key="prediction" value="20"/></plate></config>"#,
+            r#"<config><plate><metadata key="prediction" value="1140"/></plate><plate><metadata key="prediction" value="20"/></plate></config>"#,
+        ] {
+            assert!(prediction(bad).is_err());
+        }
+    }
 
     #[test]
     fn rejects_missing_models_extra_plates_and_incomplete_slices() {

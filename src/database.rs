@@ -140,7 +140,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=8 => {}
+            1..=9 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -213,6 +213,9 @@ impl Database {
         }
         if version < 8 {
             crate::notifications::migrate(&tx)?;
+        }
+        if version < 9 {
+            tx.execute_batch("ALTER TABLE print_jobs ADD COLUMN estimate_json TEXT CHECK(estimate_json IS NULL OR json_valid(estimate_json)); PRAGMA user_version=9;")?;
         }
         reconcile_defaults(&tx)?;
         check_references(&tx)?;
@@ -438,7 +441,7 @@ mod tests {
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
-        db.connection().unwrap().execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
+        db.connection().unwrap().execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
         assert_eq!(db.default_printer().unwrap().as_deref(), Some("stable-id"));
@@ -470,7 +473,7 @@ mod tests {
         db.save(&second).unwrap();
         db.connection()
             .unwrap()
-            .execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; PRAGMA user_version=6;")
+            .execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
             .unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -773,7 +776,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

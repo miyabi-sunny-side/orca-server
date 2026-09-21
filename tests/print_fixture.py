@@ -38,13 +38,16 @@ def fake_slicer(root):
         (profiles/'filament'/f'{i}.json').write_text(json.dumps(dict(name=name, instantiation='true', compatible_printers=machines,
             filament_type=[material], nozzle_temperature=['220'], nozzle_temperature_initial_layer=['220'], required_nozzle_HRC=['0'])))
     script = '''#!/usr/bin/env python3
-import hashlib, io, json, pathlib, sys, zipfile, xml.etree.ElementTree as ET
+import hashlib, io, json, pathlib, sys, time, zipfile, xml.etree.ElementTree as ET
 if '--help' in sys.argv:
     print('OrcaSlicer-2.4.2:'); raise SystemExit()
 root=pathlib.Path.cwd()
 profiles={name:json.loads((root/(name+'.json')).read_text()) for name in ['printer','process','filament']}
 inputs=[hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.glob('*.stl'))]
 with pathlib.Path(TRACE).open('a') as log: log.write(json.dumps(dict(directory=str(root),arguments=sys.argv[1:],profiles=profiles,inputs=inputs))+'\\n')
+control=pathlib.Path(FIXTURE_CONTROL_DIR)
+while (control/'cli-hold').exists(): time.sleep(.02)
+if (control/'cli-fail').exists(): raise SystemExit(3)
 output=sys.argv[sys.argv.index('--export-3mf')+1]
 with zipfile.ZipFile(ARTIFACT) as source, zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as target:
     for entry in source.infolist():
@@ -59,7 +62,7 @@ with zipfile.ZipFile(ARTIFACT) as source, zipfile.ZipFile(output,'w',zipfile.ZIP
             metadata.find('plate/filament').set('type',profiles['filament']['filament_type'][0])
             data=ET.tostring(metadata)
         target.writestr(entry.filename,data)
-'''.replace('TRACE', repr(str(root/'cli.jsonl'))).replace('ARTIFACT', repr(str(REPO/'tests/fixtures/p1_print.gcode.3mf')))
+'''.replace('FIXTURE_CONTROL_DIR', repr(str(root))).replace('TRACE', repr(str(root/'cli.jsonl'))).replace('ARTIFACT', repr(str(REPO/'tests/fixtures/p1_print.gcode.3mf')))
     (app/'AppRun').write_text(script); (app/'AppRun').chmod(0o700)
     return app
 
@@ -84,7 +87,7 @@ class Rig:
         threading.Thread(target=self.scad.serve_forever, daemon=True).start()
         with socket.socket() as sock: sock.bind(('127.0.0.1', 0)); self.port = sock.getsockname()[1]
         self.base = f'http://127.0.0.1:{self.port}'
-        self.env = {k:v for k,v in os.environ.items() if not k.startswith('P1_') and k not in ('ORCA_APPDIR','SCAD_LIVE_URL')}
+        self.env = {k:v for k,v in os.environ.items() if not k.startswith('P1_') and k not in ('ORCA_APPDIR','SCAD_LIVE_URL','DISCORD_WEBHOOK_URL','ORCA_PUBLIC_URL')}
         self.env.update(PORT=str(self.port), PLATES_DIR=str(self.store), ORCA_APPDIR=str(appdir or fake_slicer(self.root)),
             SCAD_LIVE_URL=f'http://127.0.0.1:{self.scad.server_port}', P1_IP='127.0.0.1', P1_SERIAL=SERIAL,
             P1_ACCESS_CODE=SECRET,P1_TLS_CERT=str(self.root/'trusted.pem'),P1_MQTT_PORT=str(self.broker.port),
@@ -176,7 +179,11 @@ def printer_control(rig):
         def do_GET(self): self.reply()
         def do_POST(self):
             value=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            if value.get('fail_upload'): rig.ftp.actions.put('fail')
+            if 'slice_hold' in value:
+                path=rig.root/'cli-hold';path.touch() if value['slice_hold'] else path.unlink(missing_ok=True)
+            elif 'slice_fail' in value:
+                path=rig.root/'cli-fail';path.touch() if value['slice_fail'] else path.unlink(missing_ok=True)
+            elif value.get('fail_upload'): rig.ftp.actions.put('fail')
             elif value.get('disconnect'): rig.broker.actions.put('disconnect')
             elif value.get('state'): rig.report(value['state'],value.get('index',-1))
             else: rig.broker.send(rig.full)
