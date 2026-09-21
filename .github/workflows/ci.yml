@@ -98,6 +98,9 @@ jobs:
       - name: Verify MCP queue continuation against isolated printer
         run: python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
 
+      - name: Verify completion notifications against isolated HTTPS and printer peers
+        run: python3 tests/notifications.py /tmp/orca-notification-check
+
       - name: Verify mobile and desktop queue against isolated printer
         run: python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 

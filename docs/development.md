@@ -25,6 +25,8 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | `PLATES_DIR` | `data/plates` | プレートとSQLite台帳の保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
 | `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。モデル一覧・SCAD参照の保存/更新・印刷時の取得に必要です。 |
 | `ORCA_APPDIR` | ネイティブでは未設定、コンテナでは`/opt/orcaslicer` | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
+| `DISCORD_WEBHOOK_URL` | 未設定 | Discordの完了通知。形式と配送条件は[通知設定](container.md#discordの完了通知)を参照。 |
+| `ORCA_PUBLIC_URL` | 未設定 | 通知に付けるキューリンクの基準URL。省略するとリンクなし。 |
 | `ORCA_TIMEOUT_SECS` | `300` | 各CLI工程の上限秒数。OrcaSlicerを設定する場合は1〜3600。 |
 
 ネイティブ実行では全IPv4インターフェースで待ち受けます。
@@ -83,6 +85,7 @@ python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
 python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
 python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
 python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
+python3 tests/notifications.py /tmp/orca-notification-check
 python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
 DEFAULTS_BROWSER=1 python3 tests/plate_defaults.py target/debug/orca-server /tmp/orca-defaults-check
 PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
@@ -98,6 +101,8 @@ FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA
 プレート条件の検証ではnullable保存、所持機からの候補選択、実機別の装填照合、直接追加を確認します。
 キュー検証では準備時の最新データ固定、取り外し待ち、同時・重複操作、転送中AMS交換、開始前後の再起動とDB復元を通します。
 `print_fixture.py`のCLI代替は入力・状態遷移の検証用です。実際の配置・スライスは`tests/slicer_cli.py`とコンテナ検証で公式Orcaを実行します。
+通知検証では一時証明書のHTTPS受信先とMQTT/DBを使い、完了時だけの通知、再起動・行削除、429・5xx・timeout・恒久エラー・送信中断を確認します。
+本番のURL検証を変更せず、テスト用プロセスだけに隔離した接続先と短いtimeoutを渡します。Discordへは送信しません。
 CIでもMQTT・FTPS・キューの経路を検証します。実機や利用者のアクセスコードには接続しません。
 MCP検証は実クライアントの接続・tool呼出しから、10個の構成、共通温度、色追加、AMS対応・使用順を確認します。
 保存・材料操作では同じデータをREST APIで取得し、古い版・revisionの拒否と印刷命令が送られないことも検証します。

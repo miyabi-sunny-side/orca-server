@@ -918,6 +918,14 @@ impl Database {
             )?;
         }
         tx.execute("UPDATE print_jobs SET state=?1,attempt_json=?2,last_error=?3 WHERE id=?4 AND attempt_id=?5",params![state,raw,attempt.message,attempt.job_id,attempt.id])?;
+        if state == "awaiting_removal"
+            && previous != state
+            && self
+                .notifications_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            tx.execute("INSERT INTO print_notifications(attempt_id,job_id,printer_id,printer_name,plate_name) SELECT ?1,j.id,j.printer_id,p.name,j.name FROM print_jobs j JOIN printers p ON p.id=j.printer_id WHERE j.id=?2 AND j.attempt_id=?1 ON CONFLICT(attempt_id) DO NOTHING",params![attempt.id,attempt.job_id])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1398,6 +1406,134 @@ mod tests {
         assert_eq!(
             jobs(&s.store.db.connection().unwrap(), "one").unwrap()[0].state,
             "awaiting_removal"
+        );
+    }
+    #[tokio::test]
+    async fn completion_intent_commits_with_finish_and_survives_job_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        s.store
+            .db
+            .notifications_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let id = add(&s);
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Next {
+                        expected_job: id,
+                        removed_job: None,
+                        cleared: true,
+                    },
+                ),
+                &status(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut a = Attempt::new(prep.job.plate_id, prep.job.id, 0, "PLA".into());
+        a.id = prep.job.attempt_id.unwrap();
+        a.phase = Phase::Accepted;
+        s.store.db.persist_attempt("one", &a).unwrap();
+        a.phase = Phase::Unknown;
+        s.store.db.persist_attempt("one", &a).unwrap();
+        assert_eq!(
+            s.store
+                .db
+                .connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM print_notifications", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        a.phase = Phase::Printing;
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.store.db.connection().unwrap().execute_batch("CREATE TRIGGER reject_notification BEFORE INSERT ON print_notifications BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        a.phase = Phase::Finished;
+        assert!(s.store.db.persist_attempt("one", &a).is_err());
+        assert_eq!(
+            jobs(&s.store.db.connection().unwrap(), "one").unwrap()[0].state,
+            "printing"
+        );
+        s.store
+            .db
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_notification;")
+            .unwrap();
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.store.db.persist_attempt("one", &a).unwrap();
+        a.message = Some("same completion".into());
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.mutate(
+            &command(
+                &s,
+                Action::Discard {
+                    expected_job: a.job_id.clone(),
+                    cleared: true,
+                },
+            ),
+            &status(),
+        )
+        .unwrap();
+        s.cleanup().unwrap();
+        let c = s.store.db.connection().unwrap();
+        assert!(jobs(&c, "one").unwrap().is_empty());
+        let row: (String, String, String) = c
+            .query_row(
+                "SELECT attempt_id,job_id,printer_name FROM print_notifications",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (a.id, a.job_id, "one".into()));
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM print_notifications", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn enabling_notifications_does_not_replay_old_finished_jobs() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let id = add(&s);
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Next {
+                        expected_job: id,
+                        removed_job: None,
+                        cleared: true,
+                    },
+                ),
+                &status(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut a = Attempt::new(prep.job.plate_id, prep.job.id, 0, "PLA".into());
+        a.id = prep.job.attempt_id.unwrap();
+        a.phase = Phase::Finished;
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.store
+            .db
+            .notifications_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut restored = s.store.db.restore_attempt("one").unwrap().unwrap();
+        restored.message = Some("old finished report".into());
+        s.store.db.persist_attempt("one", &restored).unwrap();
+        assert_eq!(
+            s.store
+                .db
+                .connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM print_notifications", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
         );
     }
 }

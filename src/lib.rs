@@ -3,6 +3,7 @@ mod artifacts;
 mod database;
 mod filament;
 mod mcp;
+pub mod notifications;
 mod plate_api;
 pub mod plates;
 mod print_start;

@@ -18,8 +18,9 @@ pub fn init() {
             tracing_subscriber::fmt::layer()
                 .with_filter(level)
                 .with_filter(filter_fn(|metadata| {
-                    !metadata.target().starts_with("rumqttc")
-                        && !metadata.target().starts_with("suppaftp")
+                    !["rumqttc", "suppaftp", "reqwest", "hyper", "h2"]
+                        .iter()
+                        .any(|prefix| metadata.target().starts_with(prefix))
                 })),
         )
         .init();
@@ -43,6 +44,9 @@ mod tests {
         super::init();
         tracing::error!(target: "rumqttc::state", "protocol-secret-probe");
         tracing::error!(target: "suppaftp::command", "protocol-secret-probe");
+        tracing::error!(target: "reqwest::connect", "protocol-secret-probe");
+        tracing::error!(target: "hyper::proto", "protocol-secret-probe");
+        tracing::error!(target: "h2::codec", "protocol-secret-probe");
         tracing::error!("log-probe-error");
         tracing::warn!("log-probe-warn");
         tracing::info!("log-probe-info");

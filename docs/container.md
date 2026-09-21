@@ -46,6 +46,46 @@ P1Sを設定する場合は、確認済みの証明書を読み取り専用で�
 初回から画面で登録する場合は、P1_*と証明書マウントは不要です。
 スマホから開く場合はポートを家庭LANのアドレスへ公開し、信頼できるネットワークに到達範囲を制限します。
 
+## Discordの完了通知
+
+`DISCORD_WEBHOOK_URL`でDiscordのIncoming Webhookを指定します。
+管理中の印刷が完了して「取り外し待ち」になると通知します。
+プリンター名・プレート名・ジョブIDを送ります。送信受理、進捗100%、失敗・取消、取り外しだけでは通知しません。
+未設定・空文字なら通知は無効です。
+
+次の2形式を受け付けます。`<id>`と`<token>`は自分のWebhookの値に置き換えます。
+
+- `https://discord.com/api/webhooks/<id>/<token>`
+- `discord://<token>@<id>`（Watchtower/Shoutrrrで使う形式）
+
+queryやfragmentを付けないでください。不正な形式では起動せず、ログに値は出しません。
+URLには秘密のtokenが含まれるため、上記の非公開envファイルへ保存します。
+すでにCompose用の`WATCHTOWER_NOTIFICATION_URL`で送り先を管理している場合は、サービスの設定で参照できます。
+
+```yaml
+environment:
+  DISCORD_WEBHOOK_URL: ${WATCHTOWER_NOTIFICATION_URL}
+```
+
+キューへのリンクも通知する場合は、ブラウザから開けるサーバーのURLを`ORCA_PUBLIC_URL`へ指定します（例: `https://orca.example/`）。
+HTTP/HTTPSのURLで、ユーザー名・パスワード・query・fragmentは指定できません。末尾の`/`を補ったURLは768 byte以下にします。
+未設定ならリンクを省略します。プリンター名・プレート名によるメンションは無効にします。
+
+送信は印刷処理と別に行い、通信障害でキューや取り外し操作を止めません。
+完了時に通知を保存するため、取り外しでジョブを削除しても送信対象は残ります。
+Discordの応答でメッセージIDを確認できたものは、通常の再起動やFINISHの繰返しで再送しません。
+導入前や通知無効中に完了したジョブを、後からまとめて通知することはありません。
+
+HTTP送信は1回10秒まで、1件あたり最大3回です。429は指定された待ち時間を守り、5xxと通信失敗は2秒・4秒の間隔で再試行します。
+認証エラーなどの恒久的な4xxでは再試行しません。送信結果をDBへ保存できない間は、HTTPを再送せず保存を再試行します。
+応答消失やプロセス停止で到達不明になると、再試行で通知が重複し得ます。
+1回限りの配送は保証しません。3回とも結果不明なら、自動再送を止めます。
+
+`docker logs orca-server`で`Discord completion notification delivery recorded`を確認できます。
+`sent`は到達確認済み、`pending`は再試行待ち、`unknown`は到達不明、`failed`は打切りです。`tries`は送信回数です。
+初期状態や送信中も含む記録はSQLiteの`print_notifications`に残ります。送信先URLやtokenは保存しません。
+設定後は通常の印刷を1件完了させ、指定チャンネルの通知とキューの「取り外し待ち」を照合してください。
+
 ## 保存先と動作確認
 
 実行ユーザーはUID/GID `10001:10001`です。名前付きボリュームは初回に保存先の所有権を引き継ぎます。
@@ -73,8 +113,9 @@ docker logs orca-server
 稼働中のDBファイルだけをコピーしないでください。SCAD元データはscad-live側でも保管します。
 アップロード元STLは同じDBに含まれるため、DBの復元で再利用できます。
 
-現在のSQLite schema versionは6です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
-プレート・キューの`plates`、`plate_items`、`print_jobs`を含めて計8テーブルです。
+現在のSQLite schema versionは8です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
+プレート・キューには`plates`、`plate_items`、`print_jobs`を使います。
+初期設定は`default_settings`、通知は`print_notifications`で保持します。
 製品と色の分離では既存材料IDとキューを保持し、全設定が一致する製品だけをまとめます。[材料の移行条件](filaments.md#保存と移行)を確認してください。
 旧版からの初回起動では、旧`plate.json`が示すプレートID・名前・モデル構成を一つのtransactionで取り込みます。
 SCAD由来は参照、直接アップロード由来はSTL本体を保管し、個数は1です。

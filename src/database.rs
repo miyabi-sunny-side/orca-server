@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -69,6 +69,7 @@ pub(crate) struct Device {
 pub(crate) struct Database {
     // ponytail: serialize the small registry; use a pool only if measured contention warrants it.
     connection: Arc<Mutex<Connection>>,
+    pub(crate) notifications_enabled: Arc<AtomicBool>,
 }
 
 impl From<rusqlite::Error> for Error {
@@ -115,6 +116,7 @@ fn check_references(c: &Connection) -> Result<()> {
     Ok(())
 }
 impl Database {
+    #[allow(clippy::too_many_lines)] // Schema migrations share one rollback boundary.
     pub fn open(root: &Path, initial: impl FnOnce() -> Result<Option<Device>>) -> Result<Self> {
         let mut connection = private_connection(root)?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -138,7 +140,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=7 => {}
+            1..=8 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -209,12 +211,16 @@ impl Database {
         if version < 7 {
             migrate_defaults(&tx)?;
         }
+        if version < 8 {
+            crate::notifications::migrate(&tx)?;
+        }
         reconcile_defaults(&tx)?;
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            notifications_enabled: Arc::new(AtomicBool::new(false)),
         })
     }
     pub(crate) fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -432,7 +438,7 @@ mod tests {
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
-        db.connection().unwrap().execute_batch("DROP TABLE default_settings; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
+        db.connection().unwrap().execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
         assert_eq!(db.default_printer().unwrap().as_deref(), Some("stable-id"));
@@ -464,7 +470,7 @@ mod tests {
         db.save(&second).unwrap();
         db.connection()
             .unwrap()
-            .execute_batch("DROP TABLE default_settings; PRAGMA user_version=6;")
+            .execute_batch("DROP TABLE default_settings; DROP TABLE print_notifications; PRAGMA user_version=6;")
             .unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -503,7 +509,7 @@ mod tests {
                     |r| r.get::<_, i64>(0)
                 )
                 .unwrap(),
-                9
+                10
             );
             assert_eq!(
                 c.query_row("SELECT name FROM plates WHERE id=?1", [&id], |r| r
@@ -767,7 +773,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())
