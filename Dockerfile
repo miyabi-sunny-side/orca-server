@@ -22,6 +22,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --locked --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock build.rs LICENSE THIRD_PARTY_NOTICES ./
 COPY src/ src/
+COPY migrations/ migrations/
 COPY --from=frontend /app/client/dist ./client/dist
 ARG ORCA_SOURCE_URL
 RUN ORCA_SOURCE_URL="$ORCA_SOURCE_URL" cargo build --locked --release
