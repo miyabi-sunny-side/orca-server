@@ -30,6 +30,7 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 | SCAD参照で新規作成 | `POST /api/plates/import`（JSON） |
 | プレート取得 | `GET /api/plates/{id}` |
 | 構成を編集 | `PUT /api/plates/{id}`（JSON） |
+| 保存モデルのプレビュー用STL取得 | `GET /api/plates/{id}/models/{model_id}` |
 | アップロード元のSTL取得 | `GET /api/plates/{id}/files/{model_id}` |
 
 ## SCADモデルを選ぶ
@@ -54,6 +55,17 @@ curl --fail http://127.0.0.1:3000/api/plates/import \
 参照先が印刷時に消失・取得失敗した場合は要確認となり、以前のSTLで代用しません。
 SCAD参照を含む保存・更新には`SCAD_LIVE_URL`が必要です。未設定は503、上流の通信・一覧異常は502です。
 各上流要求は15秒、一覧は1 MiBまでです。直接アップロードした項目だけの更新には接続不要です。
+
+## 形状を確認する
+
+詳細画面は構成行から表示モデルを選び、3D形状と寸法を確認できます。
+ドラッグで回転、ホイールやボタンで拡大縮小し、「全体を表示」で視点を戻します。
+SCAD参照は現在のモデル、アップロードは保存したSTLを表示します。表示はモデル単体で、配置やスライス結果ではありません。
+
+`GET /api/plates/{id}/models/{model_id}`は、そのプレートに属するモデルだけを返します。
+SCAD参照は設定済みソースから毎回取得し、応答は`Cache-Control: no-store`です。
+失敗時に古い形状へ戻さず、画面から読み直せます。プレビューに失敗しても構成は編集できます。
+プレートの保存内容や印刷準備時に使うSTLの取得方法は変わりません。
 
 ## 構成を編集する
 

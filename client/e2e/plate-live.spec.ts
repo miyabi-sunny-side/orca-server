@@ -15,7 +15,9 @@ test('owned machine conditions persist and enqueue directly at desktop and narro
     await page.getByRole('combobox',{name:'フィラメント',exact:true}).selectOption(ctx.filament);
     await page.getByLabel('工程（品質）').selectOption(ctx.process);await page.getByRole('combobox',{name:'ビルドプレート',exact:true}).selectOption(ctx.bed);
     await page.getByRole('button',{name:'保存',exact:true}).click();
-    await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);const path=new URL(page.url()).pathname;
+    await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);
+    await expect(page.getByRole('complementary',{name:'STLプレビュー'}).getByRole('status')).toHaveText('20.0 × 20.0 × 20.0 mm');
+    const path=new URL(page.url()).pathname;
     await expect(page.getByLabel('追加先のプリンター').locator('option')).toHaveCount(3);
     await page.getByLabel('追加先のプリンター').selectOption(ctx.devices[1]);await page.reload();
     await expect(page.getByLabel('追加先のプリンター')).toHaveValue(ctx.devices[1]);
@@ -23,9 +25,9 @@ test('owned machine conditions persist and enqueue directly at desktop and narro
     const count=(await queue()).waiting.length;
     const add=page.getByRole('button',{name:'印刷キューへ',exact:true});await expect(add).toBeEnabled();
     await add.evaluate((button:HTMLButtonElement)=>{button.click();button.click();});
-    await expect(page.getByRole('status')).toContainText('キューに追加しました');expect((await queue()).waiting.length).toBe(count+1);
+    await expect(page.getByRole('status').filter({hasText:'キューに追加しました'})).toBeVisible();expect((await queue()).waiting.length).toBe(count+1);
     await expect(page).toHaveURL(new RegExp(path+'$'));await page.reload();await add.click();
-    await expect(page.getByRole('status')).toContainText('キューに追加しました');expect((await queue()).waiting.length).toBe(count+2);
+    await expect(page.getByRole('status').filter({hasText:'キューに追加しました'})).toBeVisible();expect((await queue()).waiting.length).toBe(count+2);
     expect((await queue()).current).toBeNull();
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/plate-${width}-${colorScheme}.png`,fullPage:true});

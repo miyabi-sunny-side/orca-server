@@ -81,6 +81,7 @@ COPY LICENSE THIRD_PARTY_NOTICES /usr/share/doc/orca-server/
 COPY --from=rust-sources /notices /usr/share/doc/orca-server/dependencies
 COPY --from=frontend /app/client/node_modules/svelte/LICENSE.md /usr/share/doc/orca-server/frontend/svelte-LICENSE
 COPY --from=frontend /app/client/node_modules/esm-env/LICENSE /usr/share/doc/orca-server/frontend/esm-env-LICENSE
+COPY --from=frontend /app/client/vendor/LICENSE /usr/share/doc/orca-server/frontend/three-LICENSE
 COPY --from=frontend /app/client/node_modules/clsx/license /usr/share/doc/orca-server/frontend/clsx-LICENSE
 COPY --from=frontend /app/client/node_modules/normalize.css/LICENSE.md /usr/share/doc/orca-server/frontend/normalize-LICENSE
 COPY --from=backend /app/target/release/orca-server /usr/local/bin/orca-server

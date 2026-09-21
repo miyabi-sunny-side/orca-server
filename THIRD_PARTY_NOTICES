@@ -4,7 +4,8 @@ Rust + Svelte Template
 https://github.com/miyabi-sunny-side/rust-svelte-template
 Base: fa63d25dbcb3762e2ecf7e56bfaddb994cdba07c
 
-scad-live (fuzzy-search scoring)
+scad-live (fuzzy-search scoring, STL viewer and latest-request guard)
+Viewer base: 88e840be222be37d6190bfa1c983fe59bcd82ea4
 https://github.com/miyabi-sunny-side/scad-live
 
 The following notice applies to those portions, not to OrcaServer as a whole.
@@ -71,3 +72,29 @@ vendor configuration for rebuilding. The web bundle includes Svelte,
 esm-env, clsx and normalize.css; their MIT notices are retained under
 /usr/share/doc/orca-server/frontend. Exact package versions are in the
 OrcaServer source's client/package-lock.json.
+
+Vendored Three.js r185 (build, OrbitControls and STLLoader), copied unchanged
+from the scad-live commit above. No runtime CDN is used.
+https://github.com/mrdoob/three.js/tree/r185
+
+The MIT License
+
+Copyright © 2010-2026 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

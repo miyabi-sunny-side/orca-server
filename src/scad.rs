@@ -2,7 +2,8 @@ use crate::plates::{Error, Result, valid_model_name};
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use reqwest::{Client, Url};
@@ -20,11 +21,45 @@ pub(crate) fn router(store: crate::plates::Store, source: Option<Source>) -> Rou
         .route("/api/scad/models", get(list_models))
         .route("/api/plates/import", post(import))
         .route("/api/plates/{id}", put(replace))
+        .route("/api/plates/{id}/models/{model_id}", get(preview))
         .with_state(ImportState { store, source })
 }
 
 fn require_source(source: Option<Source>) -> Result<Source> {
     source.ok_or(Error::Unavailable("SCAD_LIVE_URL is not configured"))
+}
+
+async fn preview(
+    State(state): State<ImportState>,
+    Path((id, model_id)): Path<(String, String)>,
+) -> Result<Response> {
+    let store = state.store;
+    let (model, store, id) = crate::plate_api::blocking(move || {
+        let model = store
+            .get(&id)?
+            .models
+            .into_iter()
+            .find(|model| model.id == model_id)
+            .ok_or(Error::NotFound)?;
+        Ok((model, store, id))
+    })
+    .await?;
+    let bytes = if let Some(path) = model.source {
+        require_source(state.source)?
+            .model(&path, crate::plates::MAX_UPLOAD)
+            .await?
+    } else {
+        crate::plate_api::blocking(move || store.read_file(&id, &model.id)).await?
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -475,5 +510,139 @@ mod tests {
             app.oneshot(outside).await.unwrap().status(),
             StatusCode::FORBIDDEN
         );
+    }
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Keep ownership, freshness and failures on the same stored models.
+    async fn preview_reads_only_owned_models_and_current_reference_bytes() {
+        use crate::plates::{Conditions, Edit, Input, ItemEdit, ModelInput, Store};
+        use axum::body::to_bytes;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let original = include_bytes!("../tests/fixtures/triangle.stl").to_vec();
+        let uploaded = store
+            .save(Input {
+                name: "Uploaded".into(),
+                conditions: Conditions::default(),
+                models: vec![ModelInput {
+                    name: "saved.stl".into(),
+                    data: original.clone(),
+                    source: None,
+                }],
+            })
+            .unwrap();
+        let referenced = store
+            .edit(
+                None,
+                Edit {
+                    name: "Reference".into(),
+                    version: None,
+                    conditions: Conditions::default(),
+                    models: vec![ItemEdit {
+                        id: None,
+                        name: "current.stl".into(),
+                        source: Some("parts/current.stl".into()),
+                        quantity: 1,
+                    }],
+                },
+            )
+            .unwrap();
+        let fixture = Fixture::default();
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("parts/current.stl".into(), original.clone());
+        let server = fixture_server(fixture.clone()).await;
+        let app = crate::app_with_source(store.clone(), Some(Source::new(&server.base).unwrap()));
+        let request = |plate: &str, model: &str| {
+            Request::builder()
+                .uri(format!("/api/plates/{plate}/models/{model}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        for plate in [&uploaded, &referenced] {
+            let response = app
+                .clone()
+                .oneshot(request(&plate.id, &plate.models[0].id))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                original
+            );
+        }
+        for (plate, model) in [
+            (&uploaded.id, &referenced.models[0].id),
+            (&referenced.id, &uploaded.models[0].id),
+            (&uploaded.id, &"missing".to_owned()),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(plate, model))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        let changed = include_bytes!("../tests/fixtures/cube.stl").to_vec();
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("parts/current.stl".into(), changed.clone());
+        let response = app
+            .clone()
+            .oneshot(request(&referenced.id, &referenced.models[0].id))
+            .await
+            .unwrap();
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            changed
+        );
+        fixture.files.lock().unwrap().clear();
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&referenced.id, &referenced.models[0].id))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("parts/current.stl".into(), b"broken".to_vec());
+        assert_eq!(
+            app.clone()
+                .oneshot(request(&referenced.id, &referenced.models[0].id))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let offline = crate::app_with_store(store.clone());
+        assert_eq!(
+            offline
+                .clone()
+                .oneshot(request(&referenced.id, &referenced.models[0].id))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            offline
+                .oneshot(request(&uploaded.id, &uploaded.models[0].id))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(store.get(&referenced.id).unwrap(), referenced);
+        assert_eq!(store.get(&uploaded.id).unwrap(), uploaded);
     }
 }

@@ -30,7 +30,7 @@ for(const colorScheme of ['dark','light'] as const) {
     expect(requests).toHaveLength(1);expect(requests[0].action).toEqual({type:'add',plate_id:'11111111-1111-4111-8111-111111111111',plate_version:1});
     await page.reload();await expect(add).toBeDisabled();
     await page.getByRole('button',{name:'同じ要求を再確認'}).click();
-    await expect(page.getByRole('status')).toContainText('キューに追加しました');
+    await expect(page.getByRole('status').filter({hasText:'キューに追加しました'})).toBeVisible();
     expect(requests).toHaveLength(2);expect(requests[1]).toEqual(requests[0]);expect(waiting).toHaveLength(1);
     await expect(page).toHaveURL(/\/plates\/11111111-1111-4111-8111-111111111111$/);
     await expect(page.getByLabel('使用するAMSスロット')).toHaveCount(0);

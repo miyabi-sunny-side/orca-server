@@ -109,27 +109,29 @@
 </script>
 
 {#if step === 1}
-  <div class="page-heading">
-    <h2>STLを選択</h2>
-    <button
-      class="btn primary"
-      disabled={!selected.length}
-      onclick={() => (step = 2)}>構成を確認（{selected.length}）</button
+  <div class="model-search">
+    <div class="page-heading">
+      <h2>STLを選択</h2>
+      <button
+        class="btn primary"
+        disabled={!selected.length}
+        onclick={() => (step = 2)}>構成を確認（{selected.length}）</button
+      >
+    </div>
+    <label class="field"
+      ><span>モデル名で検索</span><input
+        type="search"
+        bind:value={query}
+        bind:this={search}
+        onkeydown={(e) => {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            list?.querySelector("input")?.focus();
+          }
+        }}
+      /></label
     >
   </div>
-  <label class="field"
-    ><span>モデル名で検索</span><input
-      type="search"
-      bind:value={query}
-      bind:this={search}
-      onkeydown={(e) => {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          list?.querySelector("input")?.focus();
-        }
-      }}
-    /></label
-  >
   {#if loading}<p class="state" role="status">モデルを読み込んでいます…</p>
   {:else if loadError}<div class="notice">
       <p role="alert">{loadError}</p>
@@ -231,6 +233,18 @@
 {/if}
 
 <style lang="sass">
+  .model-search
+    position: sticky
+    top: var(--header-h)
+    z-index: 5
+    background: var(--c-surface)
+    padding: var(--sp-2) 0
+    border-bottom: 1px solid var(--c-border)
+    .page-heading
+      margin-top: 0
+    .field
+      margin-bottom: 0
+
   fieldset
     border: 0
     padding: 0
