@@ -38,7 +38,7 @@ class ContainerRig(Rig):
 def main():
     rig=ContainerRig(sys.argv[1],sys.argv[2])
     try:
-        rig.launch();rig.seed()
+        rig.launch();rig.seed(); reference=rig.plate
         material = rig.api('/api/filaments/'+rig.materials[1]['id'])['settings'][0]
         setting = {k:material[k] for k in ['machine_profile_key','base_profile_key','overrides_json']}
         setting['overrides_json'].update(bed_temperature_initial_layer=65,bed_temperature=65)
@@ -57,8 +57,10 @@ def main():
             body+=b'--orca-boundary\r\n'+header.encode()+b'\r\n\r\n'+value+b'\r\n'
         body+=b'--orca-boundary--\r\n'
         req=urllib.request.Request(rig.base+'/api/plates',data=body,headers={'Content-Type':'multipart/form-data; boundary=orca-boundary'})
-        rig.plate=json.loads(urllib.request.urlopen(req).read()); plate=rig.plate
-        job=rig.add(3); waiting=rig.add(0);rig.next(job)
+        rig.plate=json.loads(urllib.request.urlopen(req).read())
+        job=rig.add(3); plate=rig.plate
+        waiting=rig.send(rig.add_action(rig.specification(0), reference))['waiting'][-1]
+        rig.next(job)
         until(lambda:len(rig.broker.prints)==1,90)
         current=rig.api()['current']; artifact=Path('/data/plates')/current['artifact_path']
         data={}
