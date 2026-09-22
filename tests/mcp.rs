@@ -481,8 +481,12 @@ async fn creation_defaults_match_rest() {
             cleared["conditions"]
                 .as_object()
                 .unwrap()
-                .values()
-                .all(Value::is_null)
+                .iter()
+                .all(|(key, value)| if key == "brim_enabled" {
+                    value == false
+                } else {
+                    value.is_null()
+                })
         );
     }
     edit["conditions"] =
@@ -491,6 +495,26 @@ async fn creation_defaults_match_rest() {
     assert_eq!(explicit["conditions"]["sparse_infill_pattern"], "gyroid");
     assert_eq!(explicit["conditions"]["sparse_infill_density"], 0.0);
     assert_eq!(explicit["conditions"]["wall_loops"], 4);
+    assert_eq!(explicit["conditions"]["brim_enabled"], false);
+    let id = explicit["id"].as_str().unwrap();
+    let mut current = explicit.clone();
+    for enabled in [true, false] {
+        let mut update = current.clone();
+        update.as_object_mut().unwrap().remove("id");
+        update["conditions"]["brim_enabled"] = json!(enabled);
+        current = call(
+            &client,
+            "plate_save",
+            json!({"id":id,"plate":update}),
+            false,
+        )
+        .await["data"]
+            .clone();
+        assert_eq!(current["conditions"]["brim_enabled"], enabled);
+        assert_eq!(read(&base, &format!("/api/plates/{id}")).await, current);
+        assert_eq!(current["models"], explicit["models"]);
+        assert_eq!(current["conditions"]["wall_loops"], 4);
+    }
     client.cancel().await.unwrap();
 }
 

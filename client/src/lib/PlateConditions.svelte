@@ -217,6 +217,14 @@
       {legacy}
       {changed}
     />
+    <label class="brim-option">
+      <input
+        type="checkbox"
+        bind:checked={value.brim_enabled}
+        onchange={() => changed("brim_enabled")}
+      />
+      <span>ブリムを付ける</span>
+    </label>
   </details>
   {#if loading || reading}<p class="caption" role="status">
       印刷条件を確認しています…
@@ -242,6 +250,16 @@
 </fieldset>
 
 <style lang="sass">
+  .brim-option
+    display: flex
+    align-items: center
+    gap: var(--sp-2)
+    min-height: 44px
+    margin-top: var(--sp-3)
+    cursor: pointer
+    input
+      accent-color: var(--c-accent)
+
   .conditions
     border: 0
     border-top: 1px solid var(--c-border)

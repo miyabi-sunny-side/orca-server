@@ -33,7 +33,7 @@ def fake_slicer(root):
                     printer_model=machine.split(' 0.')[0], default_print_profile=PROCESS,
                     default_filament_profile=[FILAMENT])
         (profiles/'machine'/f'{i}.json').write_text(json.dumps(data))
-    (profiles/'process'/'standard.json').write_text(json.dumps(dict(name=PROCESS, instantiation='true', compatible_printers=machines, sparse_infill_pattern='crosshatch', sparse_infill_density='15%', wall_loops='2', top_shell_layers='5', bottom_shell_layers='3', top_shell_thickness='1', bottom_shell_thickness='0')))
+    (profiles/'process'/'standard.json').write_text(json.dumps(dict(name=PROCESS, instantiation='true', compatible_printers=machines, brim_width='5', brim_object_gap='0.1', sparse_infill_pattern='crosshatch', sparse_infill_density='15%', wall_loops='2', top_shell_layers='5', bottom_shell_layers='3', top_shell_thickness='1', bottom_shell_thickness='0')))
     for i, (name, material) in enumerate([(FILAMENT, 'PLA'), ('Generic PETG', 'PETG')]):
         (profiles/'filament'/f'{i}.json').write_text(json.dumps(dict(name=name, instantiation='true', compatible_printers=machines,
             cool_plate_temp=['35'], cool_plate_temp_initial_layer=['35'], eng_plate_temp=['55'], eng_plate_temp_initial_layer=['55'], hot_plate_temp=['55'], hot_plate_temp_initial_layer=['55'], textured_plate_temp=['55'], textured_plate_temp_initial_layer=['55'], filament_type=[material], nozzle_temperature=['220'], nozzle_temperature_initial_layer=['220'], required_nozzle_HRC=['0'])))

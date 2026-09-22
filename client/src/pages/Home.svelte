@@ -14,8 +14,11 @@
     menuRow: HTMLAnchorElement | undefined;
   let queueBusy = $state(false),
     deleting = $state(false),
+    confirmDelete = $state(false),
     menuError = $state(""),
     notice = $state("");
+  let cancelButton = $state<HTMLButtonElement>(),
+    deleteButton = $state<HTMLButtonElement>();
   let press: ReturnType<typeof setTimeout> | undefined,
     point = { x: 0, y: 0 },
     longPressed = false;
@@ -31,10 +34,12 @@
     menuPlate = plate;
     menuError = "";
     queueBusy = false;
+    confirmDelete = false;
   }
   async function closeMenu() {
     if (deleting) return;
     menuPlate = undefined;
+    confirmDelete = false;
     await tick();
     (menuRow?.isConnected
       ? menuRow
@@ -53,10 +58,25 @@
       menuPlate = plate;
       menuError = "";
       queueBusy = false;
+      confirmDelete = false;
     }, 500);
   }
+  async function askToDelete() {
+    if (!menuPlate || queueBusy || deleting) return;
+    confirmDelete = true;
+    menuError = "";
+    await tick();
+    cancelButton?.focus();
+  }
+  async function cancelDelete() {
+    if (deleting) return;
+    confirmDelete = false;
+    menuError = "";
+    await tick();
+    deleteButton?.focus();
+  }
   async function remove() {
-    if (!menuPlate || deleting || queueBusy) return;
+    if (!menuPlate || !confirmDelete || deleting || queueBusy) return;
     const plate = menuPlate;
     deleting = true;
     menuError = "";
@@ -69,6 +89,8 @@
     } catch (cause) {
       menuError = (cause as Error).message;
       deleting = false;
+      await tick();
+      cancelButton?.focus();
     }
   }
 
@@ -202,31 +224,57 @@
 </section>
 
 {#if menuPlate}
-  <Modal title={menuPlate.name} onclose={() => void closeMenu()}>
-    <div class="plate-menu">
-      <PlateQueueAdd
-        bind:plate={menuPlate}
-        label="キュー追加"
-        paused={deleting}
-        onbusy={(value) => (queueBusy = value)}
-        onadded={() => {
-          notice = "キューに追加しました";
-          void closeMenu();
-        }}
-      />
-      <button
-        class="btn"
-        disabled={queueBusy || deleting}
-        onclick={() => location.assign(`/plates/${menuPlate!.id}?edit=1`)}
-        >編集</button
-      >
-      <button
-        class="btn danger"
-        disabled={queueBusy || deleting}
-        onclick={() => void remove()}>{deleting ? "削除中…" : "削除"}</button
-      >
+  <Modal
+    title={confirmDelete ? "プレートを削除" : menuPlate.name}
+    dismissible={!deleting}
+    onclose={() => void (confirmDelete ? cancelDelete() : closeMenu())}
+  >
+    {#if confirmDelete}
+      <p class="delete-name">「{menuPlate.name}」を削除しますか？</p>
+      <p class="caption">
+        保存済み一覧から削除します。追加済みのキューは残ります。
+      </p>
+      <div class="actions">
+        <button
+          class="btn"
+          bind:this={cancelButton}
+          disabled={deleting}
+          onclick={() => void cancelDelete()}>キャンセル</button
+        >
+        <button
+          class="btn danger"
+          disabled={deleting}
+          onclick={() => void remove()}>{deleting ? "削除中…" : "削除"}</button
+        >
+      </div>
       {#if menuError}<p role="alert">{menuError}</p>{/if}
-    </div>
+    {:else}
+      <div class="plate-menu">
+        <PlateQueueAdd
+          bind:plate={menuPlate}
+          label="キュー追加"
+          paused={deleting}
+          onbusy={(value) => (queueBusy = value)}
+          onadded={() => {
+            notice = "キューに追加しました";
+            void closeMenu();
+          }}
+        />
+        <button
+          class="btn"
+          disabled={queueBusy || deleting}
+          onclick={() => location.assign(`/plates/${menuPlate!.id}?edit=1`)}
+          >編集</button
+        >
+        <button
+          class="btn danger"
+          bind:this={deleteButton}
+          disabled={queueBusy || deleting}
+          onclick={() => void askToDelete()}>削除</button
+        >
+        {#if menuError}<p role="alert">{menuError}</p>{/if}
+      </div>
+    {/if}
   </Modal>
 {/if}
 
@@ -234,4 +282,9 @@
   .plate-menu
     display: grid
     gap: var(--sp-2)
+    :global(.queue-add > .actions)
+      display: grid
+      margin: 0
+  .delete-name
+    overflow-wrap: anywhere
 </style>

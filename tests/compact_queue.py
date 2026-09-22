@@ -42,12 +42,12 @@ def run(binary, output):
         ids = [j['id'] for j in rig.api()['waiting']]
         rig.stop()
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
-            c.executescript('ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;')
+            c.executescript('ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;')
         rig.launch(); rig.idle(); ready()
-        assert rows('PRAGMA user_version') == [(11,)]
+        assert rows('PRAGMA user_version') == [(12,)]
         assert rows('SELECT * FROM plate_items ORDER BY id') == originals
         assert [j['id'] for j in rig.api()['waiting']] == ids
-        results['schema_10_to_11_preserves_compositions_and_queue'] = True
+        results['schema_10_to_12_preserves_compositions_and_queue'] = True
         rig.next(active); until(lambda: len(rig.broker.prints) == 1)
         rig.report('RUNNING'); rig.phase('printing')
         frozen = rows('SELECT execution_json,attempt_json,artifact_path FROM print_jobs WHERE id=?', (active['id'],))

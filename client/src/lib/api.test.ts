@@ -85,3 +85,23 @@ it("default selection failures identify the missing printer", async () => {
     request("/api/default-settings", { method: "PUT" }),
   ).rejects.toThrow("プリンターが見つかりません");
 });
+
+it("explains how to recover when a selected process has no brim width", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error:
+              "Selected process has no valid brim width; choose another process or disable brim",
+          }),
+          { status: 400 },
+        ),
+      ),
+  );
+  await expect(request("/api/plates/id", { method: "PUT" })).rejects.toThrow(
+    "別の工程を選ぶか「ブリムを付ける」をOFF",
+  );
+});

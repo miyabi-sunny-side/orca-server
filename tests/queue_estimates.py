@@ -100,7 +100,7 @@ def run(binary, output):
         # Upgrade a prior-schema queued job; calculate without starting a print.
         rig.stop()
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
-            c.executescript('ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; ALTER TABLE default_settings DROP COLUMN sparse_infill_pattern; ALTER TABLE default_settings DROP COLUMN sparse_infill_density; ALTER TABLE default_settings DROP COLUMN wall_loops; ALTER TABLE print_jobs DROP COLUMN estimate_json;');c.execute('PRAGMA user_version=8')
+            c.executescript('ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; ALTER TABLE default_settings DROP COLUMN sparse_infill_pattern; ALTER TABLE default_settings DROP COLUMN sparse_infill_density; ALTER TABLE default_settings DROP COLUMN wall_loops; ALTER TABLE print_jobs DROP COLUMN estimate_json;');c.execute('PRAGMA user_version=8')
         rig.launch();rig.idle();ready(failed);assert len(rig.broker.prints)==3
         rig.send(dict(type='remove',job_id=failed['id']));results['schema_eight_queued_job_recovers_without_print']=True
         if os.environ.get('ESTIMATE_BROWSER'):

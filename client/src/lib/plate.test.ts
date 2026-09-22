@@ -96,3 +96,17 @@ test("strength defaults are independent of machine, preserve manual values and n
     wall_loops: null,
   });
 });
+
+test("old forms default brim off and late defaults preserve the user's checkbox", async () => {
+  const { initialConditions, emptyConditions } = await import("./plate");
+  expect(
+    initialConditions(emptyConditions, emptyConditions, new Set()),
+  ).toHaveProperty("brim_enabled", false);
+  const checked = { ...emptyConditions, brim_enabled: true };
+  expect(
+    initialConditions(checked, emptyConditions, new Set(["brim_enabled"])),
+  ).toHaveProperty("brim_enabled", true);
+  expect(
+    initialConditions({ ...checked, brim_enabled: false }, checked, new Set()),
+  ).toHaveProperty("brim_enabled", false);
+});

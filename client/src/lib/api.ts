@@ -10,6 +10,7 @@ export type Strength = {
   wall_loops?: number | null;
 };
 export type PlateConditions = Strength & {
+  brim_enabled?: boolean;
   required_machine_profile_key: string | null;
   filament_id: string | null;
   process_profile_key: string | null;
@@ -121,6 +122,11 @@ export async function request<T>(
   if (String(data.error).includes("fit together")) {
     throw new Error(
       "モデルが1枚のプレートに収まりません。選択するモデルを減らしてください。",
+    );
+  }
+  if (String(data.error).includes("Selected process has no valid brim width")) {
+    throw new Error(
+      "この工程には有効なブリム幅がありません。別の工程を選ぶか「ブリムを付ける」をOFFにしてください。",
     );
   }
   const messages: Record<number, string> = {

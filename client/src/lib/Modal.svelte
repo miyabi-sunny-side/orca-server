@@ -7,7 +7,13 @@
     title,
     onclose,
     children,
-  }: { title: string; onclose: () => void; children: Snippet } = $props();
+    dismissible = true,
+  }: {
+    title: string;
+    onclose: () => void;
+    children: Snippet;
+    dismissible?: boolean;
+  } = $props();
 
   let dialog = $state<HTMLElement | undefined>();
 
@@ -19,7 +25,7 @@
   function onkeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
-      onclose();
+      if (dismissible) onclose();
       return;
     }
     if (event.key !== "Tab" || !dialog) {
@@ -29,6 +35,8 @@
       "button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)",
     );
     if (focusables.length === 0) {
+      event.preventDefault();
+      dialog.focus();
       return;
     }
     const first = focusables[0];
@@ -48,7 +56,12 @@
 
 <svelte:window {onkeydown} />
 
-<button class="scrim" type="button" aria-label="閉じる" onclick={onclose}
+<button
+  class="scrim"
+  type="button"
+  aria-label="閉じる"
+  disabled={!dismissible}
+  onclick={onclose}
 ></button>
 <div
   class="modal"
@@ -64,6 +77,7 @@
       class="icon-btn"
       type="button"
       aria-label="閉じる"
+      disabled={!dismissible}
       onclick={onclose}
     >
       <Icon name="x" />
@@ -81,6 +95,8 @@
     border: none
     background: var(--c-scrim)
     cursor: default
+    &:disabled
+      opacity: 1
 
   .modal
     position: fixed
@@ -103,7 +119,12 @@
     justify-content: space-between
     margin-bottom: var(--sp-3)
 
+    .icon-btn
+      flex-shrink: 0
+
     h2
+      min-width: 0
+      overflow-wrap: anywhere
       margin: 0
       font-size: var(--fs-xl)
       font-weight: 600

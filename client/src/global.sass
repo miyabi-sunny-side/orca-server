@@ -186,6 +186,13 @@ button:disabled
   border-color: var(--c-accent)
   color: var(--c-surface-raised)
 
+.btn.danger
+  color: var(--c-danger)
+  border-color: var(--c-danger)
+  background: var(--c-surface-raised)
+  &:hover:not(:disabled)
+    background: var(--c-danger-subtle)
+
 .page-heading
   display: flex
   flex-wrap: wrap

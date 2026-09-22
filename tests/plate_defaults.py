@@ -45,7 +45,7 @@ def main():
         manual=create(dict(filament_id=rig.materials[1]['id'],bed_type='High Temp Plate'))
         assert manual['conditions']==dict(initial['conditions'],filament_id=rig.materials[1]['id'],bed_type='High Temp Plate')
         old=edit(initial,{k:None for k in first['conditions']})
-        assert all(v is None for v in old['conditions'].values())
+        assert all(v is False if k=='brim_enabled' else v is None for k,v in old['conditions'].items())
         assert len(rig.broker.requests)==requests and not rig.broker.prints
         # Priority is a print-slot choice, not the initial material's physical slot order.
         slots=rig.api('/api/printers/p1/ams')['slots']; slot0=next(s for s in slots if s['slot_index']==0)
@@ -101,7 +101,7 @@ def main():
         rig.api('/api/printers/'+other,method='DELETE',expected=204)
         assert defaults()['default_printer_id']=='p1'
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
-            assert c.execute('PRAGMA user_version').fetchone()==(11,)
+            assert c.execute('PRAGMA user_version').fetchone()==(12,)
             assert [r[1] for r in c.execute('PRAGMA table_info(default_settings)')]==['id','default_printer_id','sparse_infill_pattern','sparse_infill_density','wall_loops']
             assert c.execute('SELECT default_printer_id FROM default_settings').fetchall()==[('p1',)]
         assert len(rig.broker.prints)==1 and all(not p.prints for p in peers)

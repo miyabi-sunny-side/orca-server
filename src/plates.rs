@@ -116,10 +116,38 @@ pub struct Conditions {
     pub filament_id: Option<String>,
     pub process_profile_key: Option<String>,
     pub bed_type: Option<String>,
+    pub brim_enabled: bool,
     #[serde(flatten)]
     pub strength: crate::strength::Strength,
 }
 impl Conditions {
+    pub(crate) fn apply(
+        &self,
+        process: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<()> {
+        self.strength.apply(process)?;
+        if self.brim_enabled
+            && !process
+                .get("brim_width")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<f64>().ok())
+                .is_some_and(|width| width > 0.0 && width <= 100.0)
+        {
+            return Err(Error::Invalid(
+                "Selected process has no valid brim width; choose another process or disable brim",
+            ));
+        }
+        process.insert(
+            "brim_type".into(),
+            if self.brim_enabled {
+                "outer_only"
+            } else {
+                "no_brim"
+            }
+            .into(),
+        );
+        Ok(())
+    }
     fn validate(
         &self,
         c: &rusqlite::Connection,
@@ -149,7 +177,7 @@ impl Conditions {
             let profiles = profiles.ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
             profiles.machine(machine)?;
             if let Some(process) = &self.process_profile_key {
-                profiles.resolve_process(machine, process, &self.strength)?;
+                profiles.resolve_process(machine, process, self)?;
             }
             if let Some(id) = &self.filament_id {
                 let setting = crate::products::load_setting(c, id, machine)?;
@@ -448,8 +476,8 @@ pub(crate) fn is_deleted(c: &rusqlite::Connection, id: &str) -> Result<bool> {
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
     let (name, version, conditions) = c
-        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops FROM plates WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? } }))
+        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)? }))
         })
         .optional()?
         .ok_or(Error::NotFound)?;
@@ -475,7 +503,7 @@ pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 fn save_conditions(c: &rusqlite::Connection, id: &str, v: &Conditions) -> Result<()> {
-    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops])?;
+    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled])?;
     Ok(())
 }
 fn insert_item(
@@ -611,6 +639,80 @@ mod tests {
         assert!(serde_json::from_value::<Edit>(body).is_err());
     }
     #[test]
+    fn brim_is_an_explicit_plate_opt_in_and_keeps_process_dimensions() {
+        use serde_json::json;
+        let inherited = json!({"brim_type":"auto_brim","brim_width":"5","brim_object_gap":"0.1",
+            "skirt_loops":"2","raft_layers":"3","enable_support":"0","enable_prime_tower":"1","wall_loops":"2"});
+        for (input, expected) in [
+            (json!({}), "no_brim"),
+            (json!({"brim_enabled":true}), "outer_only"),
+            (json!({"brim_enabled":false}), "no_brim"),
+        ] {
+            let conditions: Conditions = serde_json::from_value(input).unwrap();
+            let mut process = inherited.as_object().unwrap().clone();
+            conditions.apply(&mut process).unwrap();
+            assert_eq!(process["brim_type"], expected);
+            for key in [
+                "brim_width",
+                "brim_object_gap",
+                "skirt_loops",
+                "raft_layers",
+                "enable_support",
+                "enable_prime_tower",
+                "wall_loops",
+            ] {
+                assert_eq!(process[key], inherited[key]);
+            }
+        }
+    }
+
+    #[test]
+    fn brim_round_trips_off_on_off_and_old_inputs_stay_off() {
+        use serde_json::json;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let first = store.edit(None, edit("Brim", 1)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&first).unwrap()["conditions"]["brim_enabled"],
+            false
+        );
+        let mut value = serde_json::to_value(edit("Brim", 1)).unwrap();
+        for enabled in [true, false] {
+            let current = store.get(&first.id).unwrap();
+            value["version"] = json!(current.version);
+            value["conditions"]["brim_enabled"] = json!(enabled);
+            store
+                .edit(
+                    Some(&first.id),
+                    serde_json::from_value(value.clone()).unwrap(),
+                )
+                .unwrap();
+            let reread = Store::open(root.path()).unwrap().get(&first.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(reread).unwrap()["conditions"]["brim_enabled"],
+                enabled
+            );
+        }
+        value["conditions"]["brim_enabled"] = json!("true");
+        assert!(serde_json::from_value::<Edit>(value).is_err());
+    }
+    #[test]
+    fn brim_on_requires_a_positive_inherited_width() {
+        use serde_json::json;
+        let on: Conditions = serde_json::from_value(json!({"brim_enabled":true})).unwrap();
+        for width in [
+            json!("0"),
+            json!("-1"),
+            json!("NaN"),
+            json!("101"),
+            serde_json::Value::Null,
+        ] {
+            let mut profile = json!({"brim_width":width}).as_object().unwrap().clone();
+            assert!(on.apply(&mut profile).is_err());
+            Conditions::default().apply(&mut profile).unwrap();
+        }
+    }
+    #[test]
     fn nullable_conditions_survive_save_reload_and_legacy_snapshots() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -620,13 +722,17 @@ mod tests {
             .unwrap();
         let value = serde_json::to_value(&saved).unwrap();
         assert!(value["conditions"].is_object());
-        assert_eq!(value["conditions"].as_object().unwrap().len(), 7);
+        assert_eq!(value["conditions"].as_object().unwrap().len(), 8);
         assert!(
             value["conditions"]
                 .as_object()
                 .unwrap()
-                .values()
-                .all(serde_json::Value::is_null)
+                .iter()
+                .all(|(key, value)| if key == "brim_enabled" {
+                    value == false
+                } else {
+                    value.is_null()
+                })
         );
         assert_eq!(
             Store::open(root.path()).unwrap().get(&saved.id).unwrap(),

@@ -90,7 +90,7 @@ pub(crate) struct Resolved {
 }
 impl Resolved {
     pub(crate) fn for_plate(mut self, plate: &crate::plates::Plate) -> Result<Self> {
-        plate.conditions.strength.apply(
+        plate.conditions.apply(
             self.profiles
                 .get_mut("process.json")
                 .ok_or(Error::Invalid("Resolved process is missing"))?,
@@ -1127,6 +1127,7 @@ mod tests {
                         process_profile_key: Some(Selection::default().process),
                         bed_type: Some(crate::profiles::BEDS[0].into()),
                         strength: crate::strength::Strength::default(),
+                        brim_enabled: false,
                     },
                     name: "parts".into(),
                     version: None,

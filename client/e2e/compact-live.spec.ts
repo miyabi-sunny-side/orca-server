@@ -25,6 +25,8 @@ test('Cool Plate failure links to the matching common setting, returns to the jo
   await expect(page.getByRole('button',{name:'キュー追加',exact:true})).toBeEnabled();
   page.on('dialog',()=>{throw new Error('Deletion should not add another confirmation');});
   await page.getByRole('button',{name:'削除',exact:true}).click();
+  await expect(page.getByRole('dialog')).toHaveAccessibleName('プレートを削除');
+  await page.getByRole('dialog').getByRole('button',{name:'削除',exact:true}).click();
   await expect(row).toHaveCount(0);
   expect((await request.get('/api/plates/'+ctx.plate)).status()).toBe(404);
   await page.getByRole('link',{name:'OrcaServer',exact:true}).click();

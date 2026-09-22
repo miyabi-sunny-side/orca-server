@@ -163,11 +163,11 @@ impl Profiles {
         &self,
         machine: &str,
         process: &str,
-        strength: &crate::strength::Strength,
+        conditions: &crate::plates::Conditions,
     ) -> Result<Map<String, Value>> {
         self.machine(machine)?;
         let mut profile = selectable(&self.process, process, machine)?;
-        strength.apply(&mut profile)?;
+        conditions.apply(&mut profile)?;
         profile.insert("enable_support".into(), "0".into());
         profile.insert("enforce_support_layers".into(), "0".into());
         Ok(profile)
@@ -247,7 +247,7 @@ impl Profiles {
                 self.resolve_process(
                     &selection.machine,
                     &selection.process,
-                    &crate::strength::Strength::default(),
+                    &crate::plates::Conditions::default(),
                 )?,
             ),
             (
@@ -359,13 +359,15 @@ mod tests {
             for process in [
                 resolved["process.json"].clone(),
                 profiles
-                    .resolve_process(PRINTER, "child", &crate::strength::Strength::default())
+                    .resolve_process(PRINTER, "child", &crate::plates::Conditions::default())
                     .unwrap(),
             ] {
                 assert_eq!(process["enable_support"], "0");
                 assert_eq!(process["enforce_support_layers"], "0");
                 for (key, value) in parent.as_object().unwrap() {
-                    if !["enable_support", "enforce_support_layers"].contains(&key.as_str()) {
+                    if !["enable_support", "enforce_support_layers", "brim_type"]
+                        .contains(&key.as_str())
+                    {
                         assert_eq!(&process[key], value);
                     }
                 }

@@ -294,10 +294,13 @@ async fn process(
         .resolve_process(
             &query.machine,
             &query.process,
-            &crate::strength::Strength {
-                sparse_infill_pattern: query.sparse_infill_pattern,
-                sparse_infill_density: query.sparse_infill_density,
-                wall_loops: query.wall_loops,
+            &crate::plates::Conditions {
+                strength: crate::strength::Strength {
+                    sparse_infill_pattern: query.sparse_infill_pattern,
+                    sparse_infill_density: query.sparse_infill_density,
+                    wall_loops: query.wall_loops,
+                },
+                ..Default::default()
             },
         )?;
     values.retain(|key, _| {

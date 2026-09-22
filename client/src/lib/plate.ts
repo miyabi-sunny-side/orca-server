@@ -22,6 +22,7 @@ export const emptyStrength = {
   wall_loops: null,
 };
 export const emptyConditions: PlateConditions = {
+  brim_enabled: false,
   ...emptyStrength,
   required_machine_profile_key: null,
   filament_id: null,
@@ -35,7 +36,7 @@ export function initialConditions(
   edited: Set<keyof PlateConditions>,
   creation = true,
 ): PlateConditions {
-  const result = { ...value };
+  const result = { ...value, brim_enabled: value.brim_enabled ?? false };
   for (const key of Object.keys(emptyConditions) as (keyof PlateConditions)[]) {
     const strength = key in emptyStrength;
     if (

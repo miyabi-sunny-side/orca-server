@@ -62,6 +62,17 @@ def run(binary, output):
         process=second['input']['settings']['profiles']['process.json']
         assert (process['wall_loops'],process['top_shell_layers'],process['bottom_shell_layers'],process['top_shell_thickness'])==('4','10','6','2')
         assert process['sparse_infill_density']=='22.5%' and process['sparse_infill_pattern']=='gyroid'
+        assert process['brim_type']=='no_brim' and not rig.plate['conditions']['brim_enabled']
+        previous=second
+        for enabled in [True,False]:
+            old=rig.store/'jobs'/job['id']/('estimate-'+previous['id'])
+            edit(dict(brim_enabled=enabled));current=ready(job)
+            assert current['id']!=previous['id'] and not old.exists()
+            process=current['input']['settings']['profiles']['process.json']
+            assert process['brim_type']==('outer_only' if enabled else 'no_brim')
+            assert process['brim_width']=='5' and process['brim_object_gap']=='0.1'
+            assert process['wall_loops']=='4' and process['sparse_infill_density']=='22.5%'
+            previous=current
         assert not rig.broker.prints and not rig.ftp.uploads
         traces=len(rig.traces());rig.next(job);until(lambda:len(rig.broker.prints)==1)
         assert len(rig.traces())==traces, 'Preparation must reuse the matching estimate'
@@ -75,19 +86,20 @@ def run(binary, output):
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
             for table in ['plates','default_settings']:
                 for key in KEYS:c.execute(f'ALTER TABLE {table} DROP COLUMN {key}')
-            c.execute('ALTER TABLE plates DROP COLUMN deleted')
+            c.execute('ALTER TABLE plates DROP COLUMN brim_enabled');c.execute('ALTER TABLE plates DROP COLUMN deleted')
             c.execute('PRAGMA user_version=9')
         rig.launch();rig.report('RUNNING');rig.phase('printing');ready(queued)
         assert stored(job,'execution_json')==frozen and stored(job,'attempt_json')==attempt and stored(job,'artifact_path')==artifact
         assert all(v is None for v in values(rig.api('/api/plates/'+rig.plate['id'])).values())
         assert values(rig.api('/api/default-settings'))==DEFAULT
+        assert rig.api('/api/plates/'+rig.plate['id'])['conditions']['brim_enabled'] is False
         legacy=ready(queued)['input']['settings']['profiles']['process.json']
         assert (legacy['sparse_infill_pattern'],legacy['wall_loops'],legacy['top_shell_layers'])==('crosshatch','2','5')
         assert len(rig.broker.prints)==len(rig.ftp.uploads)==1
         rig.send(dict(type='remove',job_id=queued['id']))
         if os.environ.get('STRENGTH_BROWSER'):
             subprocess.run(['npm','run','test:e2e','--','--workers=1'],cwd=REPO/'client',env={**os.environ,'E2E_BASE_URL':rig.base,'E2E_STRENGTH_CONTEXT':json.dumps(dict(legacy=rig.plate['id'],material=rig.materials[0]['id'])),'E2E_EVIDENCE_DIR':str(rig.output/'browser')},check=True)
-        result=dict(defaults_restart=True,rest_mcp=True,cli_patterns=26,validation=True,estimate_invalidates=True,preparation_reuses_exact_input=True,schema9_keeps_legacy=True,active_attempt_unchanged=True,isolated_print_commands=1)
+        result=dict(brim_rest_mcp_off_on_off=True,brim_cache_invalidates=True,legacy_brim_off=True,defaults_restart=True,rest_mcp=True,cli_patterns=26,validation=True,estimate_invalidates=True,preparation_reuses_exact_input=True,schema9_keeps_legacy=True,active_attempt_unchanged=True,isolated_print_commands=1)
         (rig.output/'result.json').write_text(json.dumps(result,indent=2)); print(json.dumps(result))
     finally:rig.close()
 
