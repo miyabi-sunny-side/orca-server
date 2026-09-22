@@ -1,3 +1,4 @@
+import {selectMaterial} from './plate-material';
 import { expect, test } from "@playwright/test";
 import { writeFileSync } from "node:fs";
 import type { Action, QueueState } from "../src/lib/queue";
@@ -68,7 +69,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
     await add(0, 0);
     await page.locator('.waiting-job summary').first().click();
     await page.getByRole('link', { name: 'プレートの条件を編集' }).click();
-    await page.getByRole('combobox', { name: 'フィラメント',exact:true }).selectOption(specification(3).filament_id);
+    await selectMaterial(page,specification(3).filament_id);
     await capture(`edit-${colorScheme}`);
     await page.getByRole('button', { name: '保存',exact:true }).click();
     await expect(page.getByRole('button',{name:'構成を編集'})).toBeVisible();

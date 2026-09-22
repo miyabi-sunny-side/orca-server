@@ -104,3 +104,9 @@ fn queue_fixture() {
 fn queue_official() {
     queue(Some(&appdir()));
 }
+
+#[test]
+#[ignore = "requires Chromium"]
+fn filament_picker() {
+    plates::filament_picker(true);
+}

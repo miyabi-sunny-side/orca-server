@@ -1,3 +1,4 @@
+import {selectMaterial} from './plate-material';
 import {test,expect} from '@playwright/test';
 import {mkdirSync} from 'node:fs';
 const ctx=JSON.parse(process.env.E2E_PLATE_CONTEXT ?? '{}');
@@ -18,7 +19,7 @@ test('owned machine conditions persist and enqueue directly at desktop and narro
     const machine=page.getByLabel('要求する機種・ノズル');
     await expect(machine.locator('option')).toHaveCount(3);
     await machine.selectOption(ctx.mini);
-    await page.getByRole('combobox',{name:'フィラメント',exact:true}).selectOption(ctx.filament);
+    await selectMaterial(page,ctx.filament);
     await page.getByLabel('工程（品質）').selectOption(ctx.process);await page.getByRole('combobox',{name:'ビルドプレート',exact:true}).selectOption(ctx.bed);
     await page.getByRole('button',{name:'保存',exact:true}).click();
     await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);
@@ -39,13 +40,13 @@ test('owned machine conditions persist and enqueue directly at desktop and narro
     await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/plate-${width}-${colorScheme}.png`,fullPage:true});
     await page.getByRole('button',{name:'構成を編集'}).click();
     await page.getByLabel('要求する機種・ノズル').selectOption(ctx.machine);
-    await page.getByRole('combobox',{name:'フィラメント',exact:true}).selectOption({label:'未設定'});
+    await selectMaterial(page,null);
     await page.getByRole('button',{name:'保存',exact:true}).click();
     await expect(add).toBeDisabled();await expect(page.getByLabel('追加先のプリンター')).toHaveCount(0);
     const waiting=(await queue()).waiting.filter((job:any)=>`/plates/${job.plate_id}`===path);
     expect(waiting).toHaveLength(2);expect(waiting.every((job:any)=>job.filament_id===null && job.hold_reason)).toBe(true);
     await page.getByRole('button',{name:'構成を編集'}).click();
-    await page.getByRole('combobox',{name:'フィラメント',exact:true}).selectOption(ctx.filament);await page.getByRole('button',{name:'保存',exact:true}).click();
+    await selectMaterial(page,ctx.filament);await page.getByRole('button',{name:'保存',exact:true}).click();
     await expect(add).toBeEnabled();
     await page.addStyleTag({content:'html {font-size:200% !important}'});
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);

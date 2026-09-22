@@ -220,6 +220,7 @@ pub fn router(
         .route("/api/printers/profiles", get(machines))
         .route("/api/printers/{id}", get(read).put(update).delete(delete))
         .route("/api/filaments", get(materials).post(create_material))
+        .route("/api/plate-filaments", get(plate_materials))
         .merge(product_routes())
         .route(
             "/api/filaments/{id}",
@@ -621,22 +622,43 @@ async fn materials(
 ) -> Result<Json<Vec<crate::filament::Filament>>> {
     let db = registry.db.clone();
     let materials = crate::plate_api::blocking(move || db.filaments()).await?;
-    let mut ranked: Vec<_> = materials
-        .into_iter()
-        .filter_map(|f| {
-            let text = format!(
-                "{} {} {} {}",
-                f.data.name, f.data.vendor, f.data.material, f.data.color
-            );
-            crate::search::score(query.q.trim(), &text).map(|score| (score, f))
-        })
-        .collect();
-    ranked.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| a.1.data.name.cmp(&b.1.data.name))
-            .then_with(|| a.1.id.cmp(&b.1.id))
-    });
-    Ok(Json(ranked.into_iter().map(|(_, f)| f).collect()))
+    Ok(Json(crate::plate_filaments::rank(materials, &query.q)))
+}
+
+async fn plate_materials(
+    State(registry): State<Arc<Registry>>,
+    Query(query): Query<crate::plate_filaments::Query>,
+) -> Result<Json<crate::plate_filaments::Candidates>> {
+    let entries = registry.entries.lock().await;
+    let mut inventories = Vec::new();
+    for entry in entries.values().filter(|e| {
+        query
+            .machine
+            .as_ref()
+            .is_none_or(|m| m == &e.device.settings.machine_profile_key)
+    }) {
+        let (current, slots) = match entry.printer.ams_inventory(None).await {
+            Ok((current, slots)) => (Some(current), slots),
+            Err(error) => {
+                tracing::warn!(printer_id=%entry.device.id, %error, "Could not read plate material inventory");
+                (None, vec![])
+            }
+        };
+        inventories.push(crate::plate_filaments::Inventory {
+            id: entry.device.id.clone(),
+            name: entry.device.settings.name.clone(),
+            machine: entry.device.settings.machine_profile_key.clone(),
+            current,
+            slots,
+        });
+    }
+    let db = registry.db.clone();
+    let materials = crate::plate_api::blocking(move || db.filaments()).await?;
+    Ok(Json(crate::plate_filaments::candidates(
+        materials,
+        inventories,
+        &query,
+    )))
 }
 
 async fn products(

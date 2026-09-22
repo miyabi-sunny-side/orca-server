@@ -13,3 +13,8 @@ fn creation_defaults() {
 fn recover_default_process() {
     plates::recover_default_process();
 }
+
+#[test]
+fn filament_picker() {
+    plates::filament_picker(false);
+}

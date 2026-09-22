@@ -403,3 +403,126 @@ pub fn recover_default_process() {
     rig.idle();
     assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
 }
+
+#[allow(clippy::too_many_lines)]
+pub fn filament_picker(browser: bool) {
+    let mut rig = Rig::new("filament-picker");
+    rig.launch();
+    rig.seed();
+    let create_material = |name: &str, color: &str| {
+        rig.post("/api/filaments", &json!({"name":name,"vendor":"Fixture","material":"PLA","color":color,"bambu_filament_id":null}),201)
+    };
+    let other = create_material("別のP1Sに装填した長い製品名・PLA 黄", "FFFF00FF");
+    let mini_material = create_material("mini専用 PLA 赤", "FF0000FF");
+    let future = create_material("将来用・未装填の長い製品名 PETG-GF 黒", "000000FF");
+    rig.post(
+        &format!("/api/filaments/{}/settings", id(&other)),
+        &json!({"machine_profile_key":MACHINE,"base_profile_key":FILAMENT,"overrides_json":{}}),
+        201,
+    );
+    rig.post(
+        &format!("/api/filaments/{}/settings", id(&future)),
+        &json!({"machine_profile_key":MACHINE,"base_profile_key":FILAMENT,"overrides_json":{}}),
+        201,
+    );
+    let mini = "Bambu Lab A1 mini 0.2 nozzle";
+    let peers = [
+        new_peer(&rig, "SECOND", MACHINE),
+        new_peer(&rig, "MINI", mini),
+    ];
+    assign(&rig, id(&peers[0].1), 0, other["id"].clone());
+    assign(&rig, id(&peers[0].1), 3, rig.materials[0]["id"].clone());
+    assign(&rig, id(&peers[1].1), 0, mini_material["id"].clone());
+    let mut url = reqwest::Url::parse("http://fixture/api/plate-filaments").unwrap();
+    url.query_pairs_mut().append_pair("machine", MACHINE);
+    let path = format!("{}?{}", url.path(), url.query().unwrap());
+    let candidates = rig.get(&path);
+    let ids: Vec<_> = array(&candidates["filaments"])
+        .iter()
+        .map(|f| id(f).to_owned())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.contains(&id(&other).to_owned()));
+    assert!(!ids.contains(&id(&mini_material).to_owned()));
+    assert_eq!(
+        array(&rig.get("/api/plate-filaments")["filaments"]).len(),
+        4
+    );
+    assert_eq!(
+        array(&rig.get("/api/plate-filaments?include_unloaded=true")["filaments"]).len(),
+        5
+    );
+    assert_eq!(array(&rig.get("/api/filaments")).len(), 5);
+    let spec = merge(&rig.specification(0), &json!({"filament_id":other["id"]}));
+    let plate = rig.configure(Some(spec), None);
+    assert_eq!(admission(&rig, &plate, "p1")["admission"]["allowed"], false);
+    add(&rig, &plate, "p1", 409);
+    assert_eq!(
+        admission(&rig, &plate, id(&peers[0].1))["admission"]["allowed"],
+        true
+    );
+    rig.configure(Some(rig.specification(0)), None);
+    if browser {
+        let actions = rig.broker.actions.clone();
+        let second = peers[0].0.actions.clone();
+        let third = peers[1].0.actions.clone();
+        let full = rig.full.clone();
+        let db_path = rig.store.join("orca.sqlite3");
+        // The fixture alone can change observations or seed a broken historical reference.
+        let control = HttpPeer::new(move |_, _, body| {
+            let v: Value = serde_json::from_slice(body).unwrap();
+            if v["missing"] == true {
+                let db = rusqlite::Connection::open(&db_path).unwrap();
+                db.pragma_update(None, "foreign_keys", false).unwrap();
+                db.execute(
+                    "UPDATE plates SET filament_id='missing-material' WHERE id=?1",
+                    [v["plate_id"].as_str().unwrap()],
+                )
+                .unwrap();
+            } else {
+                for (sender, serial) in [
+                    (&actions, crate::common::peers::SERIAL),
+                    (&second, "SECOND"),
+                    (&third, "MINI"),
+                ] {
+                    if v["offline"] == true {
+                        sender
+                            .send(crate::common::peers::Action::Disconnect)
+                            .unwrap();
+                    } else {
+                        let mut report = full.clone();
+                        if v["empty"] == true {
+                            report["print"]["ams"]["tray_exist_bits"] = json!("0");
+                        }
+                        sender
+                            .send(crate::common::peers::Action::Report(
+                                serde_json::to_vec(&report).unwrap(),
+                                false,
+                                format!("device/{serial}/report"),
+                            ))
+                            .unwrap();
+                    }
+                }
+            }
+            (200, b"{}".to_vec())
+        });
+        rig.browser("E2E_FILAMENT_PICKER_CONTEXT",&json!({"plate":rig.plate["id"],"white":rig.materials[0]["id"],"blue":rig.materials[1]["id"],"other":other["id"],"mini_material":mini_material["id"],"future":future["id"],"machine":MACHINE,"mini":mini,"second":peers[0].1["id"],"control":control.base}),None);
+    }
+    peers[0].0.action(crate::common::peers::Action::Disconnect);
+    until(
+        || {
+            rig.get(&path)["printers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == peers[0].1["id"] && p["state"] == "unconfirmed")
+        },
+        12,
+    );
+    assert!(
+        !array(&rig.get(&path)["filaments"])
+            .iter()
+            .any(|f| f["id"] == other["id"])
+    );
+    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+}

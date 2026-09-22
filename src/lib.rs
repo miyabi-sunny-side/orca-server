@@ -8,6 +8,7 @@ mod mcp;
 mod model_import;
 pub mod notifications;
 mod plate_api;
+mod plate_filaments;
 pub mod plates;
 mod print_start;
 pub mod printer;

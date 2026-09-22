@@ -1,30 +1,17 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount } from "svelte";
   import {
     request,
+    ApiError,
     type PlateConditions,
     type DefaultSettings,
     type Printer,
-    type Filament,
     type Profiles,
     type FilamentSetting,
   } from "./api";
   import { machineChoices } from "./plate";
   import StrengthFields from "./StrengthFields.svelte";
-  import FilamentSearch from "./FilamentSearch.svelte";
-  import Icon from "./Icon.svelte";
-  let searching = $state(false),
-    selector = $state<HTMLButtonElement>();
-  async function closeSearch() {
-    searching = false;
-    await tick();
-    selector?.focus();
-  }
-  function chooseInterface(f: Filament | null) {
-    value.support_interface_filament_id = f?.id ?? value.filament_id;
-    changed("support_interface_filament_id");
-    void closeSearch();
-  }
+  import PlateFilamentPicker from "./PlateFilamentPicker.svelte";
   let {
     value = $bindable(),
     defaults,
@@ -58,33 +45,23 @@
     ].some((v) => v == null),
   );
   let printers = $state<Printer[]>([]),
-    filaments = $state<Filament[]>([]),
     profiles = $state<Profiles>();
   let setting = $state<FilamentSetting>(),
     loading = $state(true),
     error = $state(""),
     conditionError = $state(""),
-    reading = $state(false);
-  const interfaceMaterial = $derived(
-    filaments.find(
-      (f) =>
-        f.id === (value.support_interface_filament_id ?? value.filament_id),
-    ),
-  );
+    reading = $state(false),
+    materialFound = $state(false);
   const machines = $derived(machineChoices(printers));
   const controller = new AbortController();
   async function load() {
     loading = true;
     error = "";
     try {
-      const [p, f] = await Promise.all([
-        request<Printer[]>("/api/printers", { signal: controller.signal }),
-        request<Filament[]>("/api/filaments", { signal: controller.signal }),
-      ]);
-      if (!controller.signal.aborted) {
-        printers = p;
-        filaments = f;
-      }
+      const p = await request<Printer[]>("/api/printers", {
+        signal: controller.signal,
+      });
+      if (!controller.signal.aborted) printers = p;
     } catch (e) {
       if (!controller.signal.aborted) error = (e as Error).message;
     } finally {
@@ -101,10 +78,11 @@
     const read = new AbortController();
     profiles = undefined;
     setting = undefined;
+    materialFound = false;
     conditionError = "";
     reading = !!machine;
     if (machine)
-      void Promise.all([
+      void Promise.allSettled([
         request<Profiles>(
           `/api/slicer/profiles?machine=${encodeURIComponent(machine)}`,
           { signal: read.signal },
@@ -113,19 +91,23 @@
           ? request<{ settings: FilamentSetting[] }>(
               `/api/filaments/${material}`,
               { signal: read.signal },
-            )
+            ).catch((e) => {
+              if (e instanceof ApiError && e.status === 404) return undefined;
+              throw e;
+            })
           : Promise.resolve(undefined),
       ])
         .then(([p, f]) => {
           if (!read.signal.aborted) {
-            profiles = p;
-            setting = f?.settings.find(
-              (s) => s.machine_profile_key === machine,
-            );
+            if (p.status === "fulfilled") profiles = p.value;
+            else conditionError = (p.reason as Error).message;
+            if (f.status === "fulfilled") {
+              materialFound = !!f.value;
+              setting = f.value?.settings.find(
+                (s) => s.machine_profile_key === machine,
+              );
+            } else conditionError = (f.reason as Error).message;
           }
-        })
-        .catch((e) => {
-          if (!read.signal.aborted) conditionError = (e as Error).message;
         })
         .finally(() => {
           if (!read.signal.aborted) reading = false;
@@ -182,21 +164,14 @@
       <a href="/printers/new">プリンターを登録</a
       >すると、所持機の機種・ノズルを選べます。
     </p>{/if}
-  <label class="field"
-    ><span>フィラメント</span><select
-      bind:value={value.filament_id}
-      onchange={() => changed("filament_id")}
-      disabled={loading}
-    >
-      <option value={null}>未設定</option>
-      {#if value.filament_id && !filaments.some((f) => f.id === value.filament_id)}<option
-          value={value.filament_id}>登録材料を確認してください</option
-        >{/if}
-      {#each filaments as f}<option value={f.id}
-          >{f.name} · {f.vendor} · {f.material}</option
-        >{/each}
-    </select></label
-  >
+  <PlateFilamentPicker
+    value={value.filament_id}
+    machine={value.required_machine_profile_key}
+    choose={(id) => {
+      value.filament_id = id;
+      changed("filament_id");
+    }}
+  />
   <label class="field"
     ><span>工程（品質）</span><select
       bind:value={value.process_profile_key}
@@ -252,45 +227,25 @@
         onchange={(e) => {
           if (e.currentTarget.checked)
             value.support_interface_filament_id ??= value.filament_id;
-          else searching = false;
           changed("support_enabled");
         }}
       />
       <span>サポートを使う</span>
     </label>
     {#if value.support_enabled}
-      <div class="interface-field">
-        <span class="interface-label">接触面のフィラメント</span>
-        <button
-          type="button"
-          class="btn material-selector"
-          bind:this={selector}
-          aria-label={`接触面のフィラメント: ${interfaceMaterial?.name ?? "未設定"}`}
-          aria-expanded={searching}
-          onclick={() => (searching = true)}
-        >
-          {#if interfaceMaterial}<span
-              class="swatch"
-              style:background={`#${interfaceMaterial.color}`}
-            ></span>{/if}
-          <span
-            >{interfaceMaterial?.name ??
-              (value.support_interface_filament_id
-                ? "登録材料を確認してください"
-                : "主材料を選ぶと設定されます")}</span
-          >
-          <span class="disclosure-icon" aria-hidden="true"
-            ><Icon name="chevron-left" /></span
-          >
-        </button>
-        {#if searching}<FilamentSearch
-            choose={chooseInterface}
-            close={() => void closeSearch()}
-          />{/if}
-        <p class="caption">
-          本体とサポートの支柱には、上で選んだフィラメントを使います。
-        </p>
-      </div>
+      <PlateFilamentPicker
+        label="接触面のフィラメント"
+        clearLabel="主材料と同じにする"
+        value={value.support_interface_filament_id ?? value.filament_id}
+        machine={value.required_machine_profile_key}
+        choose={(id) => {
+          value.support_interface_filament_id = id;
+          changed("support_interface_filament_id");
+        }}
+      />
+      <p class="caption">
+        本体とサポートの支柱には、上で選んだフィラメントを使います。
+      </p>
     {/if}
   </details>
   {#if loading || reading}<p class="caption" role="status">
@@ -302,14 +257,14 @@
         >条件を読み直す</button
       >
     </div>{/if}
-  {#if !reading && value.required_machine_profile_key && value.filament_id && (!setting || setting.error)}<p
+  {#if !reading && materialFound && value.required_machine_profile_key && value.filament_id && (!setting || setting.error)}<p
       class="notice"
     >
       この機種で使う材料設定を確認してください。<a
         href={`/filaments/${value.filament_id}`}>材料設定へ</a
       >
     </p>{/if}
-  {#if !reading && value.process_profile_key && !profiles?.processes.includes(value.process_profile_key)}<p
+  {#if !reading && profiles && value.process_profile_key && !profiles.processes.includes(value.process_profile_key)}<p
       class="notice"
     >
       工程が要求する機種・ノズルに対応していません。工程を選び直すか、未設定に戻してください。
@@ -326,31 +281,6 @@
     cursor: pointer
     input
       accent-color: var(--c-accent)
-
-  .interface-field
-    margin: var(--sp-2) 0 var(--sp-3)
-    overflow-wrap: anywhere
-  .interface-label
-    display: block
-    margin-bottom: var(--sp-2)
-  .material-selector
-    display: flex
-    align-items: center
-    gap: var(--sp-2)
-    width: 100%
-    min-height: 44px
-    text-align: left
-    white-space: normal
-    > span:last-child
-      margin-left: auto
-  .disclosure-icon
-    transform: rotate(-90deg)
-  .swatch
-    width: 16px
-    height: 16px
-    flex: 0 0 16px
-    border: 1px solid var(--c-muted)
-    border-radius: 50%
 
   .conditions
     border: 0

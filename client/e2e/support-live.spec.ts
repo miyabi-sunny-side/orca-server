@@ -21,7 +21,7 @@ test('support selection stays optional, searchable and persistent in both themes
     await search.fill('PLA');await expect(page.locator('.choices button')).toHaveCount(2);
     await page.getByRole('button',{name:/PLA 青.*Fixture/}).click();await expect(selector).toContainText('PLA 青');await expect(selector).toBeFocused();
     await support.uncheck();await expect(selector).toHaveCount(0);await support.check();await expect(selector).toContainText('PLA 青');
-    await selector.click();await search.fill('PETG-GF');await expect(page.locator('.choices button')).toHaveCount(1);
+    await selector.click();await page.getByLabel('所持していないフィラメントを選択する').check();await search.fill('PETG-GF');await expect(page.locator('.choices button')).toHaveCount(1);
     await search.press('ArrowDown');await expect(page.locator('.choices button')).toBeFocused();await page.keyboard.press('Enter');
     await expect(selector).toContainText('PETG-GF 黒');
     await selector.click();await search.fill('見つからない材料');await expect(page.getByText('一致する材料がありません。')).toBeVisible();

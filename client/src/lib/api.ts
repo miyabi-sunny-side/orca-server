@@ -112,6 +112,7 @@ export async function request<T>(
   }
   if (
     path.startsWith("/api/filaments") ||
+    path.split("?")[0] === "/api/plate-filaments" ||
     path.startsWith("/api/filament-products") ||
     /^\/api\/printers\/[^/]+\/ams(?:\/|$)/.test(path)
   ) {

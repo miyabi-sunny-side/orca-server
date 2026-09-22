@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, type Snippet } from "svelte";
   import { request, type Filament } from "./api";
   let {
     choose,
@@ -8,6 +8,13 @@
     clearDisabled = false,
     cancelDisabled = false,
     clearLabel,
+    search = (q: string, signal: AbortSignal) =>
+      request<Filament[]>(`/api/filaments?q=${encodeURIComponent(q)}`, {
+        signal,
+      }),
+    filters,
+    context,
+    empty,
   }: {
     choose: (filament: Filament | null) => void;
     close: () => void;
@@ -15,6 +22,10 @@
     clearDisabled?: boolean;
     cancelDisabled?: boolean;
     clearLabel?: string;
+    search?: (q: string, signal: AbortSignal) => Promise<Filament[]>;
+    filters?: Snippet;
+    context?: Snippet<[() => void]>;
+    empty?: Snippet;
   } = $props();
   let retry = $state(0);
   let query = $state(""),
@@ -27,15 +38,13 @@
   $effect(() => {
     void retry;
     const q = query,
+      load = search,
       controller = new AbortController();
     loading = true;
     error = "";
     const timer = setTimeout(async () => {
       try {
-        const result = await request<Filament[]>(
-          `/api/filaments?q=${encodeURIComponent(q)}`,
-          { signal: controller.signal },
-        );
+        const result = await load(q, controller.signal);
         if (!controller.signal.aborted) options = result;
       } catch (cause) {
         if (!controller.signal.aborted) error = (cause as Error).message;
@@ -51,6 +60,7 @@
   function move(event: KeyboardEvent) {
     if (event.key === "Escape" && !cancelDisabled) {
       event.preventDefault();
+      event.stopPropagation();
       close();
       return;
     }
@@ -70,6 +80,7 @@
 <div class="search-row">
   <input
     type="search"
+    data-autofocus
     aria-label="材料を検索"
     placeholder="製品・メーカー・材質・色"
     bind:value={query}
@@ -80,6 +91,7 @@
     >キャンセル</button
   >
 </div>
+{@render filters?.()}
 {#if loading}<p class="caption" role="status">検索中…</p>{/if}
 {#if error}<p role="alert">{error}</p>
   <button
@@ -102,6 +114,7 @@
         <button
           type="button"
           {disabled}
+          data-filament-id={f.id}
           onclick={() => choose(f)}
           onkeydown={move}
         >
@@ -111,9 +124,16 @@
         </button>
       </li>{/each}{/if}
 </ul>
-{#if !loading && !error && !options.length}<p class="caption">
-    一致する材料がありません。<a href="/filaments">材料を登録</a>
-  </p>{/if}
+{#if !loading && !error}
+  {@render context?.(() => {
+    retry++;
+  })}
+  {#if !options.length}
+    {#if empty}{@render empty()}{:else}<p class="caption">
+        一致する材料がありません。<a href="/filaments">材料を登録</a>
+      </p>{/if}
+  {/if}
+{/if}
 
 <style lang="sass">
   .search-row
@@ -121,7 +141,7 @@
     flex-wrap: wrap
     gap: var(--sp-2)
     input
-      flex: 1
+      flex: 1 1 12ch
       min-width: 120px
       width: 100%
   .choices

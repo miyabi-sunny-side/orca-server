@@ -103,3 +103,14 @@ it("explains how to recover when a selected process has no brim width", async ()
     "別の工程を選ぶか「ブリムを付ける」をOFF",
   );
 });
+
+it("plate material search failures describe material storage, not slicing", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("unavailable", { status: 503 })),
+  );
+  await expect(request("/api/plate-filaments?q=PLA")).rejects.toMatchObject({
+    status: 503,
+    message: expect.stringContaining("材料の保存先"),
+  });
+});

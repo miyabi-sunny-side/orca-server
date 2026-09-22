@@ -1,3 +1,4 @@
+import {selectMaterial} from './plate-material';
 import { test, expect } from '@playwright/test';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,6 +25,8 @@ for (const width of [375, 1000]) for (const colorScheme of ['dark', 'light'] as 
     await expect(preview.locator('.dimensions')).toHaveText('23.0 × 20.0 × 20.0 mm');
     const name=`外部モデル ${width} ${colorScheme}`;await page.getByLabel('プレート名',{exact:true}).fill(name);
     await page.getByLabel('寸法確認 2 の個数').fill('2');
+    const material=(await (await request.get('/api/filaments')).json())[0];
+    await selectMaterial(page,material.id);
     const save=page.getByRole('button',{name:'保存',exact:true});await expect(save).toBeEnabled();
     let failed=false;
     await page.route('**/api/plates/files',async route=>{if(!failed){failed=true;await route.fulfill({status:503,json:{error:'Fixture temporary failure'}});}else await route.continue();});
@@ -36,6 +39,7 @@ for (const width of [375, 1000]) for (const colorScheme of ['dark', 'light'] as 
     await page.reload();await expect(page.getByRole('heading',{level:1})).toHaveText(name);
     await expect(preview.locator('.dimensions')).toHaveText('23.0 × 20.0 × 20.0 mm');
     const saved=await (await request.get('/api'+new URL(page.url()).pathname)).json();
+    expect(saved.conditions.filament_id).toBe(material.id);
     expect(saved.models[0].quantity).toBe(2);expect(saved.imported.selection.items[0].build_index).toBe(1);
     const original=await request.get((await page.getByRole('link',{name:'元の3MFを取得',exact:true}).getAttribute('href'))!);
     expect(await original.body()).toEqual(readFileSync(join(context.fixtures,'multiple.3mf')));
