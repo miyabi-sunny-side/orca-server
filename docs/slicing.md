@@ -101,23 +101,23 @@ CLIは試算と印刷準備を合わせてサーバー内で1件ずつ実行し�
 
 ## CLI連携の検証
 
-公式AppImageを展開したLinux環境で実行します。
+公式AppImageを展開し、`ORCA_APPDIR`を設定したLinux環境で実行します。
+全検証の入口と必要なツールは[開発ガイド](development.md#開発環境での検証)を参照してください。
 
 ```sh
-cargo build --locked
-python3 tests/slicer_cli.py "$ORCA_APPDIR" /tmp/orca-cli-check
-python3 tests/estimate_cli.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-estimate-cli-check
-python3 tests/strength_cli.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-strength-cli-check
-python3 tests/support_cli.py target/debug/orca-server /tmp/orca-support-cli-check "$ORCA_APPDIR"
+npm --prefix client run build
+cargo build --locked --example fixture-slicer
+ORCA_TEST_OUTPUT=/tmp/orca-cli-check cargo test --locked --test official_cli -- --ignored
 ```
 
-P1S 0.4mmとA1 mini 0.2mmのプロファイルで、2個のモデルの配置・座標・温度設定・印刷データを検査します。
-配置不能時の開始拒否も確認します。MQTT/FTPSは隔離したテスト用の接続先で、実機へは接続しません。
-CLI終了失敗・時間超過はRustの隔離ランチャーテストで確認します。
-試算の検証ではキュー追加から1個・2個・異なる積層条件を実行し、APIの秒数と3MF/G-codeを照合します。
-試算中の転送・開始命令がないこと、再起動後の結果保持、同一入力での生成物再利用も確認します。
-強度設定の検証は20mm立方体を使い、方式・充填率・壁数・0%/100%を変えて実行します。
-3MFの設定に加え、G-codeの内部充填経路、外周の吐出量、上下面の層範囲を確認します。プリンターへ転送・開始しません。
-サポートの検証ではオーバーハングモデルを使い、OFF・同一材料・PLA色違い・PLA/PETGの相互利用と、接触面不要の形状を比較します。
-本体と接触面の使用index、交換時の温度・パージ・ベッド温度、試算と準備の一致を生成物と模擬転送で確認します。
-結果・3MF・ログを指定先へ保存します。これらは物理的な印刷品質や他機種の実通信を保証する検証ではありません。
+検証する主な内容は次のとおりです。
+
+- P1S 0.4mmとA1 mini 0.2mmでの配置・座標・温度と、配置不能時の開始拒否。
+- 個数・工程による見積時間の差、APIと3MF/G-codeの秒数一致、再起動後の同一生成物の再利用。
+- 充填方式・密度・壁数・0%/100%による押出経路と上下面の層範囲。
+- サポートOFF・同材・PLA色違い・PLA/PETG両方向・接触面不要の形状での使用index・温度・パージ。
+- 取り込んだ3MFの再スライスと、その生成物を再取り込みした形状の一致。
+
+試算中は転送・開始命令を送りません。転送を検証する場合も、接続先は隔離したMQTT/FTPSサーバーです。
+結果・3MF・ログは指定先へ保存します。物理的な印刷品質や他機種の実通信は保証しません。
+CLI終了失敗・時間超過は通常のRust隔離テストが確認します。

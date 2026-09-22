@@ -42,89 +42,76 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 ## 開発環境での検証
 
 GitHub Actionsはformatter・型検査・lintと、画面・Rust・コンテナのビルドを行います。
-単体・結合・ブラウザ・実スライサー・起動確認のテストは、開発環境で変更に関係するものを実行します。
-以下はリポジトリのルートで実行します。ブラウザ検証にはChromiumを使用します。
+テストは開発環境で実行します。Linuxで全項目を検証するには、次のコマンドを使います。
 
 ```sh
-npm --prefix client ci
-npm --prefix client run format:check
-npm --prefix client run check
-npm --prefix client test
-npx --prefix client playwright install chromium
-npm --prefix client run test:e2e
+export ORCA_APPDIR=/path/to/squashfs-root
+bash tests/verify-local.sh
+```
+
+Rust、Node.js、npmに加え、Docker Engine、OpenSSL、Python 3、curl、sha256sumが必要です。
+[公式OrcaSlicer 2.4.2](slicing.md#orcaslicerの設定)も展開しておきます。
+スクリプトはnpm依存とChromiumを取得します。Chromiumのシステム依存が足りなければ、次で導入します。
+
+```sh
+(cd client && npx playwright install --with-deps chromium)
+```
+
+依存の取得とコンテナのビルドにはネットワークを使います。必要なツールが使えない場合は失敗します。
+
+全検証にはRustの単体・結合テスト、Vitest、Chromiumの模擬APIと実APIの操作、公式CLIを含みます。
+リリースビルドの起動終了と、作成したコンテナでの配置・スライス・再起動も確認します。
+プリンターや通知の接続先はループバック上の使い捨てサーバーです。実機やDiscordへの送信は行いません。
+コンテナ検証ではLinuxのhostネットワークと専用の一時保存先を使います。
+
+ログ・生成物・画面画像は表示された一時ディレクトリへ残します。
+保存先は`ORCA_TEST_OUTPUT`で指定できます。プロセス・待受・一時DB・検証用コンテナは終了時に片付けます。
+Python 3は運用コード`packaging/release_notes.py`の外部契約をRustから検証するために使います。
+テスト本体、通信相手、CLI代替の実装はRustです。
+
+### 変更に関係するテストを実行する
+
+画面のビルド後、通常の隔離テストは`cargo test --locked`で実行できます。
+MCPも自身で環境を起動するため、別の準備プロセスは不要です。
+
+```sh
 npm --prefix client run build
-npm --prefix client run lint:design
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
-cargo build --locked --release
 ```
 
-ブラウザテストは一時的なViteサーバーと隔離したAPI応答を使い、検索・失敗時の再試行・明暗・狭幅を確認します。
-RustのテストはHTTP応答と組み込み画面、一時保存先での復元・入力拒否・失敗時の保全を確認します。
-ビルドした実行ファイルを一時ディレクトリから起動し、画面・APIの配信と終了処理を確認する場合は、次を実行します。
-接続設定を引き継がず、ポート3100を使用します。終了時にプロセスと一時データを片付けます。
+特定の結合テストだけを実行する場合は、先にCLI代替をビルドします。
 
 ```sh
-bash tests/embedded_ui.sh target/release/orca-server
-python3 tests/release_notes.py
+cargo build --locked --example fixture-slicer
+cargo test --locked --test queue_lifecycle
 ```
 
-`release_notes.py`は公開せず、既存Releaseの変更履歴を保ったイメージ参照の更新を確認します。
-
-公式OrcaSlicerを[設定](slicing.md#orcaslicerの設定)した環境では、実APIとCLIを通した画面操作も確認できます。
-先に上記の手順で画面をビルドし、Chromiumを導入します。
+外部ツールを使うテストは通常実行でignoreと表示されます。以下は個別の実行例です。
+全検証のスクリプトでは、これらを含む全対象を実行します。
 
 ```sh
-cargo build --locked
-python3 tests/browser_cli.py "$ORCA_APPDIR" /tmp/orca-browser-check
+cargo test --locked --test official_cli -- --ignored
+cargo test --locked --test registry_flows independent_printers -- --ignored
+cargo test --locked --test browser -- --ignored --test-threads=1 --nocapture
+docker build -t orca-server-check .
+ORCA_TEST_IMAGE=orca-server-check cargo test --locked --test container -- --ignored --test-threads=1
 ```
 
-一時保存先とscad-live互換のHTTP応答を用意し、モデル選択・個数と条件の保存・直接追加・印刷・取り外しを操作します。
-RustサーバーとOrcaSlicerは実際に実行します。スクリーンショットと操作結果は指定した出力先へ保存します。
-MQTT/FTPSは隔離した接続先を使い、実プリンターには接続しません。起動したサーバーと一時データは終了時に片付けます。
+公式CLIとブラウザの全対象には`ORCA_APPDIR`が必要です。ブラウザの生成物保存先が共通なので、
+ブラウザ対象は直列実行します。通知配送の通常テストは、内部のignore付きサービスを子プロセスとして起動します。
+そのサービスだけを直接起動する必要はありません。
 
-MQTT接続の隔離検証にはPython 3と`openssl`コマンドを使います。
-一時証明書のTLS接続先を用意し、購読・全状態要求・部分更新・再接続・証明書不一致・秘密値の非公開を確認します。
-台帳のブラウザ検証には、上記のChromiumと`ORCA_APPDIR`の設定も必要です。
+### 保証する範囲
 
-```sh
-cargo build --locked
-python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
-python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
-python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
-ESTIMATE_BROWSER=1 python3 tests/queue_estimates.py target/debug/orca-server /tmp/orca-estimates-check
-COMPACT_BROWSER=1 python3 tests/compact_queue.py target/debug/orca-server /tmp/orca-compact-check
-python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
-python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
-python3 tests/notifications.py /tmp/orca-notification-check
-python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
-DEFAULTS_BROWSER=1 python3 tests/plate_defaults.py target/debug/orca-server /tmp/orca-defaults-check
-STRENGTH_BROWSER=1 python3 tests/strength_settings.py target/debug/orca-server /tmp/orca-strength-check
-PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
-REGISTRY_BROWSER=1 python3 tests/printer_registry.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-registry-check
-FILAMENT_BROWSER=1 python3 tests/filament_ams.py target/debug/orca-server "$ORCA_APPDIR" /tmp/orca-filament-check
-```
+Rustの結合テストはHTTP・MCP・SQLiteの保存と移行、同時操作、再起動、失敗後の保全を確認します。
+MQTT/FTPSではv1/v3証明書、TLSセッション再利用、転送内容、AMS指定と重複命令を観測します。
+通知は完了時の送信、重複防止、429・5xx・timeout・恒久エラー・中断を隔離したHTTPS相手で確認します。
+Chromiumの操作と期待値はTypeScriptが所有し、実APIの起動・環境準備・通信制御をRustが担います。
 
-印刷開始の検証はFTPSのTLSセッション再利用・転送内容・AMS指定・拒否・通信断・重複操作も確認します。
-`tests/fixtures/p1_print.gcode.3mf`はOrcaSlicer 2.4.2で生成した通信検証用ファイルです。
-生成元は同梱の20mm立方体STL 2個、プリンターはP1S 0.4mmです。
-工程は0.20mm Standard、材料はGeneric PLA High Speed、プレートはTextured PEI Plateです。
-初期値の検証ではSQLite移行・再起動・既定機選択、同期済みAMSの先頭、REST/MCPの一致、遅い取得と手動選択、印刷中の入力保全を確認します。
-強度設定では3項目のSQLite保存、旧工程の継承、試算失効と固定済み入力を確認します。
-Chromiumでは詳細の開閉、壁に連動する層数、保存失敗と遅い初期値取得時の入力保持を通します。
-プレート条件の検証ではnullable保存、所持機からの候補選択、実機別の装填照合、直接追加を確認します。
-キュー検証では準備時の最新データ固定、取り外し待ち、同時・重複操作、転送中AMS交換、開始前後の再起動とDB復元を通します。
-試算検証では印刷中の追加、編集・材料設定の失効、取消、再起動、CLI失敗と再試算、開始時の最新STL照合・キャッシュ破損を確認します。
-Chromiumでは計算中・成功・失敗・再試算・再読込みを明暗と狭幅で確認します。
-実際の秒数と生成物再利用は[公式CLIでの試算検証](slicing.md#cli連携の検証)を実行してください。
-`print_fixture.py`のCLI代替は入力・状態遷移の検証用です。実際の配置・スライスは`tests/slicer_cli.py`とコンテナ検証で公式Orcaを実行します。
-通知検証では一時証明書のHTTPS受信先とMQTT/DBを使い、完了時だけの通知、再起動・行削除、429・5xx・timeout・恒久エラー・送信中断を確認します。
-本番のURL検証を変更せず、テスト用プロセスだけに隔離した接続先と短いtimeoutを渡します。Discordへは送信しません。
-これらの検証は開発環境の隔離した接続先を使い、実機や利用者のアクセスコードには接続しません。
-MCP検証は実クライアントの接続・tool呼出しから、10個の構成、共通温度、色追加、AMS対応・使用順を確認します。
-保存・材料操作では同じデータをREST APIで取得し、古い版・revisionの拒否と印刷命令が送られないことも検証します。
-キューのMCP検証では隔離先への開始・継続・取り外し完了と、同一要求の再送・古い対象・接続断・材料保留での命令回数を観測します。
+`tests/common/slicer.rs`は状態遷移と設定受渡し用のCLI代替で、既知の印刷データを使います。
+同梱の`tests/fixtures/p1_print.gcode.3mf`は、OrcaSlicer 2.4.2で20mm立方体2個を生成した通信検証用ファイルです。
+P1S 0.4mm、0.20mm Standard、Generic PLA High Speed、Textured PEI Plateの構成です。
+実際の配置・時間・押出経路は[公式CLI検証](slicing.md#cli連携の検証)で照合します。
 
 ## 構成
 
@@ -152,13 +139,9 @@ GitHub Releaseには公開イメージのdigestとOrcaSlicerの依存ソース�
 [コンテナガイド](container.md)に導入と保存先、[同梱ソース](container.md#ライセンスとソース)に版と取得方法を記載しています。
 
 ```sh
-python3 tests/container.py orca-server /tmp/orca-container-check
 docker build --target sources --output type=local,dest=/tmp/orca-sources .
 ```
 
-コンテナ検証はLinuxのhostネットワークと専用の一時保存先を使います。非rootの配置・スライス、
-再作成後のプレート・アップロードSTL・キューの保持、不明な開始の自動再送がないことを確認します。
-`openssl`とPython 3、Dockerを使い、実プリンターへは接続しません。
 `sources` targetはOrcaSlicer本体と24種の依存アーカイブ、固定commitのwxWidgetsとsubmoduleをまとめます。
 Rust依存は`cargo vendor --locked`で取得し、別のソースアーカイブへまとめます。
 OrcaSlicerのソースURLとSHA-256は`packaging/slicer-sources.txt`、構成元は上流2.4.2の`deps/*.cmake`です。
@@ -187,16 +170,3 @@ docker build --build-arg ORCA_SOURCE_URL=https://example.org/orca-server-source.
 
 例のURLを、自分が配布するビルドに対応した公開先へ置き換えます。
 未設定の開発ビルドでは公開先が未設定であることを画面へ表示し、公式版のソースへ誤って案内しません。
-
-## 外部モデルの取り込みを検証する
-
-次の検証は自作の寸法既知の3MFを生成し、複数プレートの選別・元ファイルの一致・多色の印刷拒否・保存と再起動を確認します。
-モデルはscad-live未設定で取り込みます。印刷開始・FTPS送信は行わず、プリンター状態は隔離した接続先で再現します。
-
-```sh
-IMPORT_BROWSER=1 python3 tests/model_import.py target/debug/orca-server /tmp/orca-model-import
-python3 tests/model_import.py target/debug/orca-server /tmp/orca-model-import-cli "$ORCA_APPDIR"
-```
-
-最初のコマンドはChromiumで明暗・狭幅・キーボード・失敗からの復帰を測ります。CLI代替は固定生成物で印刷条件の受け渡しだけを確認します。
-2番目は同じ取り込み形状を公式OrcaSlicerで再スライスし、試算結果を記録します。配布サイトのモデルを取得したことは意味しません。

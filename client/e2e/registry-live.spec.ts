@@ -58,10 +58,12 @@ test("persistent printer CRUD, nozzle-specific controls and selected queue", asy
   await page.getByRole('button',{name:'保存',exact:true}).click();
   await expect(page).toHaveURL(/\/printers$/);
   await page.getByRole('link',{name:'印刷キュー',exact:true}).click();
-  await expect(page.getByRole('combobox',{name:'プリンター',exact:true})).toHaveValue(saved.id);
+  await expect(page).toHaveURL(new RegExp('printer_id='+saved.id));
+  await expect(page.getByRole('heading',{name:'Edited printer',exact:true})).toBeVisible();
   const another=await (await request.post('/api/printers',{data:{...settings,serial:'UISECOND',name:'Another printer',access_code:settings.access_code,tls_certificate:pem,mqtt_port:1,ftps_port:1}})).json();
   await page.reload();
-  await page.getByRole('combobox',{name:'プリンター',exact:true}).selectOption(another.id);
+  await expect(page.getByRole('combobox',{name:'表示するプリンター',exact:true})).toHaveValue(saved.id);
+  await page.getByRole('combobox',{name:'表示するプリンター',exact:true}).selectOption(another.id);
   await expect(page).toHaveURL(new RegExp('printer_id='+another.id));
   await expect(page.getByText('読み込んでいます…',{exact:false})).toHaveCount(0);
   await page.goto('/printers/'+saved.id);

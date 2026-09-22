@@ -315,9 +315,9 @@ async fn deliver(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Loopback protocol peers and synthetic TLS certificates are owned by tests/notifications.py.
+    // Subprocess entrypoint for the Rust delivery test; this is a fixture service, not a skipped assertion.
     #[tokio::test]
-    #[ignore = "tests/notifications.py starts the isolated HTTP/MQTT peers"]
+    #[ignore = "subprocess service used by delivery_tests::isolated_notification_delivery"]
     async fn fixture_service() {
         tracing_subscriber::fmt().with_ansi(false).init();
         let root = std::path::PathBuf::from(std::env::var_os("PLATES_DIR").unwrap());
@@ -467,3 +467,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/scenarios/notifications.rs"]
+mod delivery_tests;
