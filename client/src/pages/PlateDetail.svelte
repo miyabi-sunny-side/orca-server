@@ -53,6 +53,18 @@
     <div class="detail-layout" class:editing>
       <div class="controls">
         <div class="page-heading"><h1>{plate.name}</h1></div>
+        {#if plate.imported}
+          <p>
+            <a
+              href={`/api/plates/${plate.id}/original`}
+              download={plate.imported.file_name}>元の3MFを取得</a
+            >
+            <span class="caption"
+              >{plate.imported.file_name} · {plate.imported.selection
+                .name}</span
+            >
+          </p>
+        {/if}
         <PlateQueueAdd
           bind:plate
           paused={editing}

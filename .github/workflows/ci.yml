@@ -98,6 +98,9 @@ jobs:
       - name: Verify support interface selection and frozen AMS execution
         run: SUPPORT_BROWSER=1 python3 tests/support_interface.py target/debug/orca-server /tmp/orca-support-check
 
+      - name: Verify external model import, preservation and browser recovery
+        run: IMPORT_BROWSER=1 python3 tests/model_import.py target/debug/orca-server /tmp/orca-model-import
+
       - name: Verify material names do not block compatible nozzles
         run: python3 tests/nozzle_material.py target/debug/orca-server /tmp/orca-nozzle-check
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { uploadBody, type UploadDraft } from "./file-import";
   import HoverPreview from "./HoverPreview.svelte";
   import PlateConditions from "./PlateConditions.svelte";
   import { emptyConditions, initialConditions } from "./plate";
@@ -13,10 +14,20 @@
     initial,
     saved,
     cancel,
-  }: { initial?: Plate; saved: (plate: Plate) => void; cancel?: () => void } =
-    $props();
+    upload,
+    onbusy,
+    onremovefile,
+  }: {
+    initial?: Plate;
+    saved: (plate: Plate) => void;
+    cancel?: () => void;
+    upload?: UploadDraft;
+    onbusy?: (value: boolean) => void;
+    onremovefile?: (index: number) => void;
+  } = $props();
   type Item = {
     id?: string;
+    fileIndex?: number;
     name: string;
     source: string | null;
     quantity: number;
@@ -74,10 +85,31 @@
       selected = initial.models.map((m) => ({ ...m }));
       step = 2;
     }
+    if (upload) {
+      name =
+        upload.selection?.name ?? upload.files[0].name.replace(/\.stl$/i, "");
+      selected = upload.selection
+        ? [
+            {
+              name: upload.selection.name,
+              source: null,
+              quantity: 1,
+              fileIndex: 0,
+            },
+          ]
+        : upload.files.map((f, fileIndex) => ({
+            name: f.name,
+            source: null,
+            quantity: 1,
+            fileIndex,
+          }));
+      step = 2;
+    }
     void loadDefaults();
     return () => controller.abort();
   });
   $effect(() => {
+    if (upload || step !== 1) return;
     const q = query.trim();
     retry;
     const read = new AbortController();
@@ -119,27 +151,46 @@
     event.preventDefault();
     if (busy || !selected.length || total > 64) return;
     busy = true;
+    onbusy?.(true);
     error = "";
     try {
-      const plate = await request<Plate>(
-        initial ? `/api/plates/${initial.id}` : "/api/plates/import",
-        {
-          method: initial ? "PUT" : "POST",
-          headers: { "Content-Type": "application/json" },
+      let plate: Plate;
+      if (upload) {
+        const files = selected.map((m) => upload.files[m.fileIndex!]);
+        const body = uploadBody(files, upload.plate);
+        body.append("name", name.trim());
+        body.append("conditions", JSON.stringify(conditions));
+        body.append(
+          "quantities",
+          JSON.stringify(selected.map((m) => m.quantity)),
+        );
+        plate = await request<Plate>("/api/plates/files", {
+          method: "POST",
           signal: controller.signal,
-          body: JSON.stringify({
-            name: name.trim(),
-            ...(initial ? { version: initial.version } : {}),
-            models: selected,
-            conditions,
-          }),
-        },
-      );
+          body,
+        });
+      } else {
+        plate = await request<Plate>(
+          initial ? `/api/plates/${initial.id}` : "/api/plates/import",
+          {
+            method: initial ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify({
+              name: name.trim(),
+              ...(initial ? { version: initial.version } : {}),
+              models: selected,
+              conditions,
+            }),
+          },
+        );
+      }
       if (!controller.signal.aborted) saved(plate);
     } catch (e) {
       if (!controller.signal.aborted) error = (e as Error).message;
     } finally {
       if (!controller.signal.aborted) busy = false;
+      onbusy?.(false);
     }
   }
 </script>
@@ -219,9 +270,11 @@
               <strong
                 data-stl-preview={model.source
                   ? `/api/scad/model?path=${encodeURIComponent(model.source)}`
-                  : initial && model.id
-                    ? `/api/plates/${initial.id}/models/${model.id}`
-                    : undefined}>{model.name}</strong
+                  : upload && model.fileIndex !== undefined
+                    ? upload.previews[model.fileIndex]
+                    : initial && model.id
+                      ? `/api/plates/${initial.id}/models/${model.id}`
+                      : undefined}>{model.name}</strong
               >
               <div class="item-actions">
                 <label class="field"
@@ -235,19 +288,26 @@
                     aria-label={`${model.name} の個数`}
                   /></label
                 >
-                <button
-                  class="btn"
-                  type="button"
-                  aria-label={`${model.name}を構成から外す`}
-                  onclick={() =>
-                    (selected = selected.filter((_, i) => i !== index))}
-                  >外す</button
-                >
+                {#if !upload || selected.length > 1}<button
+                    class="btn"
+                    type="button"
+                    aria-label={`${model.name}を構成から外す`}
+                    onclick={() => {
+                      selected = selected.filter((_, i) => i !== index);
+                      if (model.fileIndex !== undefined)
+                        onremovefile?.(model.fileIndex);
+                    }}>外す</button
+                  >{/if}
               </div>
             </li>{/each}
         </ul>
         <p class="caption">
-          合計 {total} 個 / 最大64個。SCADモデルは試算時と印刷開始時に最新データを取得します。
+          {#if upload?.selection}選んだプレート全体を一組として扱います。{/if}
+          合計 {total}
+          {upload?.selection ? "組" : "個"} / 最大64{upload?.selection
+            ? "組"
+            : "個"}。
+          {#if selected.some((m) => m.source)}SCADモデルは試算時と印刷開始時に最新データを取得します。{/if}
         </p>
         <PlateConditions
           legacy={!!initial}
@@ -271,12 +331,13 @@
           type="submit"
           disabled={busy || defaultsReading || !selected.length || total > 64}
           >保存</button
-        ><button
-          class="btn"
-          type="button"
-          disabled={busy}
-          onclick={() => (step = 1)}>モデル選択へ</button
-        >{#if cancel}<button
+        >{#if !upload}<button
+            class="btn"
+            type="button"
+            disabled={busy}
+            onclick={() => (step = 1)}>モデル選択へ</button
+          >{/if}
+        {#if cancel}<button
             class="btn"
             type="button"
             disabled={busy}

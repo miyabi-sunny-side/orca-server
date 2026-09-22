@@ -1,7 +1,7 @@
 # プレートAPI
 
 プレートは再利用するモデルの構成です。名前、モデルの参照・個数、印刷条件を保存します。
-SCADモデルのSTLはキュー追加後の試算と印刷準備の開始時に取得します。直接アップロードしたSTLはSQLite内に保管します。
+SCADモデルのSTLはキュー追加後の試算と印刷準備の開始時に取得します。直接アップロードしたSTLと取り込んだ3MFの元ファイルはSQLite内に保管します。
 起動方法は[README](../README.md)、キューへの追加は[キューAPI](queue.md)を参照してください。
 
 ## 保存と検索
@@ -36,6 +36,50 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 | 未保存の公開SCADモデル取得 | `GET /api/scad/model?path=相対パス` |
 | 保存モデルのプレビュー用STL取得 | `GET /api/plates/{id}/models/{model_id}` |
 | アップロード元のSTL取得 | `GET /api/plates/{id}/files/{model_id}` |
+
+## ファイルから取り込む
+
+画面では「プレート」→「ファイル取込」を開き、手元のSTL（複数可）またはモデルを含む3MFを選びます。
+scad-liveへの接続は不要です。MakerWorldなどの配布元で通常の方法でダウンロードしたファイルを使ってください。URLからの自動取得は行いません。
+複数プレートを含む3MFでは、名前とプレビューから一つを選びます。形状・mm単位の寸法・名前・個数・印刷条件を確認して保存します。
+保存ではキュー追加や印刷開始を行いません。単色構成は通常のキューと試算を使えます。
+
+3MFの単位・部品変換・インスタンスを反映し、部品の相対位置を保った一組としてSTLを生成します。個数はこの組全体の数です。
+自動縮小は行いません。配布元のG-code・プリンター設定は採用せず、OrcaServerで選んだ機種・材料・工程から再スライスします。
+元の3MF全体は書き換えず保存し、選択プレートと元のオブジェクトへの対応も保持します。
+色・材料・ペイント・未解釈の拡張情報は元ファイルに残り、詳細の「元の3MFを取得」からダウンロードできます。
+画面の形状プレビューは単色です。多色・ペイントの印刷には未対応のため、該当するプレートは保存・閲覧・元ファイル取得まで利用でき、キュー追加・試算・印刷はできません。
+印刷条件の材料選択は派生STL用で、元ファイル内の割当を変更しません。
+
+3MF Coreの三角形メッシュ・componentsとProduction拡張の内部モデル参照に対応します。
+Bambu Studio／OrcaSlicerのプレート情報から対象を選びます。modifier・切り抜き・補助形状、旧Prusa形式の部品設定、未対応の必須拡張は取り込めません。
+元アプリで形状を確定して対応する3MFを書き出してください。対応する多色ファイルを保存するために単色化する必要はありません。
+ファイル合計は64 MiB、3MF内部は512ファイル・展開後合計128 MiB・各ファイル64 MiB、選択形状は100万面までです。
+破損・上限超過では保存せず、入力を残して再試行やファイル変更を案内します。
+
+| 操作 | HTTPとmultipartフィールド |
+| --- | --- |
+| 3MFのプレート一覧 | `POST /api/plates/file-info`、`models`に3MF一つ |
+| 選択プレートのSTLプレビュー | `POST /api/plates/file-preview`、同じ`models`と`plate` |
+| STL／3MFから保存 | `POST /api/plates/files`、`name`・`models`・任意の`conditions`・`quantities`・`plate` |
+| 保存した3MFを取得 | `GET /api/plates/{id}/original` |
+
+`plate`は返された配列の0始まりの位置です。単一プレートなら省略でき、複数なら必須です。
+`quantities`はSTLの送信順に対応する整数配列のJSONで、省略時は各1個です。3MFでは選択した一組分の一要素を渡します。合計は1〜64個です。
+`conditions`は既存の[印刷条件](#印刷条件を保存する)のJSONです。STLと3MFの混在、複数3MFの同時送信は受け付けません。
+
+```sh
+curl --fail http://127.0.0.1:3000/api/plates/file-info -F 'models=@model.3mf'
+curl --fail http://127.0.0.1:3000/api/plates/files \
+  -F 'name=Gauge' -F 'models=@model.3mf' -F 'plate=0' -F 'quantities=[1]'
+```
+
+保存成功は201です。3MF由来のプレートには読取り専用の`imported`を返します。
+`file_name`は元ファイル名、`model_id`は派生STL項目、`selection`はプレート名・内部モデルpath・プレートID・選択build項目・印刷に未対応の理由です。
+`selection.items`は`build_index`・`object_id`・`instance_id`で元ファイルへ対応します。
+編集PUTには従来どおり`name`・`version`・`conditions`・`models`だけを送り、`imported`は送らないでください。
+派生項目の個数・条件を編集しても元ファイルを保持します。派生項目を構成から外した場合も元ファイルは取得できます。
+`GET /api/plates/{id}/files/{model_id}`で取得する3MF由来のSTLは派生物です。
 
 ## 一覧から削除する
 

@@ -33,17 +33,26 @@
   const candidates = $derived(
     destinations(printers, conditions.required_machine_profile_key),
   );
+  const importHold = $derived(
+    plate.imported &&
+      plate.models.some((m) => m.id === plate.imported?.model_id)
+      ? plate.imported.selection.print_reason
+      : null,
+  );
   const hold = $derived(
-    !conditions.required_machine_profile_key
-      ? "プレートの印刷条件を設定してください。"
-      : !candidates.length
-        ? "要求する機種・ノズルに一致するプリンターがありません。"
-        : queue?.admission?.reason
-          ? (failureText[queue.admission.reason] ?? queue.admission.reason)
-          : "",
+    importHold
+      ? importHold
+      : !conditions.required_machine_profile_key
+        ? "プレートの印刷条件を設定してください。"
+        : !candidates.length
+          ? "要求する機種・ノズルに一致するプリンターがありません。"
+          : queue?.admission?.reason
+            ? (failureText[queue.admission.reason] ?? queue.admission.reason)
+            : "",
   );
   const disabled = $derived(
-    busy ||
+    !!importHold ||
+      busy ||
       !!pending ||
       reading ||
       !!readError ||

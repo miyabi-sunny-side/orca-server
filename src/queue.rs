@@ -287,6 +287,7 @@ pub(crate) fn resolve(
     profiles: &Profiles,
     plate: &crate::plates::Plate,
 ) -> Result<Resolved> {
+    plate.ensure_printable()?;
     let main = binding(
         c,
         pid,
@@ -375,6 +376,7 @@ pub(crate) fn planned(
     pid: &str,
     plate: &crate::plates::Plate,
 ) -> Result<Specification> {
+    plate.ensure_printable()?;
     let condition = &plate.conditions;
     let missing =
         || Error::Conflict("Complete the plate machine, material, process and bed conditions");

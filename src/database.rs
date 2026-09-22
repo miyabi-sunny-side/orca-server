@@ -140,7 +140,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=13 => {}
+            1..=14 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -237,6 +237,15 @@ impl Database {
             tx.execute_batch("ALTER TABLE plates ADD COLUMN support_enabled INTEGER NOT NULL DEFAULT 0 CHECK(support_enabled IN (0,1));
                 ALTER TABLE plates ADD COLUMN support_interface_filament_id TEXT REFERENCES filaments(id);
                 PRAGMA user_version=13;")?;
+        }
+        if version < 14 {
+            tx.execute_batch(
+                "CREATE TABLE plate_imports (
+                plate_id TEXT PRIMARY KEY REFERENCES plates(id) ON DELETE CASCADE,
+                metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)),
+                original BLOB NOT NULL CHECK(length(original) BETWEEN 1 AND 67108864)
+            ); PRAGMA user_version=14;",
+            )?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -500,7 +509,7 @@ mod tests {
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
-        db.connection().unwrap().execute_batch("ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
+        db.connection().unwrap().execute_batch("DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
         assert_eq!(db.default_printer().unwrap().as_deref(), Some("stable-id"));
@@ -536,7 +545,7 @@ mod tests {
         db.save(&second).unwrap();
         db.connection()
             .unwrap()
-            .execute_batch("ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
+            .execute_batch("DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
             .unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -575,7 +584,7 @@ mod tests {
                     |r| r.get::<_, i64>(0)
                 )
                 .unwrap(),
-                10
+                11
             );
             assert_eq!(
                 c.query_row("SELECT name FROM plates WHERE id=?1", [&id], |r| r
@@ -839,7 +848,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            13
+            14
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

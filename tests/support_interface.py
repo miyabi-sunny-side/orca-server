@@ -27,6 +27,7 @@ def legacy(binary, output):
                 execution['plate']['conditions'].pop(key)
                 db.execute('ALTER TABLE plates DROP COLUMN '+key)
             db.execute('UPDATE print_jobs SET execution_json=?,estimate_json=NULL WHERE id=?',(json.dumps(execution),job['id']))
+            db.execute('DROP TABLE plate_imports')
             db.execute('PRAGMA user_version=12')
         rig.launch(); rig.idle(); rig.phase('needs_attention')
         assert len(rig.broker.prints)==1
@@ -35,7 +36,7 @@ def legacy(binary, output):
         assert plate['conditions']['support_enabled'] is False
         assert plate['conditions']['support_interface_filament_id'] is None
         with sqlite3.connect(rig.store/'orca.sqlite3') as db:
-            assert db.execute('PRAGMA user_version').fetchone()[0]==13
+            assert db.execute('PRAGMA user_version').fetchone()[0]==14
         rig.send(dict(type='retry',expected_job=job['id'],cleared=True))
         until(lambda:len(rig.broker.prints)==2)
         assert rig.broker.prints[-1]['ams_mapping']==[0]

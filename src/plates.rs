@@ -234,6 +234,27 @@ pub struct Plate {
     #[serde(default)]
     pub conditions: Conditions,
     pub models: Vec<Model>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<Imported>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Imported {
+    pub file_name: String,
+    pub model_id: String,
+    pub selection: crate::model_import::Selection,
+}
+impl Plate {
+    pub(crate) fn ensure_printable(&self) -> Result<()> {
+        if self.imported.as_ref().is_some_and(|source| {
+            source.selection.print_reason.is_some()
+                && self.models.iter().any(|model| model.id == source.model_id)
+        }) {
+            return Err(Error::Conflict(
+                "多色・ペイントの印刷は未対応です。保存した元の3MFを取得できます。",
+            ));
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -326,7 +347,19 @@ impl Store {
     /// Save uploaded STL originals or model references in `SQLite`.
     /// # Errors
     /// Rejects malformed STL, invalid metadata and unavailable storage.
-    pub fn save(&self, mut input: Input) -> Result<Plate> {
+    pub fn save(&self, input: Input) -> Result<Plate> {
+        let quantities = vec![1; input.models.len()];
+        self.save_upload(input, &quantities, None)
+    }
+    pub(crate) fn save_upload(
+        &self,
+        mut input: Input,
+        quantities: &[u16],
+        original: Option<crate::file_import::Original>,
+    ) -> Result<Plate> {
+        if quantities.len() != input.models.len() || original.is_some() && input.models.len() != 1 {
+            return Err(Error::Invalid("モデルごとの個数を確認してください。"));
+        }
         validate_metadata(&input.name)?;
         if input.models.is_empty() || input.models.len() > 64 {
             return Err(Error::Invalid("Select 1–64 STL models"));
@@ -336,13 +369,13 @@ impl Store {
             return Err(Error::Invalid("Models exceed 64 MiB"));
         }
         let mut models = Vec::new();
-        for m in input.models {
+        for (m, quantity) in input.models.into_iter().zip(quantities) {
             validate_stl(&m.data)?;
             let item = ItemEdit {
                 id: Some(uuid::Uuid::new_v4().to_string()),
                 name: m.name,
                 source: m.source,
-                quantity: 1,
+                quantity: *quantity,
             };
             models.push((item, m.data));
         }
@@ -368,6 +401,18 @@ impl Store {
                 } else {
                     None
                 },
+            )?;
+        }
+        if let Some(original) = original {
+            let metadata = Imported {
+                file_name: original.file_name,
+                model_id: models[0].0.id.clone().expect("assigned id"),
+                selection: original.selection,
+            };
+            let metadata = serde_json::to_string(&metadata).map_err(std::io::Error::other)?;
+            tx.execute(
+                "INSERT INTO plate_imports(plate_id,metadata_json,original) VALUES (?1,?2,?3)",
+                rusqlite::params![id, metadata, original.data],
             )?;
         }
         let plate = load(&tx, &id)?;
@@ -501,6 +546,10 @@ impl Store {
         valid_id(item).map_err(|_| Error::NotFound)?;
         self.db.connection()?.query_row("SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2 AND source_kind='upload' AND EXISTS(SELECT 1 FROM plates WHERE id=?1 AND deleted=0)",rusqlite::params![id,item],|r|r.get(0)).optional()?.ok_or(Error::NotFound)
     }
+    pub(crate) fn read_import(&self, id: &str) -> Result<Vec<u8>> {
+        valid_id(id)?;
+        self.db.connection()?.query_row("SELECT original FROM plate_imports WHERE plate_id=?1 AND EXISTS(SELECT 1 FROM plates WHERE id=?1 AND deleted=0)",[id],|r|r.get(0)).optional()?.ok_or(Error::NotFound)
+    }
 }
 pub(crate) fn is_deleted(c: &rusqlite::Connection, id: &str) -> Result<bool> {
     c.query_row("SELECT deleted FROM plates WHERE id=?1", [id], |r| r.get(0))
@@ -522,6 +571,15 @@ pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
         version,
         conditions,
         models,
+        imported: c
+            .query_row(
+                "SELECT metadata_json FROM plate_imports WHERE plate_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(std::io::Error::other))
+            .transpose()?,
     })
 }
 pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {

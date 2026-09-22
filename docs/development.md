@@ -177,3 +177,16 @@ docker build --build-arg ORCA_SOURCE_URL=https://example.org/orca-server-source.
 
 例のURLを、自分が配布するビルドに対応した公開先へ置き換えます。
 未設定の開発ビルドでは公開先が未設定であることを画面へ表示し、公式版のソースへ誤って案内しません。
+
+## 外部モデルの取り込みを検証する
+
+次の検証は自作の寸法既知の3MFを生成し、複数プレートの選別・元ファイルの一致・多色の印刷拒否・保存と再起動を確認します。
+モデルはscad-live未設定で取り込みます。印刷開始・FTPS送信は行わず、プリンター状態は隔離した接続先で再現します。
+
+```sh
+IMPORT_BROWSER=1 python3 tests/model_import.py target/debug/orca-server /tmp/orca-model-import
+python3 tests/model_import.py target/debug/orca-server /tmp/orca-model-import-cli "$ORCA_APPDIR"
+```
+
+最初のコマンドはChromiumで明暗・狭幅・キーボード・失敗からの復帰を測ります。CLI代替は固定生成物で印刷条件の受け渡しだけを確認します。
+2番目は同じ取り込み形状を公式OrcaSlicerで再スライスし、試算結果を記録します。配布サイトのモデルを取得したことは意味しません。

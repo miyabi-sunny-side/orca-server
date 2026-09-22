@@ -140,7 +140,13 @@
   {#if notice}<p role="status">{notice}</p>{/if}
   <div class="page-heading">
     <h1>プレート</h1>
-    <a class="btn primary" href="/plates/new">新規作成</a>
+    <div class="create-actions">
+      <a
+        class="import-link"
+        aria-label="ファイルから取り込む"
+        href="/plates/new?source=file">ファイル取込</a
+      ><a class="btn primary" href="/plates/new">新規作成</a>
+    </div>
   </div>
   <label class="field" for="plate-search">
     <span>名前・モデル名で検索</span>
@@ -279,6 +285,16 @@
 {/if}
 
 <style lang="sass">
+  .create-actions
+    display: flex
+    align-items: center
+    gap: var(--sp-2)
+  .import-link
+    font-size: var(--fs-sm)
+    min-height: 44px
+    display: flex
+    align-items: center
+
   .plate-menu
     display: grid
     gap: var(--sp-2)

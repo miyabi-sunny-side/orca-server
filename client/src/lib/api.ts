@@ -31,7 +31,19 @@ export type DefaultSettings = {
     | "material"
     | null;
 };
+export type ImportedSelection = {
+  name: string;
+  root_model: string;
+  plate_id: string | null;
+  items: { build_index: number; object_id: number; instance_id: number }[];
+  print_reason: string | null;
+};
 export type Plate = {
+  imported?: {
+    file_name: string;
+    model_id: string;
+    selection: ImportedSelection;
+  };
   conditions: PlateConditions;
   id: string;
   version: number;
@@ -76,6 +88,21 @@ export async function request<T>(
   if (response.ok)
     return response.status === 204 ? (undefined as T) : response.json();
   const data = await response.json().catch(() => ({}));
+  if (
+    path.startsWith("/api/plates/file") &&
+    response.status === 400 &&
+    /[ぁ-んァ-ヶ一-龠]/.test(data.error ?? "")
+  ) {
+    throw new ApiError(response.status, data.error);
+  }
+  if (path.startsWith("/api/plates/file") && response.status >= 500) {
+    throw new ApiError(
+      response.status,
+      "ファイルを処理できませんでした。入力を保ったまま再試行できます。",
+    );
+  }
+  if (response.status === 413)
+    throw new ApiError(413, "ファイルの合計を64 MiB以内にしてください。");
   if (path.split("?")[0] === "/api/queue") {
     const message =
       response.status === 409
