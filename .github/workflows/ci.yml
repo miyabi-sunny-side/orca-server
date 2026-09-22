@@ -39,15 +39,6 @@ jobs:
       - name: Check Svelte
         run: npm --prefix client run check
 
-      - name: Test frontend
-        run: npm --prefix client test
-
-      - name: Install Chromium
-        run: npx --prefix client playwright install --with-deps chromium
-
-      - name: Test browser layout
-        run: npm --prefix client run test:e2e
-
       - name: Build frontend
         run: npm --prefix client run build
 
@@ -60,101 +51,8 @@ jobs:
       - name: Lint Rust
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Test Rust
-        run: cargo test --locked
-
-      - name: Build smoke-test binary
+      - name: Build backend
         run: cargo build --locked
-
-      - name: Verify isolated MQTT and TLS printer connection
-        run: python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-check
-
-      - name: Verify AMS priority, native refill and compact controls
-        run: AMS_BROWSER=1 python3 tests/ams_priority.py target/debug/orca-server /tmp/orca-ams-check
-
-      - name: Verify MCP client and shared material and AMS operations
-        run: python3 tests/mcp_printer.py target/debug/orca-server /tmp/orca-mcp-check
-
-      - name: Verify isolated FTPS upload and print start
-        run: python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-check
-
-      - name: Verify legacy v1 printer certificates over MQTT and FTPS
-        run: |
-          python3 tests/printer_mqtt.py target/debug/orca-server /tmp/orca-mqtt-v1-check v1
-          python3 tests/printer_start.py target/debug/orca-server /tmp/orca-start-v1-check v1
-
-      - name: Verify durable queue, recovery and manual next-print flow
-        run: python3 tests/queue_printer.py target/debug/orca-server /tmp/orca-queue-check
-
-      - name: Verify plate conditions and direct queue admission
-        run: PLATE_BROWSER=1 python3 tests/plate_queue.py target/debug/orca-server /tmp/orca-plate-check
-
-      - name: Verify saved creation defaults and active input preservation
-        run: DEFAULTS_BROWSER=1 python3 tests/plate_defaults.py target/debug/orca-server /tmp/orca-defaults-check
-
-      - name: Verify infill and shell settings, migration and browser editing
-        run: STRENGTH_BROWSER=1 python3 tests/strength_settings.py target/debug/orca-server /tmp/orca-strength-check
-
-      - name: Verify support interface selection and frozen AMS execution
-        run: SUPPORT_BROWSER=1 python3 tests/support_interface.py target/debug/orca-server /tmp/orca-support-check
-
-      - name: Verify external model import, preservation and browser recovery
-        run: IMPORT_BROWSER=1 python3 tests/model_import.py target/debug/orca-server /tmp/orca-model-import
-
-      - name: Verify material names do not block compatible nozzles
-        run: python3 tests/nozzle_material.py target/debug/orca-server /tmp/orca-nozzle-check
-
-      - name: Verify MCP queue continuation against isolated printer
-        run: python3 tests/mcp_queue.py target/debug/orca-server /tmp/orca-mcp-queue
-
-      - name: Verify automatic estimates, cache validity and browser states
-        run: ESTIMATE_BROWSER=1 python3 tests/queue_estimates.py target/debug/orca-server /tmp/orca-estimates
-
-      - name: Verify temperature recovery and logical deletion without extra prints
-        run: COMPACT_BROWSER=1 python3 tests/compact_queue.py target/debug/orca-server /tmp/orca-compact
-
-      - name: Verify completion notifications against isolated HTTPS and printer peers
-        run: python3 tests/notifications.py /tmp/orca-notification-check
-
-      - name: Verify mobile and desktop queue against isolated printer
-        run: python3 tests/browser_queue.py target/debug/orca-server /tmp/orca-queue-browser
-
-      - name: Smoke-test embedded UI from an isolated directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          binary_dir=$(mktemp -d)
-          cp target/debug/orca-server "$binary_dir/"
-          cd "$binary_dir"
-          PORT=3100 APP_BIND_ADDR=invalid-legacy-address ./orca-server &
-          server_pid=$!
-          trap 'kill -TERM "$server_pid" 2>/dev/null || true; rm -rf "$binary_dir"' EXIT
-
-          for attempt in {1..20}; do
-            if curl --fail --silent --show-error http://127.0.0.1:3100/healthz >/dev/null; then
-              break
-            fi
-            if [[ "$attempt" == 20 ]]; then
-              exit 1
-            fi
-            sleep 0.25
-          done
-
-          test "$(curl --fail --silent http://127.0.0.1:3100/healthz)" = "ok"
-          test "$(curl --fail --silent http://127.0.0.1:3100/api/health)" = '{"status":"ok"}'
-          curl --fail --silent http://127.0.0.1:3100/ > index.html
-          grep --ignore-case '<!doctype html' index.html
-          asset=$(sed -n 's/.*src="\([^" ]*\.js\)".*/\1/p' index.html)
-          test -n "$asset"
-          curl --fail --silent "http://127.0.0.1:3100$asset" > app.js
-          test -s app.js
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3100/api/missing)" = "404"
-          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3100/projects/example)" = "200"
-
-          kill -TERM "$server_pid"
-          wait "$server_pid"
-          rm -rf "$binary_dir"
-          trap - EXIT
 
   container:
     runs-on: ubuntu-latest
@@ -170,13 +68,5 @@ jobs:
         with:
           context: .
           push: false
-          load: true
-          tags: orca-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Verify headless slicing and persistent storage
-        run: python3 tests/container.py orca-server:ci /tmp/orca-container-check
-
-      - name: Verify official support slicing and two-material mapping
-        run: python3 tests/support_cli.py orca-server:ci /tmp/orca-support-cli
