@@ -110,3 +110,43 @@ test("old forms default brim off and late defaults preserve the user's checkbox"
     initialConditions({ ...checked, brim_enabled: false }, checked, new Set()),
   ).toHaveProperty("brim_enabled", false);
 });
+
+test("support starts off, defaults its interface once, and preserves a chosen material", async () => {
+  const { initialConditions, emptyConditions } = await import("./plate");
+  const defaults = { ...emptyConditions, filament_id: "white" };
+  expect(initialConditions(emptyConditions, defaults, new Set())).toMatchObject(
+    {
+      support_enabled: false,
+      support_interface_filament_id: null,
+    },
+  );
+  expect(
+    initialConditions(
+      { ...defaults, support_enabled: true },
+      defaults,
+      new Set(),
+    ),
+  ).toMatchObject({
+    support_enabled: true,
+    support_interface_filament_id: "white",
+  });
+  for (const support_enabled of [false, true]) {
+    expect(
+      initialConditions(
+        { ...defaults, support_enabled, support_interface_filament_id: "petg" },
+        defaults,
+        new Set(),
+      ),
+    ).toMatchObject({
+      support_enabled,
+      support_interface_filament_id: "petg",
+    });
+  }
+  expect(
+    initialConditions(
+      { ...emptyConditions, support_enabled: true },
+      emptyConditions,
+      new Set(),
+    ),
+  ).toMatchObject({ support_interface_filament_id: null });
+});

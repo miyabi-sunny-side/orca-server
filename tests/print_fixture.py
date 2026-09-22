@@ -42,7 +42,8 @@ import hashlib, io, json, pathlib, sys, time, zipfile, xml.etree.ElementTree as 
 if '--help' in sys.argv:
     print('OrcaSlicer-2.4.2:'); raise SystemExit()
 root=pathlib.Path.cwd()
-profiles={name:json.loads((root/(name+'.json')).read_text()) for name in ['printer','process','filament']}
+profiles={name:json.loads((root/(name+'.json')).read_text()) for name in ['printer','process','filament','interface'] if (root/(name+'.json')).exists()}
+materials=[profiles[n] for n in ['filament','interface'] if n in profiles]
 inputs=[hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.glob('*.stl'))]
 with pathlib.Path(TRACE).open('a') as log: log.write(json.dumps(dict(directory=str(root),arguments=sys.argv[1:],profiles=profiles,inputs=inputs))+'\\n')
 control=pathlib.Path(FIXTURE_CONTROL_DIR)
@@ -57,12 +58,14 @@ with zipfile.ZipFile(ARTIFACT) as source, zipfile.ZipFile(output,'w',zipfile.ZIP
         data=source.read(entry.filename)
         if entry.filename=='Metadata/project_settings.config':
             settings=json.loads(data)
-            settings.update(printer_settings_id=profiles['printer']['name'],print_settings_id=profiles['process']['name'],filament_settings_id=[profiles['filament']['name']],curr_bed_type=bed)
-            for key in ['filament_type','nozzle_temperature','nozzle_temperature_initial_layer']: settings[key]=profiles['filament'][key]
+            settings.update(printer_settings_id=profiles['printer']['name'],print_settings_id=profiles['process']['name'],filament_settings_id=[p['name'] for p in materials],curr_bed_type=bed)
+            for key in ['filament_type','filament_colour','nozzle_temperature','nozzle_temperature_initial_layer']: settings[key]=[v for p in materials for v in (p.get(key,['#FFFFFF']) if key=='filament_colour' else p[key])]
             data=json.dumps(settings).encode()
         if entry.filename=='Metadata/slice_info.config':
             metadata=ET.fromstring(data)
-            metadata.find('plate/filament').set('type',profiles['filament']['filament_type'][0])
+            plate=metadata.find('plate')
+            for old in plate.findall('filament'): plate.remove(old)
+            for i,p in enumerate(materials): ET.SubElement(plate,'filament',id=str(i+1),type=p['filament_type'][0],color=p.get('filament_colour',['#FFFFFF'])[0],used_for_object='true' if i==0 else 'false')
             data=ET.tostring(metadata)
         target.writestr(entry.filename,data)
 '''.replace('FIXTURE_CONTROL_DIR', repr(str(root))).replace('TRACE', repr(str(root/'cli.jsonl'))).replace('ARTIFACT', repr(str(REPO/'tests/fixtures/p1_print.gcode.3mf')))

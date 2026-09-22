@@ -21,6 +21,11 @@ pub enum Phase {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct MaterialSlot {
+    pub ams_slot: u8,
+    pub material: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: String,
     pub plate_id: String,
@@ -29,6 +34,8 @@ pub struct Attempt {
     pub phase: Phase,
     pub message: Option<String>,
     pub material: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<MaterialSlot>,
     sequence: String,
     sent_at: Option<u64>,
     observed_printing: bool,
@@ -62,6 +69,7 @@ impl Attempt {
             phase: Phase::Uploading,
             message: None,
             material,
+            interface: None,
             sequence: (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string(),
             sent_at: None,
             observed_printing: false,
@@ -74,12 +82,15 @@ impl Attempt {
         format!("{}.gcode.3mf", self.name())
     }
     pub fn command(&self) -> Value {
+        let mapping: Vec<_> = std::iter::once(self.ams_slot)
+            .chain(self.interface.iter().map(|i| i.ams_slot))
+            .collect();
         json!({"print":{
             "command":"project_file", "sequence_id":self.sequence,
             "param":"Metadata/plate_1.gcode", "url":format!("ftp:///{}", self.filename()),
             "file":self.filename(), "subtask_name":self.name(),
             "project_id":"0", "profile_id":"0", "task_id":"0", "subtask_id":"0", "md5":"",
-            "use_ams":true, "ams_mapping":[self.ams_slot], "bed_type":"auto",
+            "use_ams":true, "ams_mapping":mapping, "bed_type":"auto",
             "timelapse":false, "bed_leveling":true, "flow_cali":false,
             "vibration_cali":true, "layer_inspect":false
         }})
@@ -200,11 +211,25 @@ fn material(bytes: &[u8]) -> Result<String> {
     material_for(bytes, crate::profiles::PRINTER)
 }
 
-pub fn material_for(bytes: &[u8], machine: &str) -> Result<String> {
+#[cfg(test)]
+fn material_for(bytes: &[u8], machine: &str) -> Result<String> {
+    let profile =
+        json!({"name":"material 0","filament_type":["PLA"],"filament_colour":["#FFFFFF"]})
+            .as_object()
+            .expect("fixture")
+            .clone();
+    materials_for(bytes, machine, &[profile]).map(|mut materials| materials.remove(0))
+}
+
+pub(crate) fn materials_for(
+    bytes: &[u8],
+    machine: &str,
+    profiles: &[serde_json::Map<String, Value>],
+) -> Result<Vec<String>> {
     use std::io::{Cursor, Read};
     let invalid = || {
         Error::Invalid(
-            "Print must contain one matching printer plate and one material at filament index 1",
+            "Print must contain one matching printer plate and valid planned material indices",
         )
     };
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid())?;
@@ -241,8 +266,26 @@ pub fn material_for(bytes: &[u8], machine: &str) -> Result<String> {
     };
     let settings: Value =
         serde_json::from_str(&read("Metadata/project_settings.config")?).map_err(|_| invalid())?;
+    crate::support::check_materials(&settings, profiles)?;
     let xml = read("Metadata/slice_info.config")?;
-    let doc = roxmltree::Document::parse(&xml).map_err(|_| invalid())?;
+    if settings["printer_settings_id"] != machine {
+        return Err(invalid());
+    }
+    check_used_materials(&xml, profiles)?;
+    Ok(profiles
+        .iter()
+        .map(|p| {
+            p["filament_type"][0]
+                .as_str()
+                .expect("validated material type")
+                .to_owned()
+        })
+        .collect())
+}
+
+fn check_used_materials(xml: &str, profiles: &[serde_json::Map<String, Value>]) -> Result<()> {
+    let invalid = || Error::Invalid("Slice contains invalid or unplanned material indices");
+    let doc = roxmltree::Document::parse(xml).map_err(|_| invalid())?;
     let plates: Vec<_> = doc
         .root_element()
         .children()
@@ -261,20 +304,48 @@ pub fn material_for(bytes: &[u8], machine: &str) -> Result<String> {
         .children()
         .filter(|n| n.has_tag_name("filament"))
         .collect();
-    if filaments.len() != 1
-        || filaments[0].attribute("id") != Some("1")
-        || settings["printer_settings_id"] != machine
-    {
+    if filaments.is_empty() || filaments.len() > profiles.len() {
         return Err(invalid());
     }
-    let material = filaments[0]
-        .attribute("type")
-        .filter(|s| !s.is_empty() && s.len() <= 64 && !s.chars().any(char::is_control))
-        .ok_or_else(invalid)?;
-    if settings["filament_type"] != json!([material]) {
+    let mut used = std::collections::BTreeSet::new();
+    for filament in filaments {
+        let id = filament.attribute("id").ok_or_else(invalid)?;
+        let index = id
+            .parse::<usize>()
+            .ok()
+            .filter(|i| (1..=profiles.len()).contains(i) && i.to_string() == id)
+            .ok_or_else(invalid)?;
+        if !used.insert(index) {
+            return Err(invalid());
+        }
+        let material = filament
+            .attribute("type")
+            .filter(|s| !s.is_empty() && s.len() <= 64 && !s.chars().any(char::is_control))
+            .ok_or_else(invalid)?;
+        if profiles[index - 1]["filament_type"][0] != material {
+            return Err(invalid());
+        }
+        if let Some(colour) = filament
+            .attribute("color")
+            .filter(|_| profiles.len() > 1 || profiles[index - 1].contains_key("filament_colour"))
+        {
+            if !profiles[index - 1]["filament_colour"][0]
+                .as_str()
+                .is_some_and(|v| v.eq_ignore_ascii_case(colour))
+            {
+                return Err(invalid());
+            }
+        } else if profiles.len() > 1 {
+            return Err(invalid());
+        }
+        if index == 2 && filament.attribute("used_for_object") == Some("true") {
+            return Err(invalid());
+        }
+    }
+    if !used.contains(&1) {
         return Err(invalid());
     }
-    Ok(material.to_owned())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -310,6 +381,22 @@ mod tests {
         assert_eq!(command["print"]["param"], "Metadata/plate_1.gcode");
         assert_eq!(command["print"]["url"], format!("ftp:///{}", a.filename()));
         assert_eq!(command["print"]["use_ams"], true);
+    }
+
+    #[test]
+    fn interface_mapping_is_ordered_and_old_attempts_keep_one_slot() {
+        let original = Attempt::new("p".into(), "j".into(), 3, "PLA".into());
+        let mut raw = json!(original);
+        raw["interface"] = json!({"ams_slot":1,"material":"PETG"});
+        let mut attempt: Attempt = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(attempt.command()["print"]["ams_mapping"], json!([3, 1]));
+        attempt.sent(10);
+        attempt.tick(20, 5);
+        assert_eq!(attempt.phase, Phase::Unknown);
+        assert!(attempt.blocks_start());
+        raw.as_object_mut().unwrap().remove("interface");
+        let old: Attempt = serde_json::from_value(raw).unwrap();
+        assert_eq!(old.command()["print"]["ams_mapping"], json!([3]));
     }
 
     #[test]
@@ -386,6 +473,36 @@ mod tests {
 mod archive_tests {
     use super::*;
     use std::io::{Cursor, Write};
+    #[test]
+    fn legacy_single_material_without_frozen_colour_keeps_type_and_profile_checks() {
+        let bytes = archive(
+            r##"<filament id="1" type="PLA" color="#00AE42"/>"##,
+            &json!(["PLA"]),
+        );
+        let profile = json!({"name":"material 0","filament_type":["PLA"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            materials_for(
+                &bytes,
+                crate::profiles::PRINTER,
+                std::slice::from_ref(&profile)
+            )
+            .unwrap(),
+            vec!["PLA"]
+        );
+        let mut wrong = profile.clone();
+        wrong.insert("name".into(), json!("wrong"));
+        assert!(materials_for(&bytes, crate::profiles::PRINTER, &[wrong]).is_err());
+        let two = archive(
+            r##"<filament id="1" type="PLA" color="#00AE42"/><filament id="2" type="PLA" color="#00AE42"/>"##,
+            &json!(["PLA", "PLA"]),
+        );
+        let mut second = profile.clone();
+        second.insert("name".into(), json!("material 1"));
+        assert!(materials_for(&two, crate::profiles::PRINTER, &[profile, second]).is_err());
+    }
     fn archive(filaments: &str, types: &Value) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, content) in [
@@ -397,7 +514,7 @@ mod archive_tests {
             ),
             (
                 "Metadata/project_settings.config",
-                json!({"printer_settings_id":crate::profiles::PRINTER,"filament_type":types})
+                json!({"printer_settings_id":crate::profiles::PRINTER,"filament_type":types,"filament_settings_id":types.as_array().unwrap().iter().enumerate().map(|(i,_)| format!("material {i}")).collect::<Vec<_>>(),"filament_colour":types.as_array().unwrap().iter().map(|_| "#FFFFFF").collect::<Vec<_>>()})
                     .to_string(),
             ),
             ("Metadata/plate_1.gcode", "G28".into()),
@@ -408,6 +525,49 @@ mod archive_tests {
         }
         zip.finish().unwrap().into_inner()
     }
+    #[test]
+    fn two_material_archives_validate_all_indices_and_allow_an_unused_interface() {
+        let profiles = [
+            json!({"name":"material 0","filament_type":["PLA"],"filament_colour":["#FFFFFF"]}),
+            json!({"name":"material 1","filament_type":["PETG"],"filament_colour":["#FFFFFF"]}),
+        ]
+        .map(|v| v.as_object().unwrap().clone());
+        for xml in [
+            r##"<filament id="1" type="PLA" color="#FFFFFF"/><filament id="2" type="PETG" color="#FFFFFF"/>"##,
+            r##"<filament id="1" type="PLA" color="#FFFFFF"/>"##,
+        ] {
+            let bytes = archive(xml, &json!(["PLA", "PETG"]));
+            assert_eq!(
+                materials_for(&bytes, crate::profiles::PRINTER, &profiles).unwrap(),
+                vec!["PLA", "PETG"]
+            );
+            assert!(
+                materials_for(
+                    &bytes,
+                    crate::profiles::PRINTER,
+                    &[profiles[1].clone(), profiles[0].clone()]
+                )
+                .is_err()
+            );
+        }
+        for xml in [
+            r##"<filament id="2" type="PETG" color="#FFFFFF"/>"##,
+            r##"<filament id="1" type="PLA" color="#FFFFFF"/><filament id="1" type="PLA" color="#FFFFFF"/>"##,
+            r##"<filament id="1" type="PLA" color="#FFFFFF"/><filament id="3" type="PETG" color="#FFFFFF"/>"##,
+            r##"<filament id="1" type="PLA" color="#FFFFFF"/><filament id="2" type="PLA" color="#FFFFFF"/>"##,
+            r##"<filament id="1" type="PLA" color="#FFFFFF"/><filament id="2" type="PETG" color="#000000"/>"##,
+        ] {
+            assert!(
+                materials_for(
+                    &archive(xml, &json!(["PLA", "PETG"])),
+                    crate::profiles::PRINTER,
+                    &profiles
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn refuses_artifacts_for_another_machine_or_nozzle() {
         let bytes = archive("<filament id=\"1\" type=\"PLA\"/>", &json!(["PLA"]));

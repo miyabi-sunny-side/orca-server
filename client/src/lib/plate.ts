@@ -23,6 +23,8 @@ export const emptyStrength = {
 };
 export const emptyConditions: PlateConditions = {
   brim_enabled: false,
+  support_enabled: false,
+  support_interface_filament_id: null,
   ...emptyStrength,
   required_machine_profile_key: null,
   filament_id: null,
@@ -36,7 +38,12 @@ export function initialConditions(
   edited: Set<keyof PlateConditions>,
   creation = true,
 ): PlateConditions {
-  const result = { ...value, brim_enabled: value.brim_enabled ?? false };
+  const result = {
+    ...value,
+    brim_enabled: value.brim_enabled ?? false,
+    support_enabled: value.support_enabled ?? false,
+    support_interface_filament_id: value.support_interface_filament_id ?? null,
+  };
   for (const key of Object.keys(emptyConditions) as (keyof PlateConditions)[]) {
     const strength = key in emptyStrength;
     if (
@@ -51,5 +58,7 @@ export function initialConditions(
     )
       Object.assign(result, { [key]: defaults[key] ?? null });
   }
+  if (result.support_enabled)
+    result.support_interface_filament_id ??= result.filament_id;
   return result;
 }

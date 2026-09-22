@@ -17,6 +17,7 @@ pub mod registry;
 pub mod scad;
 mod search;
 pub mod slicer;
+mod support;
 
 use axum::{
     Json, Router,

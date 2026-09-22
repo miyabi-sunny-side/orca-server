@@ -95,6 +95,9 @@ jobs:
       - name: Verify infill and shell settings, migration and browser editing
         run: STRENGTH_BROWSER=1 python3 tests/strength_settings.py target/debug/orca-server /tmp/orca-strength-check
 
+      - name: Verify support interface selection and frozen AMS execution
+        run: SUPPORT_BROWSER=1 python3 tests/support_interface.py target/debug/orca-server /tmp/orca-support-check
+
       - name: Verify material names do not block compatible nozzles
         run: python3 tests/nozzle_material.py target/debug/orca-server /tmp/orca-nozzle-check
 
@@ -171,3 +174,6 @@ jobs:
 
       - name: Verify headless slicing and persistent storage
         run: python3 tests/container.py orca-server:ci /tmp/orca-container-check
+
+      - name: Verify official support slicing and two-material mapping
+        run: python3 tests/support_cli.py orca-server:ci /tmp/orca-support-cli

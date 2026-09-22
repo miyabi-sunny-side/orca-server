@@ -123,6 +123,7 @@ impl Slicer {
         directory: PathBuf,
         count: usize,
         selection: Selection,
+        filaments: Vec<serde_json::Map<String, serde_json::Value>>,
         id: &str,
     ) -> Result<()> {
         let _permit = self
@@ -132,18 +133,34 @@ impl Slicer {
             .map_err(|_| Error::Unavailable("Slicer stopped"))?;
         self.run(
             &directory,
-            arrange_args(&selection.bed, count),
+            arrange_args(&selection.bed, count, filaments.len() == 2),
             id,
             "arrange",
         )
         .await?;
         let path = directory.clone();
         let settings = selection.clone();
-        blocking(move || artifacts::validate(&path.join("project.3mf"), count, &settings, false))
-            .await?;
-        self.run(&directory, slice_args(), id, "slice").await?;
+        let materials = filaments.clone();
         blocking(move || {
-            artifacts::validate(&directory.join("print.gcode.3mf"), count, &selection, true)
+            artifacts::validate(
+                &path.join("project.3mf"),
+                count,
+                &settings,
+                &materials,
+                false,
+            )
+        })
+        .await?;
+        self.run(&directory, slice_args(filaments.len() == 2), id, "slice")
+            .await?;
+        blocking(move || {
+            artifacts::validate(
+                &directory.join("print.gcode.3mf"),
+                count,
+                &selection,
+                &filaments,
+                true,
+            )
         })
         .await
     }
@@ -231,14 +248,18 @@ async fn drain(
     Ok(String::from_utf8_lossy(&captured).into_owned())
 }
 
-fn arrange_args(bed: &str, models: usize) -> Vec<OsString> {
+fn arrange_args(bed: &str, models: usize, interface: bool) -> Vec<OsString> {
     let mut args: Vec<_> = [
         "--datadir",
         "data",
         "--load-settings",
         "printer.json;process.json",
         "--load-filaments",
-        "filament.json",
+        if interface {
+            "filament.json;interface.json"
+        } else {
+            "filament.json"
+        },
         "--curr-bed-type",
         bed,
         "--arrange",
@@ -253,8 +274,8 @@ fn arrange_args(bed: &str, models: usize) -> Vec<OsString> {
     args.extend((0..models).map(|index| OsString::from(format!("{index}.stl"))));
     args
 }
-fn slice_args() -> Vec<OsString> {
-    [
+fn slice_args(interface: bool) -> Vec<OsString> {
+    let mut args: Vec<_> = [
         "--datadir",
         "data",
         "--slice",
@@ -266,7 +287,12 @@ fn slice_args() -> Vec<OsString> {
         "project.3mf",
     ]
     .map(OsString::from)
-    .into()
+    .into();
+    // Orca's native option permits the explicitly chosen interface pair without altering temperatures.
+    if interface {
+        args.insert(0, "--allow-mix-temp".into());
+    }
+    args
 }
 
 pub(crate) fn router(slicer: Option<Slicer>) -> Router {
@@ -364,14 +390,20 @@ mod tests {
         std::fs::write(&binary, "#!/bin/sh\nexit 7\n").unwrap();
         assert!(matches!(
             slicer
-                .slice(directory.clone(), 1, defaults.clone(), "test")
+                .slice(directory.clone(), 1, defaults.clone(), vec![serde_json::Map::new()], "test")
                 .await,
             Err(Error::Slicer(ref message)) if message.contains("arrange") && message.contains('7') && message.contains("reference test")
         ));
         std::fs::write(&binary, "#!/bin/sh\nexec sleep 30\n").unwrap();
         assert!(matches!(
             slicer
-                .slice(directory.clone(), 1, defaults.clone(), "test")
+                .slice(
+                    directory.clone(),
+                    1,
+                    defaults.clone(),
+                    vec![serde_json::Map::new()],
+                    "test"
+                )
                 .await,
             Err(Error::Timeout)
         ));
@@ -385,7 +417,7 @@ mod tests {
 
     #[test]
     fn independent_inputs_are_arranged_and_reslice_uses_only_saved_project() {
-        let args = arrange_args("Textured PEI Plate", 2);
+        let args = arrange_args("Textured PEI Plate", 2, false);
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert!(args.windows(2).any(|a| a == ["--arrange", "1"]));
         assert!(
@@ -394,7 +426,15 @@ mod tests {
         );
         assert_eq!(&args[args.len() - 2..], ["0.stl", "1.stl"]);
         assert!(!args.contains(&"--assemble"));
-        let slice = slice_args();
+        let two = arrange_args("Textured PEI Plate", 1, true);
+        assert!(
+            two.windows(2)
+                .any(|a| a == ["--load-filaments", "filament.json;interface.json"])
+        );
+        let mixed = slice_args(true);
+        assert!(mixed.iter().any(|v| v == "--allow-mix-temp"));
+        assert!(!slice_args(false).iter().any(|v| v == "--allow-mix-temp"));
+        let slice = slice_args(false);
         assert_eq!(
             slice,
             [

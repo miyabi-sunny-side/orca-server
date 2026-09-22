@@ -79,6 +79,14 @@ pub(crate) struct Execution {
     pub plate: crate::plates::Plate,
     #[serde(flatten)]
     pub settings: Resolved,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Binding {
+    pub filament: crate::filament::Filament,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setting: Option<crate::filament::SettingData>,
+    #[serde(default)]
+    pub ams_slot_id: String,
     pub slot_revision: i64,
     pub ams_slot: u8,
 }
@@ -86,17 +94,133 @@ pub(crate) struct Execution {
 pub(crate) struct Resolved {
     pub selection: Selection,
     pub profiles: BTreeMap<String, serde_json::Map<String, Value>>,
-    pub filament: crate::filament::Filament,
+    #[serde(flatten)]
+    pub main: Binding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<Binding>,
 }
 impl Resolved {
-    pub(crate) fn for_plate(mut self, plate: &crate::plates::Plate) -> Result<Self> {
-        plate.conditions.apply(
-            self.profiles
-                .get_mut("process.json")
-                .ok_or(Error::Invalid("Resolved process is missing"))?,
-        )?;
-        Ok(self)
+    pub(crate) fn filament_profiles(&self) -> Vec<serde_json::Map<String, Value>> {
+        ["filament.json", "interface.json"]
+            .into_iter()
+            .filter_map(|key| self.profiles.get(key).cloned())
+            .collect()
     }
+    fn check_bindings(
+        &mut self,
+        c: &Connection,
+        device: &Device,
+        status: &Status,
+        refresh: bool,
+    ) -> Result<()> {
+        let machine: String = c.query_row(
+            "SELECT machine_profile_key FROM printers WHERE id=?1",
+            [&device.id],
+            |r| r.get(0),
+        )?;
+        if !status.synchronized
+            || machine != self.selection.machine
+            || machine != device.settings.machine_profile_key
+        {
+            return Err(Error::Conflict(
+                "Printer or nozzle changed during preparation",
+            ));
+        }
+        let diameter = self.profiles["printer.json"]["nozzle_diameter"][0]
+            .as_str()
+            .ok_or(Error::Invalid("Invalid nozzle profile"))?;
+        crate::print_start::check_nozzle(status, diameter, &device.settings.nozzle_material)?;
+        let filaments = crate::database::load_filaments(c)?;
+        for binding in std::iter::once(&mut self.main).chain(self.interface.iter_mut()) {
+            let slot = crate::ams::resolve(c, &device.id, &binding.filament.id, &machine)?
+                .into_iter()
+                .find(|s| s.id == binding.ams_slot_id && s.ams_id < 4)
+                .ok_or(Error::Conflict(
+                    "Selected AMS slot does not contain the planned material",
+                ))?;
+            let number = slot.ams_id * 4 + slot.slot_index;
+            if number != binding.ams_slot
+                || (!refresh && slot.revision != binding.slot_revision)
+                || filaments.iter().find(|f| f.id == binding.filament.id) != Some(&binding.filament)
+                || binding.setting.as_ref().is_some_and(|setting| {
+                    crate::products::load_setting(c, &binding.filament.id, &machine)
+                        .as_ref()
+                        .ok()
+                        != Some(setting)
+                })
+            {
+                return Err(Error::Conflict(
+                    "AMS assignment or material settings changed during preparation",
+                ));
+            }
+            let tray = status
+                .ams
+                .as_ref()
+                .and_then(|a| a.units.iter().find(|u| u.id == number / 4))
+                .and_then(|u| u.trays.iter().find(|t| t.id == number % 4));
+            if tray.is_none_or(|t| t.present != Some(true)) {
+                return Err(Error::Conflict(
+                    "Selected AMS slot is not confirmed present",
+                ));
+            }
+            if refresh {
+                binding.slot_revision = slot.revision;
+            }
+        }
+        Ok(())
+    }
+}
+fn binding(
+    c: &Connection,
+    pid: &str,
+    filament_id: &str,
+    machine: &str,
+    slot_id: Option<&str>,
+) -> Result<Binding> {
+    let slot = crate::ams::resolve(c, pid, filament_id, machine)?
+        .into_iter()
+        .find(|s| s.ams_id < 4 && slot_id.is_none_or(|id| id == s.id))
+        .ok_or(Error::Conflict(
+            "No confirmed AMS slot contains the selected material",
+        ))?;
+    let filament = crate::database::load_filaments(c)?
+        .into_iter()
+        .find(|f| f.id == filament_id)
+        .ok_or(Error::NotFound)?;
+    let setting = Some(crate::products::load_setting(c, filament_id, machine)?);
+    Ok(Binding {
+        filament,
+        setting,
+        ams_slot_id: slot.id,
+        slot_revision: slot.revision,
+        ams_slot: slot.ams_id * 4 + slot.slot_index,
+    })
+}
+fn retry_execution(
+    c: &Connection,
+    device: &Device,
+    job: &Job,
+    status: &Status,
+) -> Result<Execution> {
+    if !status.ready_to_print {
+        return Err(Error::Conflict("Wait for a current, ready printer report"));
+    }
+    let raw: String = c.query_row(
+        "SELECT execution_json FROM print_jobs WHERE id=?1",
+        [&job.id],
+        |r| r.get(0),
+    )?;
+    let mut execution: Execution = serde_json::from_str(&raw).map_err(std::io::Error::other)?;
+    if execution.settings.main.ams_slot_id.is_empty() {
+        execution
+            .settings
+            .main
+            .ams_slot_id
+            .clone_from(&job.specification.ams_slot_id);
+    }
+    // Explicit retry refreshes revisions of the same slots; material IDs and slice inputs remain frozen.
+    execution.settings.check_bindings(c, device, status, true)?;
+    Ok(execution)
 }
 struct Preparation {
     job: Job,
@@ -161,23 +285,16 @@ pub(crate) fn resolve(
     pid: &str,
     s: &Specification,
     profiles: &Profiles,
+    plate: &crate::plates::Plate,
 ) -> Result<Resolved> {
-    let exists: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ams_slots WHERE id=?1 AND printer_id=?2)",
-        params![s.ams_slot_id, pid],
-        |r| r.get(0),
+    let main = binding(
+        c,
+        pid,
+        &s.filament_id,
+        &s.required_machine_profile_key,
+        Some(&s.ams_slot_id),
     )?;
-    if !exists {
-        return Err(Error::Invalid(
-            "Select an AMS slot belonging to this printer",
-        ));
-    }
-    let setting =
-        crate::products::load_setting(c, &s.filament_id, &s.required_machine_profile_key)?;
-    let filament = crate::database::load_filaments(c)?
-        .into_iter()
-        .find(|f| f.id == s.filament_id)
-        .ok_or(Error::NotFound)?;
+    let setting = main.setting.as_ref().expect("resolved setting");
     let selection = Selection {
         machine: s.required_machine_profile_key.clone(),
         process: s.process_profile_key.clone(),
@@ -185,85 +302,79 @@ pub(crate) fn resolve(
         bed: s.bed_type.clone(),
     };
     let mut resolved = profiles.resolved(&selection)?;
-    resolved.insert(
-        "filament.json".into(),
-        profiles.resolve_filament(&setting, &filament.data.material)?,
-    );
-    crate::profiles::validate_bed(&resolved["filament.json"], &selection.bed)?;
+    let primary = crate::support::material_profile(
+        profiles.resolve_filament(setting, &main.filament.data.material)?,
+        &main.filament,
+        None,
+    )?;
+    crate::profiles::validate_bed(&primary, &selection.bed)?;
+    let interface = if let Some(id) = plate
+        .conditions
+        .interface_id()
+        .filter(|id| *id != main.filament.id)
+    {
+        let secondary =
+            binding(c, pid, id, &selection.machine, None).map_err(|error| match error {
+                Error::Conflict(_) => {
+                    Error::Conflict("No confirmed AMS slot contains the support interface material")
+                }
+                other => other,
+            })?;
+        let profile = profiles.resolve_filament(
+            secondary.setting.as_ref().expect("resolved setting"),
+            &secondary.filament.data.material,
+        )?;
+        resolved.insert(
+            "interface.json".into(),
+            crate::support::material_profile(profile, &secondary.filament, Some(&primary))?,
+        );
+        Some(secondary)
+    } else {
+        None
+    };
+    resolved.insert("filament.json".into(), primary);
+    plate.conditions.apply(
+        resolved
+            .get_mut("process.json")
+            .ok_or(Error::Invalid("Resolved process is missing"))?,
+    )?;
     Ok(Resolved {
         selection,
         profiles: resolved,
-        filament,
+        main,
+        interface,
     })
 }
 fn available(
     c: &Connection,
     device: &Device,
     s: &Specification,
+    plate: &crate::plates::Plate,
     status: &Status,
     profiles: &Profiles,
-) -> Result<(Resolved, i64, u8)> {
-    if !status.synchronized {
-        return Err(Error::Conflict("Wait for a current printer report"));
-    }
-    let current: String = c.query_row(
-        "SELECT machine_profile_key FROM printers WHERE id=?1",
-        [&device.id],
-        |r| r.get(0),
-    )?;
-    if current != s.required_machine_profile_key || current != device.settings.machine_profile_key {
-        return Err(Error::Conflict(
-            "Required machine or nozzle differs from the registered configuration",
-        ));
-    }
-    let resolved = resolve(c, &device.id, s, profiles)?;
-    let diameter = resolved.profiles["printer.json"]["nozzle_diameter"][0]
-        .as_str()
-        .ok_or(Error::Invalid("Invalid nozzle profile"))?;
-    crate::print_start::check_nozzle(status, diameter, &device.settings.nozzle_material)?;
-    let (ams,slot,assigned,present,revision):(u16,u8,Option<String>,Option<bool>,i64)=c.query_row("SELECT ams_id,slot_index,filament_id,present,revision FROM ams_slots WHERE printer_id=?1 AND id=?2",params![device.id,s.ams_slot_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
-    if assigned.is_none()
-        || present != Some(true)
-        || ams >= 4
-        || !crate::ams::resolve(
-            c,
-            &device.id,
-            &s.filament_id,
-            &s.required_machine_profile_key,
-        )?
-        .iter()
-        .any(|candidate| candidate.id == s.ams_slot_id)
-    {
-        return Err(Error::Conflict(
-            "Selected AMS slot does not contain the planned material",
-        ));
-    }
-    let number = u8::try_from(ams * 4 + u16::from(slot)).expect("validated slot");
-    let tray = status
-        .ams
-        .as_ref()
-        .and_then(|a| a.units.iter().find(|u| u.id == number / 4))
-        .and_then(|u| u.trays.iter().find(|t| t.id == number % 4));
-    if tray.is_none_or(|t| t.present != Some(true)) {
-        return Err(Error::Conflict(
-            "Selected AMS slot is not confirmed present",
-        ));
-    }
-    Ok((resolved, revision, number))
+) -> Result<Resolved> {
+    let mut resolved = resolve(c, &device.id, s, profiles, plate)?;
+    resolved.check_bindings(c, device, status, false)?;
+    Ok(resolved)
 }
 fn ready(
     c: &Connection,
     device: &Device,
     s: &Specification,
+    plate: &crate::plates::Plate,
     status: &Status,
     profiles: &Profiles,
-) -> Result<(Resolved, i64, u8)> {
+) -> Result<Resolved> {
     if !status.ready_to_print {
         return Err(Error::Conflict("Wait for a current, ready printer report"));
     }
-    available(c, device, s, status, profiles)
+    available(c, device, s, plate, status, profiles)
 }
-fn planned(c: &Connection, device: &Device, plate: &crate::plates::Plate) -> Result<Specification> {
+pub(crate) fn planned(
+    c: &Connection,
+    pid: &str,
+    plate: &crate::plates::Plate,
+) -> Result<Specification> {
     let condition = &plate.conditions;
     let missing =
         || Error::Conflict("Complete the plate machine, material, process and bed conditions");
@@ -274,12 +385,17 @@ fn planned(c: &Connection, device: &Device, plate: &crate::plates::Plate) -> Res
     let filament = condition.filament_id.as_ref().ok_or_else(missing)?;
     let process = condition.process_profile_key.as_ref().ok_or_else(missing)?;
     let bed = condition.bed_type.as_ref().ok_or_else(missing)?;
-    if machine != &device.settings.machine_profile_key {
+    let registered: String = c.query_row(
+        "SELECT machine_profile_key FROM printers WHERE id=?1",
+        [pid],
+        |r| r.get(0),
+    )?;
+    if machine != &registered {
         return Err(Error::Conflict(
             "Required machine or nozzle differs from the registered configuration",
         ));
     }
-    let slot = crate::ams::resolve(c, &device.id, filament, machine)?
+    let slot = crate::ams::resolve(c, pid, filament, machine)?
         .into_iter()
         .find(|s| s.ams_id < 4)
         .ok_or(Error::Conflict(
@@ -475,11 +591,7 @@ impl Service {
             && waiting.first().is_some_and(|j| j["hold_reason"].is_null());
         let retry = idle
             && current.is_some_and(|j| j.state == "needs_attention")
-            && current.is_some_and(|j| {
-                self.slicer.as_ref().is_some_and(|s| {
-                    ready(&c, &self.device, &j.specification, &status, &s.profiles).is_ok()
-                })
-            });
+            && current.is_some_and(|j| retry_execution(&c, &self.device, j, &status).is_ok());
         let discard = idle
             && current.is_some_and(|j| {
                 matches!(j.state.as_str(), "needs_attention" | "awaiting_removal")
@@ -745,8 +857,15 @@ impl Service {
             .slicer
             .as_ref()
             .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
-        let specification = planned(c, &self.device, plate)?;
-        available(c, &self.device, &specification, status, &slicer.profiles)?;
+        let specification = planned(c, &self.device.id, plate)?;
+        available(
+            c,
+            &self.device,
+            &specification,
+            plate,
+            status,
+            &slicer.profiles,
+        )?;
         Ok(specification)
     }
     fn reserve(
@@ -763,38 +882,18 @@ impl Service {
         let mut job = job.clone();
         let execution = if job.state == "queued" {
             let plate = crate::plates::load(c, &job.plate_id)?;
-            job.specification = planned(c, &self.device, &plate)?;
-            let (settings, slot_revision, ams_slot) = ready(
+            job.specification = planned(c, &self.device.id, &plate)?;
+            let settings = ready(
                 c,
                 &self.device,
                 &job.specification,
+                &plate,
                 status,
                 &slicer.profiles,
             )?;
-            let settings = settings.for_plate(&plate)?;
-            Execution {
-                plate,
-                settings,
-                slot_revision,
-                ams_slot,
-            }
+            Execution { plate, settings }
         } else {
-            let (_, revision, _) = ready(
-                c,
-                &self.device,
-                &job.specification,
-                status,
-                &slicer.profiles,
-            )?;
-            let raw: String = c.query_row(
-                "SELECT execution_json FROM print_jobs WHERE id=?1",
-                [&job.id],
-                |r| r.get(0),
-            )?;
-            let mut execution: Execution =
-                serde_json::from_str(&raw).map_err(std::io::Error::other)?;
-            execution.slot_revision = revision;
-            execution
+            retry_execution(c, &self.device, &job, status)?
         };
         let cached = job
             .attempt_id
@@ -850,6 +949,7 @@ impl Service {
                     path.clone(),
                     count,
                     execution.settings.selection.clone(),
+                    execution.settings.filament_profiles(),
                     &job.id,
                 )
                 .await?;
@@ -862,23 +962,27 @@ impl Service {
             &path,
         )?;
         let bytes = std::fs::read(path.join("print.gcode.3mf"))?;
-        let material =
-            crate::print_start::material_for(&bytes, &execution.settings.selection.machine)?;
-        let expected = execution.settings.profiles["filament.json"]["filament_type"][0]
-            .as_str()
-            .ok_or(Error::Invalid("Material profile is invalid"))?;
-        if material != expected {
-            return Err(Error::Invalid(
-                "Sliced material differs from the execution profile",
-            ));
-        }
+        let materials = crate::print_start::materials_for(
+            &bytes,
+            &execution.settings.selection.machine,
+            &execution.settings.filament_profiles(),
+        )?;
         sync_files(&path)?;
         let mut attempt = Attempt::new(
             job.plate_id.clone(),
             job.id.clone(),
-            execution.ams_slot,
-            material,
+            execution.settings.main.ams_slot,
+            materials[0].clone(),
         );
+        attempt.interface =
+            execution
+                .settings
+                .interface
+                .as_ref()
+                .map(|i| crate::print_start::MaterialSlot {
+                    ams_slot: i.ams_slot,
+                    material: materials[1].clone(),
+                });
         attempt.id = attempt_id.into();
         self.printer.start(attempt, bytes).await?;
         Ok(())
@@ -949,37 +1053,46 @@ impl Database {
     ) -> Result<()> {
         let c = self.connection()?;
         let (raw,slot_id,filament_id,machine):(String,String,String,String)=c.query_row("SELECT execution_json,ams_slot_id,filament_id,required_machine_profile_key FROM print_jobs WHERE printer_id=?1 AND id=?2 AND attempt_id=?3 AND state IN ('preparing','printing','needs_attention')",params![device.id,attempt.job_id,attempt.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(Error::Conflict("Execution is no longer active"))?;
-        let execution: Execution = serde_json::from_str(&raw).map_err(std::io::Error::other)?;
+        let mut execution: Execution = serde_json::from_str(&raw).map_err(std::io::Error::other)?;
         if !status.ready_to_print
-            || !status.synchronized
             || machine != device.settings.machine_profile_key
+            || execution.settings.main.filament.id != filament_id
         {
             return Err(Error::Conflict(
                 "Printer or nozzle changed during preparation",
             ));
         }
-        let (assigned, revision, present): (Option<String>, i64, Option<bool>) = c.query_row(
-            "SELECT filament_id,revision,present FROM ams_slots WHERE id=?1 AND printer_id=?2",
-            params![slot_id, device.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        let material = crate::database::load_filaments(&c)?
-            .into_iter()
-            .find(|f| f.id == filament_id)
-            .ok_or(Error::NotFound)?;
-        if assigned.is_none()
-            || !crate::ams::resolve(&c, &device.id, &filament_id, &machine)?
-                .iter()
-                .any(|s| s.id == slot_id)
-            || revision != execution.slot_revision
-            || present != Some(true)
-            || serde_json::to_value(material).ok()
-                != serde_json::to_value(execution.settings.filament).ok()
+        if execution.settings.main.ams_slot_id.is_empty() {
+            execution.settings.main.ams_slot_id.clone_from(&slot_id);
+        }
+        let interface_matches = match (&attempt.interface, &execution.settings.interface) {
+            (None, None) => true,
+            (Some(actual), Some(expected)) => {
+                actual.ams_slot == expected.ams_slot
+                    && execution
+                        .settings
+                        .profiles
+                        .get("interface.json")
+                        .and_then(|p| p.get("filament_type"))
+                        .and_then(|v| v.get(0))
+                        .and_then(Value::as_str)
+                        == Some(actual.material.as_str())
+            }
+            _ => false,
+        };
+        if attempt.plate_id != execution.plate.id
+            || execution.settings.main.ams_slot_id != slot_id
+            || attempt.ams_slot != execution.settings.main.ams_slot
+            || execution.settings.profiles["filament.json"]["filament_type"][0] != attempt.material
+            || !interface_matches
         {
             return Err(Error::Conflict(
-                "AMS assignment or material changed during preparation",
+                "Print material order or AMS mapping differs from the frozen execution",
             ));
         }
+        execution
+            .settings
+            .check_bindings(&c, device, status, false)?;
         Ok(())
     }
     pub(crate) fn persist_attempt(&self, pid: &str, attempt: &Attempt) -> Result<()> {
@@ -1107,6 +1220,113 @@ mod tests {
             None,
         )
     }
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One isolated two-material preparation and compatibility scenario.
+    async fn support_resolves_two_materials_and_freezes_both_slots_and_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let job_id = add(&s);
+        let j = jobs(&s.store.db.connection().unwrap(), "one")
+            .unwrap()
+            .remove(0);
+        // An unassigned interface must prevent admission, even when its PLA profile equals the main's.
+        let mut f = s.store.db.filaments().unwrap().remove(0);
+        f.id = "pla-black".into();
+        f.data.name = "black".into();
+        f.data.color = "000000FF".into();
+        s.store.db.save_filament(&f).unwrap();
+        s.store
+            .db
+            .save_setting(&crate::filament::Setting {
+                id: "black-settings".into(),
+                filament_id: f.id.clone(),
+                data: crate::filament::SettingData {
+                    machine_profile_key: MACHINE.into(),
+                    base_profile_key: Selection::default().filament,
+                    overrides_json: crate::filament::Overrides {
+                        nozzle_temperature: Some(225),
+                        ..Default::default()
+                    },
+                },
+            })
+            .unwrap();
+        let mut conditions = json!(s.store.get(&j.plate_id).unwrap().conditions);
+        conditions["support_enabled"] = json!(true);
+        conditions["support_interface_filament_id"] = json!(f.id);
+        let plate = edit_conditions(&s, &j.plate_id, conditions.clone());
+        assert!(
+            s.plan(&s.store.db.connection().unwrap(), &plate, &status())
+                .is_err()
+        );
+        let mut state = crate::printer_state::State::new(true);
+        state.connected();
+        state.apply(br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,"ams":{"tray_exist_bits":"5","ams":[{"id":"0","tray":[{"id":"0","tray_type":"PLA","tray_color":"FFFFFFFF"},{"id":"2","tray_type":"PLA","tray_color":"000000FF"}]}]}}}"#,1);
+        let report = state.status(1);
+        s.store.db.observe_ams(&s.device, &report).unwrap();
+        let slot = s
+            .store
+            .db
+            .ams_slots("one")
+            .unwrap()
+            .into_iter()
+            .find(|a| a.slot_index == 2)
+            .unwrap();
+        s.store
+            .db
+            .map_slot("one", &slot.id, slot.revision, Some(&f.id))
+            .unwrap();
+        let prep = s
+            .reserve(&s.store.db.connection().unwrap(), &j, &report, None)
+            .unwrap();
+        let mut attempt = Attempt::new(
+            prep.job.plate_id.clone(),
+            prep.job.id.clone(),
+            0,
+            "PLA".into(),
+        );
+        attempt.id = prep.job.attempt_id.clone().unwrap();
+        attempt.interface = Some(crate::print_start::MaterialSlot {
+            ams_slot: 2,
+            material: "PLA".into(),
+        });
+        s.store
+            .db
+            .check_attempt(&s.device, &attempt, &report)
+            .unwrap();
+        let mut swapped = attempt.clone();
+        swapped.ams_slot = 2;
+        swapped.interface.as_mut().unwrap().ams_slot = 0;
+        assert!(
+            s.store
+                .db
+                .check_attempt(&s.device, &swapped, &report)
+                .is_err()
+        );
+        let mut missing = attempt.clone();
+        missing.interface = None;
+        assert!(
+            s.store
+                .db
+                .check_attempt(&s.device, &missing, &report)
+                .is_err()
+        );
+        let raw = json!(prep.execution);
+        assert_eq!(
+            raw["profiles"]["process.json"]["support_interface_filament"],
+            "2"
+        );
+        assert_eq!(
+            raw["profiles"]["interface.json"]["nozzle_temperature"],
+            json!(["225"])
+        );
+        assert_eq!(raw["interface"]["ams_slot"], 2);
+        assert_eq!(raw["interface"]["filament"]["id"], "pla-black");
+        assert_eq!(raw["ams_slot"], 0);
+        let restored: Execution = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(json!(restored), raw);
+        assert_eq!(prep.job.id, job_id);
+    }
+
     fn command(s: &Service, action: Action) -> Command {
         Command {
             epoch: s.epoch.clone(),
@@ -1128,6 +1348,7 @@ mod tests {
                         bed_type: Some(crate::profiles::BEDS[0].into()),
                         strength: crate::strength::Strength::default(),
                         brim_enabled: false,
+                        ..Default::default()
                     },
                     name: "parts".into(),
                     version: None,
@@ -1429,7 +1650,7 @@ mod tests {
         let mut attempt = Attempt::new(
             prep.job.plate_id,
             prep.job.id,
-            prep.execution.ams_slot,
+            prep.execution.settings.main.ams_slot,
             "PLA".into(),
         );
         attempt.id = prep.job.attempt_id.unwrap();

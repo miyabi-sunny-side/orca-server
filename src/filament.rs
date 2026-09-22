@@ -14,7 +14,7 @@ pub(crate) struct FilamentData {
     pub color: String,
     pub bambu_filament_id: Option<String>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct Filament {
     pub id: String,
     #[serde(flatten)]
@@ -85,7 +85,7 @@ impl Overrides {
         Ok(())
     }
 }
-#[derive(Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SettingData {
     pub machine_profile_key: String,

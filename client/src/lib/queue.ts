@@ -111,6 +111,15 @@ export const phaseText = {
   needs_attention: "確認が必要です",
 };
 export const failureText: Record<string, string> = {
+  "No confirmed AMS slot contains the support interface material":
+    "接触面用のフィラメントをAMSに装填し、材料を割り当ててください。",
+  "No confirmed AMS slot contains the selected material":
+    "選択した材料の装填を確認できません。AMSの材料割当を確認してください。",
+  "AMS assignment or material settings changed during preparation":
+    "準備中にAMS割当か材料設定が変わりました。保存済みの印刷条件と装填を確認してください。",
+  "Print material order or AMS mapping differs from the frozen execution":
+    "印刷データの材料順とAMS割当が一致しません。プレート条件と材料設定を確認してください。",
+
   "Selected build plate temperature is missing or zero for this material":
     "選択したプレートの温度が未設定または0℃です。材料のベッド温度を設定してください。",
   "Plate has been deleted": "このプレートは一覧から削除されています。",

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { request, type AmsSlot, type Filament } from "./api";
+  import type { AmsSlot } from "./api";
+  import FilamentSearch from "./FilamentSearch.svelte";
   let {
     slot,
     printerId,
@@ -16,14 +17,8 @@
   } = $props();
   let expanded = $state(false),
     searching = $state(false),
-    query = $state("");
-  let revision = $state(0),
-    options = $state<Filament[]>([]),
-    loading = $state(false),
-    error = $state("");
-  let input = $state<HTMLInputElement>(),
-    list = $state<HTMLUListElement>(),
-    selector = $state<HTMLButtonElement>();
+    revision = $state(0);
+  let selector = $state<HTMLButtonElement>();
   const name = $derived(`AMS ${slot.ams_id} スロット ${slot.slot_index + 1}`);
   const group = $derived(slot.priority_group ?? []);
   const stale = $derived(revision !== slot.revision);
@@ -33,36 +28,9 @@
       slots.find((s) => s.ams_id * 4 + s.slot_index === n),
     ) ?? null,
   );
-  $effect(() => {
-    if (!searching) return;
-    const q = query,
-      controller = new AbortController();
-    loading = true;
-    error = "";
-    const timer = setTimeout(async () => {
-      try {
-        const value = await request<Filament[]>(
-          `/api/filaments?q=${encodeURIComponent(q)}`,
-          { signal: controller.signal },
-        );
-        if (!controller.signal.aborted) options = value;
-      } catch (cause) {
-        if (!controller.signal.aborted) error = (cause as Error).message;
-      } finally {
-        if (!controller.signal.aborted) loading = false;
-      }
-    }, 150);
-    return () => {
-      clearTimeout(timer);
-      controller.abort();
-    };
-  });
-  async function begin() {
+  function begin() {
     revision = slot.revision;
-    query = "";
     searching = true;
-    await tick();
-    input?.focus();
   }
   async function close() {
     searching = false;
@@ -79,22 +47,6 @@
     if (old < 0 || old === index) return;
     order.splice(index, 0, ...order.splice(old, 1));
     await mutate(`${root}/priority`, { filament_id: slot.filament_id, order });
-  }
-  function move(event: KeyboardEvent) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      void close();
-      return;
-    }
-    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
-    event.preventDefault();
-    const buttons = Array.from(
-      list?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [],
-    );
-    const index = buttons.indexOf(event.target as HTMLButtonElement);
-    const next = index + (event.key === "ArrowDown" ? 1 : -1);
-    if (next < 0) input?.focus();
-    else buttons[next]?.focus();
   }
 </script>
 
@@ -131,17 +83,6 @@
   </div>
   {#if searching}
     <div class="selection">
-      <div class="search-row">
-        <input
-          type="search"
-          aria-label="材料を検索"
-          placeholder="製品・メーカー・材質・色"
-          bind:value={query}
-          bind:this={input}
-          onkeydown={move}
-        />
-        <button class="btn" disabled={busy} onclick={close}>キャンセル</button>
-      </div>
       {#if stale}<p role="alert">
           観測情報が変わりました。選び直してから指定してください。
         </p>
@@ -150,35 +91,14 @@
           disabled={busy}
           onclick={() => (revision = slot.revision)}>選び直す</button
         >{/if}
-      {#if loading}<p class="caption" role="status">検索中…</p>{/if}
-      {#if error}<p role="alert">{error}</p>{/if}
-      <ul class="choices" bind:this={list}>
-        <li>
-          <button
-            disabled={busy || stale}
-            onclick={() => choose(null)}
-            onkeydown={move}>指定を解除</button
-          >
-        </li>
-        {#if !loading && !error}{#each options as f (f.id)}<li>
-              <button
-                disabled={busy ||
-                  stale ||
-                  !slot.current ||
-                  !slot.reported.present}
-                onclick={() => choose(f.id)}
-                onkeydown={move}
-              >
-                <span class="swatch" style:background={`#${f.color}`}
-                ></span><span
-                  >{f.name}<small>{f.vendor} · {f.material}</small></span
-                >
-              </button>
-            </li>{/each}{/if}
-      </ul>
-      {#if !loading && !error && !options.length}<p class="caption">
-          一致する材料がありません。<a href="/filaments">材料を登録</a>
-        </p>{/if}
+      <FilamentSearch
+        choose={(f) => void choose(f?.id ?? null)}
+        close={() => void close()}
+        disabled={busy || stale || !slot.current || !slot.reported.present}
+        clearDisabled={busy || stale}
+        cancelDisabled={busy}
+        clearLabel="指定を解除"
+      />
     </div>
   {/if}
   {#if expanded}
@@ -319,38 +239,6 @@
     border-radius: 50%
   .selection, .slot-details
     padding: var(--sp-3) 0
-  .search-row
-    display: flex
-    flex-wrap: wrap
-    gap: var(--sp-2)
-    input
-      flex: 1
-      min-width: 120px
-      width: 100%
-  .choices
-    list-style: none
-    margin: var(--sp-2) 0 0
-    padding: 0
-    button
-      display: flex
-      align-items: center
-      gap: var(--sp-2)
-      width: 100%
-      padding: var(--sp-2)
-      color: var(--c-on-surface)
-      background: var(--c-surface)
-      border: 0
-      border-bottom: 1px solid var(--c-border)
-      text-align: left
-      font: inherit
-      cursor: pointer
-      &:hover:not(:disabled)
-        background: var(--c-hover-1)
-      &:disabled
-        opacity: .5
-    small
-      display: block
-      color: var(--c-muted)
   p
     margin: var(--sp-2) 0
   dl

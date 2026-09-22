@@ -86,7 +86,7 @@ def run(binary, output):
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
             for table in ['plates','default_settings']:
                 for key in KEYS:c.execute(f'ALTER TABLE {table} DROP COLUMN {key}')
-            c.execute('ALTER TABLE plates DROP COLUMN brim_enabled');c.execute('ALTER TABLE plates DROP COLUMN deleted')
+            c.execute('ALTER TABLE plates DROP COLUMN support_interface_filament_id');c.execute('ALTER TABLE plates DROP COLUMN support_enabled');c.execute('ALTER TABLE plates DROP COLUMN brim_enabled');c.execute('ALTER TABLE plates DROP COLUMN deleted')
             c.execute('PRAGMA user_version=9')
         rig.launch();rig.report('RUNNING');rig.phase('printing');ready(queued)
         assert stored(job,'execution_json')==frozen and stored(job,'attempt_json')==attempt and stored(job,'artifact_path')==artifact

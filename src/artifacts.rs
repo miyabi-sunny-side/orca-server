@@ -73,7 +73,13 @@ fn check_slice(xml: &str, models: usize) -> Result<()> {
     Ok(())
 }
 
-pub fn validate(path: &Path, models: usize, selection: &Selection, sliced: bool) -> Result<()> {
+pub fn validate(
+    path: &Path,
+    models: usize,
+    selection: &Selection,
+    filaments: &[serde_json::Map<String, serde_json::Value>],
+    sliced: bool,
+) -> Result<()> {
     if path
         .metadata()
         .map_err(|_| Error::Upstream("Missing 3MF output"))?
@@ -101,13 +107,14 @@ pub fn validate(path: &Path, models: usize, selection: &Selection, sliced: bool)
             .map_err(|_| Error::Upstream("Invalid 3MF settings"))?;
     if settings["printer_settings_id"] != selection.machine
         || settings["print_settings_id"] != selection.process
-        || settings["filament_settings_id"] != serde_json::json!([selection.filament])
         || settings["curr_bed_type"] != selection.bed
     {
         return Err(Error::Upstream("3MF did not preserve selected profiles"));
     }
+    crate::support::check_materials(&settings, filaments)?;
     if sliced {
         check_slice(&read("Metadata/slice_info.config")?, models)?;
+        crate::print_start::materials_for(&std::fs::read(path)?, &selection.machine, filaments)?;
         let mut gcode = archive
             .by_name("Metadata/plate_1.gcode")
             .map_err(|_| Error::Upstream("Missing print G-code"))?;

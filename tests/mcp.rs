@@ -456,7 +456,13 @@ async fn creation_defaults_match_rest() {
         .await
         .unwrap();
     let defaults = read(&base, "/api/default-settings").await["conditions"].clone();
-    assert!(defaults.as_object().unwrap().values().all(|v| !v.is_null()));
+    assert!(defaults.as_object().unwrap().iter().all(|(key, value)| {
+        if key == "support_interface_filament_id" {
+            value.is_null()
+        } else {
+            !value.is_null()
+        }
+    }));
     let mut edit = json!({"name":"MCP defaults","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":1}]});
     for nulls in [false, true] {
         if nulls {
@@ -482,11 +488,13 @@ async fn creation_defaults_match_rest() {
                 .as_object()
                 .unwrap()
                 .iter()
-                .all(|(key, value)| if key == "brim_enabled" {
-                    value == false
-                } else {
-                    value.is_null()
-                })
+                .all(
+                    |(key, value)| if matches!(key.as_str(), "brim_enabled" | "support_enabled") {
+                        value == false
+                    } else {
+                        value.is_null()
+                    }
+                )
         );
     }
     edit["conditions"] =
@@ -721,5 +729,39 @@ async fn queue_continuation() {
     );
     assert!(call(&client, "queue_continue", finish, false).await["data"]["current"].is_null());
     assert_eq!(read(&peer, "").await["count"], 2);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires tests/support_interface.py isolated fixture"]
+async fn support_plate_conditions() {
+    let base = std::env::var("MCP_FIXTURE_URL").unwrap();
+    let id = std::env::var("MCP_SUPPORT_PLATE").unwrap();
+    let interface = std::env::var("MCP_SUPPORT_INTERFACE").unwrap();
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "{base}/mcp"
+        )))
+        .await
+        .unwrap();
+    for enabled in [false, true] {
+        let mut plate = read(&base, &format!("/api/plates/{id}")).await;
+        plate.as_object_mut().unwrap().remove("id");
+        plate["conditions"]["support_enabled"] = json!(enabled);
+        plate["conditions"]["support_interface_filament_id"] = json!(interface);
+        let saved =
+            call(&client, "plate_save", json!({"id":id,"plate":plate}), false).await["data"]
+                .clone();
+        assert_eq!(saved["conditions"]["support_enabled"], enabled);
+        assert_eq!(
+            saved["conditions"]["support_interface_filament_id"],
+            interface
+        );
+        assert_eq!(read(&base, &format!("/api/plates/{id}")).await, saved);
+        assert_eq!(
+            call(&client, "plate_get", json!({"id":id}), false).await["data"],
+            saved
+        );
+    }
     client.cancel().await.unwrap();
 }

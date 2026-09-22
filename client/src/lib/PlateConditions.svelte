@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     request,
     type PlateConditions,
@@ -11,6 +11,20 @@
   } from "./api";
   import { machineChoices } from "./plate";
   import StrengthFields from "./StrengthFields.svelte";
+  import FilamentSearch from "./FilamentSearch.svelte";
+  import Icon from "./Icon.svelte";
+  let searching = $state(false),
+    selector = $state<HTMLButtonElement>();
+  async function closeSearch() {
+    searching = false;
+    await tick();
+    selector?.focus();
+  }
+  function chooseInterface(f: Filament | null) {
+    value.support_interface_filament_id = f?.id ?? value.filament_id;
+    changed("support_interface_filament_id");
+    void closeSearch();
+  }
   let {
     value = $bindable(),
     defaults,
@@ -51,6 +65,12 @@
     error = $state(""),
     conditionError = $state(""),
     reading = $state(false);
+  const interfaceMaterial = $derived(
+    filaments.find(
+      (f) =>
+        f.id === (value.support_interface_filament_id ?? value.filament_id),
+    ),
+  );
   const machines = $derived(machineChoices(printers));
   const controller = new AbortController();
   async function load() {
@@ -225,6 +245,53 @@
       />
       <span>ブリムを付ける</span>
     </label>
+    <label class="brim-option">
+      <input
+        type="checkbox"
+        bind:checked={value.support_enabled}
+        onchange={(e) => {
+          if (e.currentTarget.checked)
+            value.support_interface_filament_id ??= value.filament_id;
+          else searching = false;
+          changed("support_enabled");
+        }}
+      />
+      <span>サポートを使う</span>
+    </label>
+    {#if value.support_enabled}
+      <div class="interface-field">
+        <span class="interface-label">接触面のフィラメント</span>
+        <button
+          type="button"
+          class="btn material-selector"
+          bind:this={selector}
+          aria-label={`接触面のフィラメント: ${interfaceMaterial?.name ?? "未設定"}`}
+          aria-expanded={searching}
+          onclick={() => (searching = true)}
+        >
+          {#if interfaceMaterial}<span
+              class="swatch"
+              style:background={`#${interfaceMaterial.color}`}
+            ></span>{/if}
+          <span
+            >{interfaceMaterial?.name ??
+              (value.support_interface_filament_id
+                ? "登録材料を確認してください"
+                : "主材料を選ぶと設定されます")}</span
+          >
+          <span class="disclosure-icon" aria-hidden="true"
+            ><Icon name="chevron-left" /></span
+          >
+        </button>
+        {#if searching}<FilamentSearch
+            choose={chooseInterface}
+            close={() => void closeSearch()}
+          />{/if}
+        <p class="caption">
+          本体とサポートの支柱には、上で選んだフィラメントを使います。
+        </p>
+      </div>
+    {/if}
   </details>
   {#if loading || reading}<p class="caption" role="status">
       印刷条件を確認しています…
@@ -259,6 +326,31 @@
     cursor: pointer
     input
       accent-color: var(--c-accent)
+
+  .interface-field
+    margin: var(--sp-2) 0 var(--sp-3)
+    overflow-wrap: anywhere
+  .interface-label
+    display: block
+    margin-bottom: var(--sp-2)
+  .material-selector
+    display: flex
+    align-items: center
+    gap: var(--sp-2)
+    width: 100%
+    min-height: 44px
+    text-align: left
+    white-space: normal
+    > span:last-child
+      margin-left: auto
+  .disclosure-icon
+    transform: rotate(-90deg)
+  .swatch
+    width: 16px
+    height: 16px
+    flex: 0 0 16px
+    border: 1px solid var(--c-muted)
+    border-radius: 50%
 
   .conditions
     border: 0

@@ -42,9 +42,9 @@ def run(binary, output):
         ids = [j['id'] for j in rig.api()['waiting']]
         rig.stop()
         with sqlite3.connect(rig.store/'orca.sqlite3') as c:
-            c.executescript('ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;')
+            c.executescript('ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;')
         rig.launch(); rig.idle(); ready()
-        assert rows('PRAGMA user_version') == [(12,)]
+        assert rows('PRAGMA user_version') == [(13,)]
         assert rows('SELECT * FROM plate_items ORDER BY id') == originals
         assert [j['id'] for j in rig.api()['waiting']] == ids
         results['schema_10_to_12_preserves_compositions_and_queue'] = True

@@ -100,7 +100,7 @@ def main():
                 slot=next(s for s in api(f'/api/printers/{id}/ams')['slots'] if s['ams_id']==0 and s['slot_index']==0)
                 api(f'/api/printers/{id}/ams/{slot["id"]}',dict(revision=slot['revision'],filament_id=material['id']),'PUT',204);slots.append(slot)
             saved=api('/api/plates/'+plate_id)
-            assert all(value is False if key=='brim_enabled' else value is None for key,value in saved['conditions'].items())
+            assert all(value is False if key in ('brim_enabled','support_enabled') else value is None for key,value in saved['conditions'].items())
             saved.pop('id');saved['conditions']=dict(filament_id=material['id'],required_machine_profile_key=p1,process_profile_key=p1_profiles['defaults']['process'],bed_type=p1_profiles['defaults']['bed'])
             saved=api('/api/plates/'+plate_id,saved,'PUT')
             add=dict(type='add',plate_id=plate_id,plate_version=saved['version'])

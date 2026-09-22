@@ -117,15 +117,38 @@ pub struct Conditions {
     pub process_profile_key: Option<String>,
     pub bed_type: Option<String>,
     pub brim_enabled: bool,
+    pub support_enabled: bool,
+    pub support_interface_filament_id: Option<String>,
     #[serde(flatten)]
     pub strength: crate::strength::Strength,
 }
 impl Conditions {
+    pub(crate) fn interface_id(&self) -> Option<&str> {
+        self.support_enabled
+            .then(|| {
+                self.support_interface_filament_id
+                    .as_deref()
+                    .or(self.filament_id.as_deref())
+            })
+            .flatten()
+    }
+    fn normalize(&mut self) {
+        if self.support_enabled && self.support_interface_filament_id.is_none() {
+            self.support_interface_filament_id
+                .clone_from(&self.filament_id);
+        }
+    }
     pub(crate) fn apply(
         &self,
         process: &mut serde_json::Map<String, serde_json::Value>,
     ) -> Result<()> {
         self.strength.apply(process)?;
+        crate::support::configure(
+            process,
+            self.support_enabled,
+            self.interface_id()
+                .is_some_and(|id| Some(id) != self.filament_id.as_deref()),
+        )?;
         if self.brim_enabled
             && !process
                 .get("brim_width")
@@ -161,7 +184,10 @@ impl Conditions {
         {
             return Err(Error::Invalid("Unknown bed type"));
         }
-        if let Some(id) = &self.filament_id {
+        for id in [&self.filament_id, &self.support_interface_filament_id]
+            .into_iter()
+            .flatten()
+        {
             crate::products::product_id(c, id)?;
         }
         if let Some(machine) = &self.required_machine_profile_key {
@@ -179,11 +205,16 @@ impl Conditions {
             if let Some(process) = &self.process_profile_key {
                 profiles.resolve_process(machine, process, self)?;
             }
-            if let Some(id) = &self.filament_id {
+            for id in self
+                .filament_id
+                .as_deref()
+                .into_iter()
+                .chain(self.interface_id())
+            {
                 let setting = crate::products::load_setting(c, id, machine)?;
                 let filament = crate::database::load_filaments(c)?
                     .into_iter()
-                    .find(|f| f.id == *id)
+                    .find(|f| f.id == id)
                     .ok_or(Error::NotFound)?;
                 profiles.resolve_filament(&setting, &filament.data.material)?;
             }
@@ -295,7 +326,7 @@ impl Store {
     /// Save uploaded STL originals or model references in `SQLite`.
     /// # Errors
     /// Rejects malformed STL, invalid metadata and unavailable storage.
-    pub fn save(&self, input: Input) -> Result<Plate> {
+    pub fn save(&self, mut input: Input) -> Result<Plate> {
         validate_metadata(&input.name)?;
         if input.models.is_empty() || input.models.len() > 64 {
             return Err(Error::Invalid("Select 1–64 STL models"));
@@ -319,6 +350,7 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let mut c = self.db.connection()?;
         let tx = c.transaction()?;
+        input.conditions.normalize();
         input.conditions.validate(&tx, self.profiles.as_deref())?;
         tx.execute(
             "INSERT INTO plates(id,name) VALUES (?1,?2)",
@@ -347,7 +379,7 @@ impl Store {
     /// Rejects unknown items, invalid quantities and concurrent edits.
     pub fn edit(&self, id: Option<&str>, edit: Edit) -> Result<Plate> {
         let Edit {
-            conditions,
+            mut conditions,
             name,
             version,
             models,
@@ -356,6 +388,7 @@ impl Store {
         validate_items(&models)?;
         let mut c = self.db.connection()?;
         let tx = c.transaction()?;
+        conditions.normalize();
         conditions.validate(&tx, self.profiles.as_deref())?;
         let id = if let Some(id) = id {
             valid_id(id)?;
@@ -476,8 +509,8 @@ pub(crate) fn is_deleted(c: &rusqlite::Connection, id: &str) -> Result<bool> {
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
     let (name, version, conditions) = c
-        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled FROM plates WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)? }))
+        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled,support_enabled,support_interface_filament_id FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)?,support_enabled:r.get(10)?,support_interface_filament_id:r.get(11)? }))
         })
         .optional()?
         .ok_or(Error::NotFound)?;
@@ -503,7 +536,7 @@ pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 fn save_conditions(c: &rusqlite::Connection, id: &str, v: &Conditions) -> Result<()> {
-    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled])?;
+    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9,support_enabled=?10,support_interface_filament_id=?11 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled,v.support_enabled,v.support_interface_filament_id])?;
     Ok(())
 }
 fn insert_item(
@@ -639,6 +672,44 @@ mod tests {
         assert!(serde_json::from_value::<Edit>(body).is_err());
     }
     #[test]
+    fn support_is_opt_in_and_uses_distinct_ids_not_material_names() {
+        use serde_json::json;
+        for (input, enabled, index) in [
+            (json!({}), "0", None),
+            (
+                json!({"support_enabled":true,"filament_id":"main"}),
+                "1",
+                Some("1"),
+            ),
+            (
+                json!({"support_enabled":true,"filament_id":"main","support_interface_filament_id":"main"}),
+                "1",
+                Some("1"),
+            ),
+            (
+                json!({"support_enabled":true,"filament_id":"main","support_interface_filament_id":"other"}),
+                "1",
+                Some("2"),
+            ),
+        ] {
+            let conditions: Conditions = serde_json::from_value(input).unwrap();
+            let mut process = json!({"enable_support":"1"}).as_object().unwrap().clone();
+            conditions.apply(&mut process).unwrap();
+            assert_eq!(process["enable_support"], enabled);
+            if let Some(index) = index {
+                assert_eq!(process["support_filament"], "1");
+                assert_eq!(process["support_interface_filament"], index);
+            }
+        }
+        for invalid in [
+            json!({"support_enabled":null}),
+            json!({"support_enabled":"true"}),
+        ] {
+            assert!(serde_json::from_value::<Conditions>(invalid).is_err());
+        }
+    }
+
+    #[test]
     fn brim_is_an_explicit_plate_opt_in_and_keeps_process_dimensions() {
         use serde_json::json;
         let inherited = json!({"brim_type":"auto_brim","brim_width":"5","brim_object_gap":"0.1",
@@ -722,16 +793,18 @@ mod tests {
             .unwrap();
         let value = serde_json::to_value(&saved).unwrap();
         assert!(value["conditions"].is_object());
-        assert_eq!(value["conditions"].as_object().unwrap().len(), 8);
+        assert_eq!(value["conditions"].as_object().unwrap().len(), 10);
         assert!(
             value["conditions"]
                 .as_object()
                 .unwrap()
                 .iter()
-                .all(|(key, value)| if key == "brim_enabled" {
-                    value == false
-                } else {
-                    value.is_null()
+                .all(|(key, value)| {
+                    if ["brim_enabled", "support_enabled"].contains(&key.as_str()) {
+                        value == false
+                    } else {
+                        value.is_null()
+                    }
                 })
         );
         assert_eq!(

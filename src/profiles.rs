@@ -168,8 +168,6 @@ impl Profiles {
         self.machine(machine)?;
         let mut profile = selectable(&self.process, process, machine)?;
         conditions.apply(&mut profile)?;
-        profile.insert("enable_support".into(), "0".into());
-        profile.insert("enforce_support_layers".into(), "0".into());
         Ok(profile)
     }
 

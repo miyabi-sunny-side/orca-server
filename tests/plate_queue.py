@@ -25,7 +25,7 @@ def main():
         conditions=copy.deepcopy(base['conditions'])
         for key in [None,'required_machine_profile_key','filament_id','process_profile_key','bed_type']:
             missing=dict(conditions)
-            if key is None:missing={k:None for k in conditions if k != "brim_enabled"}
+            if key is None:missing={k:None for k in conditions if k not in ("brim_enabled", "support_enabled")}
             else:missing[key]=None
             if missing['required_machine_profile_key'] is None:missing['process_profile_key']=None
             plate=save(missing)

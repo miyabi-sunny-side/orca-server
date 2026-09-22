@@ -2,7 +2,7 @@ use crate::{
     artifacts,
     plates::{Error, Plate, Result, Store},
     profiles::Profiles,
-    queue::{self, Job, Resolved, Specification},
+    queue::{self, Job, Resolved},
     scad::Source,
     slicer::Slicer,
 };
@@ -42,7 +42,11 @@ fn same_inputs(a: &Path, b: &Path, count: usize) -> bool {
     }
     let names = (0..count)
         .map(|i| format!("{i}.stl"))
-        .chain(["printer.json", "process.json", "filament.json"].map(str::to_owned));
+        .chain(["printer.json", "process.json", "filament.json"].map(str::to_owned))
+        .chain(
+            (a.join("interface.json").exists() || b.join("interface.json").exists())
+                .then(|| "interface.json".to_owned()),
+        );
     names.into_iter().all(|name| {
         match (
             crate::plates::read_limited(&a.join(&name), crate::plates::MAX_UPLOAD),
@@ -90,26 +94,15 @@ fn save(c: &Connection, job: &str, record: &Record) -> Result<()> {
     Ok(())
 }
 fn plan(c: &Connection, job: &str, profiles: &Profiles) -> Result<(Plate, Resolved)> {
-    let (plate_id, pid, slot): (String, String, String) = c.query_row(
-        "SELECT plate_id,printer_id,ams_slot_id FROM print_jobs WHERE id=?1",
+    let (plate_id, pid): (String, String) = c.query_row(
+        "SELECT plate_id,printer_id FROM print_jobs WHERE id=?1",
         [job],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let plate = crate::plates::load(c, &plate_id)?;
-    let required = |v: &Option<String>| {
-        v.clone().ok_or(Error::Conflict(
-            "Complete the plate machine, material, process and bed conditions",
-        ))
-    };
-    let specification = Specification {
-        ams_slot_id: slot,
-        filament_id: required(&plate.conditions.filament_id)?,
-        required_machine_profile_key: required(&plate.conditions.required_machine_profile_key)?,
-        process_profile_key: required(&plate.conditions.process_profile_key)?,
-        bed_type: required(&plate.conditions.bed_type)?,
-    };
+    let specification = queue::planned(c, &pid, &plate)?;
     // Resolving slice settings does not require an idle printer or perform an AMS switch.
-    let settings = queue::resolve(c, &pid, &specification, profiles)?.for_plate(&plate)?;
+    let settings = queue::resolve(c, &pid, &specification, profiles, &plate)?;
     Ok((plate, settings))
 }
 pub(crate) fn view(c: &Connection, job: &Job, profiles: Option<&Profiles>) -> Result<Value> {
@@ -241,6 +234,7 @@ async fn calculate(
                 work.path.clone(),
                 count,
                 work.settings.selection.clone(),
+                work.settings.filament_profiles(),
                 &work.job,
             )
             .await?;
@@ -319,7 +313,15 @@ pub(crate) fn reuse(
         return Ok(false);
     }
     for (name, sliced) in [("project.3mf", false), ("print.gcode.3mf", true)] {
-        if artifacts::validate(&previous.join(name), count, &settings.selection, sliced).is_err() {
+        if artifacts::validate(
+            &previous.join(name),
+            count,
+            &settings.selection,
+            &settings.filament_profiles(),
+            sliced,
+        )
+        .is_err()
+        {
             return Ok(false);
         }
     }
@@ -435,6 +437,14 @@ mod tests {
             assert!(!same_inputs(a.path(), b.path(), 2));
             std::fs::write(b.path().join(name), name).unwrap();
         }
+        std::fs::write(a.path().join("interface.json"), "second").unwrap();
+        assert!(!same_inputs(a.path(), b.path(), 2));
+        std::fs::write(b.path().join("interface.json"), "second").unwrap();
+        assert!(same_inputs(a.path(), b.path(), 2));
+        std::fs::write(b.path().join("interface.json"), "changed").unwrap();
+        assert!(!same_inputs(a.path(), b.path(), 2));
+        std::fs::remove_file(a.path().join("interface.json")).unwrap();
+        assert!(!same_inputs(a.path(), b.path(), 2));
         std::fs::remove_file(b.path().join("process.json")).unwrap();
         assert!(!same_inputs(a.path(), b.path(), 2));
     }

@@ -170,6 +170,6 @@ fn schema_four_unknown_load_order_initializes_by_slot_and_keeps_references() {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
 }
