@@ -68,7 +68,11 @@ test('hover and row focus show one passive shape without changing composition or
   await visible(0,'20.0 × 20.0 × 20.0 mm');await expect(quantity).toHaveValue('10');
   await expect(page.getByRole('button',{name:'保存',exact:true})).toBeEnabled();
   if(output)await page.screenshot({path:`${output}/hover-composition.png`});
-  await page.setViewportSize({width:320,height:812});await page.getByLabel('プレート名',{exact:true}).focus();await quantity.focus();
+  await page.setViewportSize({width:320,height:812});
+  // Resize closes previews; finish that frame before testing the next focus action.
+  await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));
+  await expect(popup).toHaveCount(0);
+  await page.getByLabel('プレート名',{exact:true}).focus();await quantity.focus();
   await expect(popup.getByRole('status')).toHaveText('20.0 × 20.0 × 20.0 mm');
   if(output)await page.screenshot({path:`${output}/hover-keyboard-320.png`});
   expect(mutations).toEqual([]);
