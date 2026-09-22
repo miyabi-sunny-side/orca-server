@@ -29,11 +29,11 @@ def main():
         def edit(plate, conditions):
             return rig.api('/api/plates/'+plate['id'],dict(name=plate['name'],version=plate['version'],models=plate['models'],conditions=conditions),'PUT')
         first=defaults(); assert first['default_printer_id']=='p1'
-        assert first['conditions']==dict(required_machine_profile_key=MACHINE,filament_id=rig.materials[0]['id'],process_profile_key=PROCESS,bed_type=BED,sparse_infill_pattern='adaptivecubic',sparse_infill_density=15,wall_loops=2)
+        assert first['conditions']==dict(required_machine_profile_key=MACHINE,filament_id=rig.materials[0]['id'],process_profile_key=PROCESS,bed_type=BED,sparse_infill_pattern='adaptivecubic',sparse_infill_density=15,wall_loops=2,brim_enabled=False)
         assert first['reason'] is None
         current=settings(); current['bed_type']='Cool Plate'; requests=len(rig.broker.requests)
         rig.api('/api/printers/p1',current,'PUT')
-        initial=create({k:None for k in first['conditions']})
+        initial=create({k:None for k in first['conditions'] if k != 'brim_enabled'})
         assert initial['conditions']==dict(first['conditions'],bed_type='Cool Plate')
         # Multipart uploads use the same server-owned defaults as reference creation.
         cube=(REPO/'tests/fixtures/cube.stl').read_bytes(); boundary='defaults-upload'
@@ -44,7 +44,7 @@ def main():
         rig.api('/api/default-settings',dict(default_printer_id=None),'PUT',403,origin='https://outside.invalid')
         manual=create(dict(filament_id=rig.materials[1]['id'],bed_type='High Temp Plate'))
         assert manual['conditions']==dict(initial['conditions'],filament_id=rig.materials[1]['id'],bed_type='High Temp Plate')
-        old=edit(initial,{k:None for k in first['conditions']})
+        old=edit(initial,{k:None for k in first['conditions'] if k != 'brim_enabled'})
         assert all(v is False if k=='brim_enabled' else v is None for k,v in old['conditions'].items())
         assert len(rig.broker.requests)==requests and not rig.broker.prints
         # Priority is a print-slot choice, not the initial material's physical slot order.
@@ -65,7 +65,7 @@ def main():
         if os.environ.get('DEFAULTS_BROWSER'):
             env=dict(os.environ,E2E_BASE_URL=rig.base,E2E_EVIDENCE_DIR=str(rig.output/'browser'),E2E_DEFAULTS_CONTEXT=json.dumps(dict(machine=MACHINE,process=PROCESS,bed='Cool Plate',first=rig.materials[0]['id'],second=rig.materials[1]['id'],old=old['id'])))
             subprocess.run(['npm','run','test:e2e','--','--workers=1'],cwd=REPO/'client',env=env,check=True)
-        old=edit(rig.api('/api/plates/'+old['id']),{k:None for k in first['conditions']})
+        old=edit(rig.api('/api/plates/'+old['id']),{k:None for k in first['conditions'] if k != 'brim_enabled'})
         # A real MCP client goes through the same creation and explicit-update routes.
         subprocess.run(['cargo','test','--locked','--test','mcp','creation_defaults_match_rest','--','--ignored','--nocapture'],cwd=REPO,env={**os.environ,'MCP_FIXTURE_URL':rig.base},check=True)
         # Default edits during an actual isolated active attempt preserve frozen input and connection.
