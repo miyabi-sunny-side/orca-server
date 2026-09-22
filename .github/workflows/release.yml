@@ -6,6 +6,10 @@ on:
   push:
     tags: ['v*.*.*']
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -65,7 +69,7 @@ jobs:
       # The GitHub Release is part of the release, not an extra: every product
       # cut from this template publishes one for every tag, so a listener can
       # act on the release notification. A tag that already has a Release
-      # (a re-run of this workflow) is left as it is rather than failed.
+      # (a re-run of this workflow) keeps its changelog and receives the current image reference.
       - name: Resolve the published image digest
         id: digest
         run: |
@@ -93,5 +97,10 @@ jobs:
               --verify-tag \
               --generate-notes \
               --notes "Image: \`${{ steps.digest.outputs.image }}\` · [Source](https://github.com/${{ github.repository }}/archive/${{ github.sha }}.tar.gz) · [Build instructions](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/development.md) · [AGPL v3](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/LICENSE). OrcaSlicer 2.4.2 and dependency sources are attached below with SHA-256 checksums."
+          else
+            notes_file="$RUNNER_TEMP/orca-release-notes.md"
+            gh release view "$GITHUB_REF_NAME" --json body --jq .body > "$notes_file"
+            python3 packaging/release_notes.py "$notes_file" "${{ steps.digest.outputs.image }}"
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$notes_file"
           fi
           gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/orca-sources/"* --clobber
