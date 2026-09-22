@@ -39,6 +39,9 @@ for (const width of [375, 1000]) for (const colorScheme of ['dark', 'light'] as 
     expect(saved.models[0].quantity).toBe(2);expect(saved.imported.selection.items[0].build_index).toBe(1);
     const original=await request.get((await page.getByRole('link',{name:'元の3MFを取得',exact:true}).getAttribute('href'))!);
     expect(await original.body()).toEqual(readFileSync(join(context.fixtures,'multiple.3mf')));
+    const derived=await request.get((await page.getByRole('link',{name:'確認用STLを取得',exact:true}).getAttribute('href'))!);
+    const derivedBytes=await derived.body();expect(derivedBytes.length).toBe(84+24*50);expect(derivedBytes.readUInt32LE(80)).toBe(24);
+    await expect(page.getByRole('link',{name:'アップロードした元STLを取得',exact:true})).toHaveCount(0);
     await page.getByRole('button',{name:'構成を編集'}).click();await page.getByLabel('プレート名',{exact:true}).fill(name+' 編集');await save.click();
     await expect(page.getByRole('heading',{level:1})).toHaveText(name+' 編集');
     expect((await (await request.get('/api'+new URL(page.url()).pathname)).json()).imported).toEqual(saved.imported);
@@ -47,6 +50,7 @@ for (const width of [375, 1000]) for (const colorScheme of ['dark', 'light'] as 
     await expect(preview.locator('.dimensions')).toHaveText('23.0 × 20.0 × 20.0 mm');await save.click();
     await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);await expect(page.getByRole('button',{name:'印刷キューへ',exact:true})).toBeDisabled();
     await expect(page.getByRole('link',{name:'元の3MFを取得',exact:true})).toBeVisible();
+    await expect(page.getByRole('link',{name:'AMSを確認',exact:true})).toHaveCount(0);
     await page.evaluate(()=>window.scrollTo(0,0));await page.screenshot({path:join(directory,`saved-color-${width}-${colorScheme}.png`),fullPage:true});
     await page.goto('/plates/new?source=file');await input.setInputFiles(join(context.fixtures,'single.3mf'));
     await expect(preview.locator('.dimensions')).toHaveText('23.0 × 20.0 × 20.0 mm');await expect(selection).toHaveCount(0);
@@ -64,6 +68,7 @@ for (const width of [375, 1000]) for (const colorScheme of ['dark', 'light'] as 
     }
     await save.click();await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);
     const stls=await (await request.get('/api'+new URL(page.url()).pathname)).json();expect(stls.models.map((m:any)=>m.quantity)).toEqual(removeFirst ? [3] : [1,3]);expect(stls.imported).toBeUndefined();
+    await expect(page.getByRole('link',{name:'アップロードした元STLを取得',exact:true})).toHaveCount(removeFirst ? 1 : 2);
     expect(scad).toEqual([]);
     const queueAfter=await (await request.get('/api/queue?printer_id=p1')).json();expect(queueAfter.waiting.map((j:any)=>j.id)).toEqual(queueBefore.waiting.map((j:any)=>j.id));expect(queueAfter.current).toEqual(queueBefore.current);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);

@@ -240,10 +240,12 @@
     </div>{/if}
   {#if hold && !pending}<div class="notice">
       <p>{hold}</p>
-      <div class="actions">
-        {#if printerId}<a href={`/printers/${printerId}/ams`}>AMSを確認</a
-          >{:else}<a href="/printers">プリンターを確認</a>{/if}
-      </div>
+      {#if !importHold}
+        <div class="actions">
+          {#if printerId}<a href={`/printers/${printerId}/ams`}>AMSを確認</a
+            >{:else}<a href="/printers">プリンターを確認</a>{/if}
+        </div>
+      {/if}
     </div>{/if}
   {#if readError}<div class="notice">
       <p role="alert">{readError}</p>

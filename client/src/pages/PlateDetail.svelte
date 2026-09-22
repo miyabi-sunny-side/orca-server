@@ -125,7 +125,10 @@
                     >SCAD参照: {model.source}</span
                   >{:else}<a
                     href={`/api/plates/${plate.id}/files/${model.id}`}
-                    download={model.name}>アップロードした元STLを取得</a
+                    download={model.name}
+                    >{plate.imported?.model_id === model.id
+                      ? "確認用STLを取得"
+                      : "アップロードした元STLを取得"}</a
                   >{/if}
               </li>{/each}
           </ul>
