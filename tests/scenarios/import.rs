@@ -187,6 +187,38 @@ pub fn model_import(appdir: Option<&Path>, browser: bool) {
     assert!(q["admission"]["reason"].as_str().unwrap().contains("多色"));
     rig.send(serde_json::json!({"type":"add","plate_id":multicolor["id"],"plate_version":multicolor["version"]}),409);
     let before = rig.get("/api/plates");
+    for source in [&imported, &multicolor] {
+        let copy = rig.post(
+            &format!("/api/plates/{}/duplicate", id(source)),
+            &serde_json::json!({"name":"Copied import"}),
+            201,
+        );
+        assert_eq!(copy["conditions"], source["conditions"]);
+        assert_eq!(
+            copy["imported"]["selection"],
+            source["imported"]["selection"]
+        );
+        assert_eq!(copy["imported"]["model_id"], copy["models"][0]["id"]);
+        assert_ne!(copy["models"][0]["id"], source["models"][0]["id"]);
+        assert_eq!(
+            rig.bytes(&format!("/api/plates/{}/original", id(&copy))),
+            rig.bytes(&format!("/api/plates/{}/original", id(source)))
+        );
+        assert_eq!(
+            rig.bytes(&format!(
+                "/api/plates/{}/files/{}",
+                id(&copy),
+                id(&copy["models"][0])
+            )),
+            rig.bytes(&format!(
+                "/api/plates/{}/files/{}",
+                id(source),
+                id(&source["models"][0])
+            ))
+        );
+        rig.request("DELETE", &format!("/api/plates/{}", id(&copy)), None, 204);
+        assert_eq!(rig.get(&format!("/api/plates/{}", id(source))), *source);
+    }
     rig.multipart(
         "/api/plates/files",
         &[("bad.3mf", b"invalid".to_vec())],

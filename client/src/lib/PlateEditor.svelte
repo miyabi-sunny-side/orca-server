@@ -2,8 +2,13 @@
   import { uploadBody, type UploadDraft } from "./file-import";
   import HoverPreview from "./HoverPreview.svelte";
   import PlateConditions from "./PlateConditions.svelte";
-  import { emptyConditions, initialConditions } from "./plate";
-  import { onMount } from "svelte";
+  import {
+    emptyConditions,
+    initialConditions,
+    chooseModels,
+    type EditModel,
+  } from "./plate";
+  import { onMount, tick } from "svelte";
   import {
     request,
     type Plate,
@@ -25,13 +30,6 @@
     onbusy?: (value: boolean) => void;
     onremovefile?: (index: number) => void;
   } = $props();
-  type Item = {
-    id?: string;
-    fileIndex?: number;
-    name: string;
-    source: string | null;
-    quantity: number;
-  };
   let root = $state<HTMLDivElement>();
   let conditions = $state({ ...emptyConditions });
   let defaults = $state<DefaultSettings>();
@@ -64,7 +62,39 @@
   }
   let step = $state(1),
     name = $state(""),
-    selected = $state<Item[]>([]);
+    selected = $state<EditModel[]>([]);
+  let catalogMode = $state<"choose" | "add" | number>("choose");
+  let pending = $state<string[]>([]);
+  let formScroll = 0;
+  async function openCatalog(mode: "add" | number) {
+    formScroll = window.scrollY;
+    catalogMode = mode;
+    pending = [];
+    step = 1;
+    await tick();
+    search?.focus();
+    window.scrollTo(0, 0);
+  }
+  async function returnToForm() {
+    step = 2;
+    await tick();
+    window.scrollTo(0, formScroll);
+    root
+      ?.querySelector<HTMLButtonElement>(
+        typeof catalogMode === "number"
+          ? `[data-replace="${catalogMode}"]`
+          : "[data-add-model]",
+      )
+      ?.focus({ preventScroll: true });
+  }
+  function applySelection(source?: string) {
+    selected = chooseModels(
+      selected,
+      source ? [source] : pending,
+      typeof catalogMode === "number" ? catalogMode : null,
+    );
+    void returnToForm();
+  }
   let query = $state(""),
     retry = $state(0),
     models = $state<string[]>([]);
@@ -142,7 +172,7 @@
         ? row?.nextElementSibling
         : row?.previousElementSibling;
     const input = next?.querySelector(
-      "input:not(:disabled)",
+      "input:not(:disabled), button:not(:disabled)",
     ) as HTMLInputElement | null;
     if (input) input.focus();
     else if (event.key === "ArrowUp") search?.focus();
@@ -199,12 +229,30 @@
   {#if step === 1}
     <div class="model-search">
       <div class="page-heading">
-        <h2>STLを選択</h2>
-        <button
-          class="btn primary"
-          disabled={!selected.length}
-          onclick={() => (step = 2)}>構成を確認（{selected.length}）</button
-        >
+        <h2>
+          {typeof catalogMode === "number"
+            ? "モデルを差し替え"
+            : catalogMode === "add"
+              ? "モデルを追加"
+              : "STLを選択"}
+        </h2>
+        <div class="catalog-actions">
+          {#if catalogMode === "choose"}<button
+              class="btn primary"
+              disabled={!selected.length}
+              onclick={() => (step = 2)}>構成を確認（{selected.length}）</button
+            >{:else}
+            {#if catalogMode === "add"}<button
+                class="btn primary"
+                disabled={!pending.length}
+                onclick={() => applySelection()}
+                >追加（{pending.length}）</button
+              >{/if}
+            <button class="btn" onclick={() => void returnToForm()}
+              >キャンセル</button
+            >
+          {/if}
+        </div>
       </div>
       <label class="field"
         ><span>モデル名で検索</span><input
@@ -214,7 +262,14 @@
           onkeydown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
-              list?.querySelector("input")?.focus();
+              list
+                ?.querySelector<HTMLElement>(
+                  "input:not(:disabled), button:not(:disabled)",
+                )
+                ?.focus();
+            } else if (e.key === "Escape" && catalogMode !== "choose") {
+              e.preventDefault();
+              void returnToForm();
             }
           }}
         /></label
@@ -230,122 +285,172 @@
       </p>
     {:else}<ul class="plate-list" bind:this={list}>
         {#each models as model}<li>
-            <label
-              class="plate-row model-row"
-              class:selected={selected.some((m) => m.source === model)}
-            >
-              <input
-                type="checkbox"
-                checked={selected.some((m) => m.source === model)}
-                disabled={selected.length >= 64 &&
-                  !selected.some((m) => m.source === model)}
-                onchange={(e) =>
-                  (selected = e.currentTarget.checked
-                    ? [...selected, { name: model, source: model, quantity: 1 }]
-                    : selected.filter((m) => m.source !== model))}
+            {#if typeof catalogMode === "number"}
+              <button
+                class="plate-row model-option"
+                disabled={selected.some((m) => m.source === model)}
+                onclick={() => applySelection(model)}
                 onkeydown={move}
-              /><span
-                data-stl-preview={`/api/scad/model?path=${encodeURIComponent(model)}`}
-                >{model}</span
               >
-            </label>
+                <span
+                  data-stl-preview={`/api/scad/model?path=${encodeURIComponent(model)}`}
+                  >{model}</span
+                >
+                {#if selected.some((m) => m.source === model)}<span
+                    class="caption">選択済み</span
+                  >{/if}
+              </button>
+            {:else}
+              <label
+                class="plate-row model-row"
+                class:selected={selected.some((m) => m.source === model) ||
+                  pending.includes(model)}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.some((m) => m.source === model) ||
+                    pending.includes(model)}
+                  disabled={catalogMode === "add"
+                    ? selected.some((m) => m.source === model) ||
+                      (total + pending.length >= 64 && !pending.includes(model))
+                    : selected.length >= 64 &&
+                      !selected.some((m) => m.source === model)}
+                  onchange={(e) => {
+                    if (catalogMode === "add")
+                      pending = e.currentTarget.checked
+                        ? [...pending, model]
+                        : pending.filter((m) => m !== model);
+                    else
+                      selected = e.currentTarget.checked
+                        ? [
+                            ...selected,
+                            { name: model, source: model, quantity: 1 },
+                          ]
+                        : selected.filter((m) => m.source !== model);
+                  }}
+                  onkeydown={move}
+                /><span
+                  data-stl-preview={`/api/scad/model?path=${encodeURIComponent(model)}`}
+                  >{model}</span
+                >
+              </label>
+            {/if}
           </li>{/each}
       </ul>{/if}
-    {#if cancel}<div class="actions">
+    {#if cancel && catalogMode === "choose"}<div class="actions">
         <button class="btn" onclick={cancel}>編集をやめる</button>
       </div>{/if}
-  {:else}
-    <form onsubmit={save}>
-      <fieldset disabled={busy}>
-        <label class="field"
-          ><span>プレート名</span><input
-            bind:value={name}
-            required
-            maxlength="256"
-            placeholder="例: 机の小物入れ"
-          /></label
-        >
-        <ul class="plate-list">
-          {#each selected as model, index}<li class="plate-row">
-              <strong
-                data-stl-preview={model.source
-                  ? `/api/scad/model?path=${encodeURIComponent(model.source)}`
-                  : upload && model.fileIndex !== undefined
-                    ? upload.previews[model.fileIndex]
-                    : initial && model.id
-                      ? `/api/plates/${initial.id}/models/${model.id}`
-                      : undefined}>{model.name}</strong
-              >
-              <div class="item-actions">
-                <label class="field"
-                  ><span>個数</span><input
-                    type="number"
-                    min="1"
-                    max="64"
-                    step="1"
-                    required
-                    bind:value={model.quantity}
-                    aria-label={`${model.name} の個数`}
-                  /></label
-                >
-                {#if !upload || selected.length > 1}<button
-                    class="btn"
-                    type="button"
-                    aria-label={`${model.name}を構成から外す`}
-                    onclick={() => {
-                      selected = selected.filter((_, i) => i !== index);
-                      if (model.fileIndex !== undefined)
-                        onremovefile?.(model.fileIndex);
-                    }}>外す</button
-                  >{/if}
-              </div>
-            </li>{/each}
-        </ul>
-        <p class="caption">
-          {#if upload?.selection}選んだプレート全体を一組として扱います。{/if}
-          合計 {total}
-          {upload?.selection ? "組" : "個"} / 最大64{upload?.selection
-            ? "組"
-            : "個"}。
-          {#if selected.some((m) => m.source)}SCADモデルは試算時と印刷開始時に最新データを取得します。{/if}
-        </p>
-        <PlateConditions
-          legacy={!!initial}
-          bind:value={conditions}
-          {defaults}
-          {defaultsReading}
-          {defaultsError}
-          changed={(key) => edited.add(key)}
-        />
-      </fieldset>
-      {#if error}<div class="notice">
-          <p role="alert">{error}</p>
-          {#if initial}<button class="btn" type="button" onclick={cancel}
-              >保存済みの構成へ戻る</button
-            >{/if}
-        </div>{/if}
-      {#if busy}<p role="status">保存しています…</p>{/if}
-      <div class="actions">
-        <button
-          class="btn primary"
-          type="submit"
-          disabled={busy || defaultsReading || !selected.length || total > 64}
-          >保存</button
-        >{#if !upload}<button
+  {/if}
+  <form onsubmit={save} hidden={step === 1}>
+    <fieldset disabled={busy}>
+      <label class="field"
+        ><span>プレート名</span><input
+          bind:value={name}
+          required
+          maxlength="256"
+          placeholder="例: 机の小物入れ"
+        /></label
+      >
+      <div class="page-heading composition-heading">
+        <h2>モデル構成</h2>
+        {#if !upload}<button
             class="btn"
             type="button"
-            disabled={busy}
-            onclick={() => (step = 1)}>モデル選択へ</button
-          >{/if}
-        {#if cancel}<button
-            class="btn"
-            type="button"
-            disabled={busy}
-            onclick={cancel}>編集をやめる</button
+            data-add-model
+            onclick={() => void openCatalog("add")}>モデルを追加</button
           >{/if}
       </div>
-    </form>
-  {/if}
+      <ul class="plate-list">
+        {#each selected as model, index}<li class="plate-row">
+            <strong
+              data-stl-preview={model.source
+                ? `/api/scad/model?path=${encodeURIComponent(model.source)}`
+                : upload && model.fileIndex !== undefined
+                  ? upload.previews[model.fileIndex]
+                  : initial && model.id
+                    ? `/api/plates/${initial.id}/models/${model.id}`
+                    : undefined}>{model.name}</strong
+            >
+            <div class="item-actions">
+              <label class="field"
+                ><span>個数</span><input
+                  type="number"
+                  min="1"
+                  max="64"
+                  step="1"
+                  required
+                  bind:value={model.quantity}
+                  aria-label={`${model.name} の個数`}
+                /></label
+              >
+              {#if !upload}<button
+                  class="btn"
+                  type="button"
+                  data-replace={index}
+                  aria-label={`${model.name}を差し替え`}
+                  onclick={() => void openCatalog(index)}>差し替え</button
+                >{/if}
+              {#if !upload || selected.length > 1}<button
+                  class="btn"
+                  type="button"
+                  aria-label={`${model.name}を構成から外す`}
+                  onclick={() => {
+                    selected = selected.filter((_, i) => i !== index);
+                    if (model.fileIndex !== undefined)
+                      onremovefile?.(model.fileIndex);
+                  }}>外す</button
+                >{/if}
+            </div>
+          </li>{/each}
+      </ul>
+      <p class="caption">
+        {#if upload?.selection}選んだプレート全体を一組として扱います。{/if}
+        合計 {total}
+        {upload?.selection ? "組" : "個"} / 最大64{upload?.selection
+          ? "組"
+          : "個"}。
+        {#if selected.some((m) => m.source)}SCADモデルは試算時と印刷開始時に最新データを取得します。{/if}
+      </p>
+      <PlateConditions
+        legacy={!!initial}
+        bind:value={conditions}
+        {defaults}
+        {defaultsReading}
+        {defaultsError}
+        changed={(key) => edited.add(key)}
+      />
+    </fieldset>
+    {#if error}<div class="notice">
+        <p role="alert">{error}</p>
+        {#if initial}<button class="btn" type="button" onclick={cancel}
+            >保存済みの構成へ戻る</button
+          >{/if}
+      </div>{/if}
+    {#if busy}<p role="status">保存しています…</p>{/if}
+    <div class="actions">
+      <button
+        class="btn primary"
+        type="submit"
+        disabled={busy || defaultsReading || !selected.length || total > 64}
+        >保存</button
+      >{#if !upload && !initial}<button
+          class="btn"
+          type="button"
+          disabled={busy}
+          onclick={() => {
+            catalogMode = "choose";
+            pending = [];
+            step = 1;
+          }}>モデル選択へ</button
+        >{/if}
+      {#if cancel}<button
+          class="btn"
+          type="button"
+          disabled={busy}
+          onclick={cancel}>編集をやめる</button
+        >{/if}
+    </div>
+  </form>
 </div>
 {#key step}<HoverPreview {root} />{/key}
 
@@ -379,9 +484,27 @@
       flex-shrink: 0
   .item-actions
     display: flex
+    flex-wrap: wrap
     align-items: end
     gap: var(--sp-3)
     .field
       margin: 0
       width: 100px
+  .catalog-actions
+    display: flex
+    flex-wrap: wrap
+    gap: var(--sp-2)
+  .catalog-actions .btn, .composition-heading .btn, .item-actions .btn
+    min-height: 44px
+  .composition-heading
+    margin-top: var(--sp-4)
+  .model-option
+    width: 100%
+    font: inherit
+    text-align: left
+    color: inherit
+    cursor: pointer
+    &:disabled
+      color: var(--c-muted)
+      cursor: default
 </style>

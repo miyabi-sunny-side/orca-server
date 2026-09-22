@@ -1,4 +1,35 @@
 import type { PlateConditions } from "./api";
+export type EditModel = {
+  id?: string;
+  fileIndex?: number;
+  name: string;
+  source: string | null;
+  quantity: number;
+};
+
+export function chooseModels(
+  models: EditModel[],
+  sources: string[],
+  replacement: number | null = null,
+): EditModel[] {
+  const additions = [...new Set(sources)].filter(
+    (source) => !models.some((model) => model.source === source),
+  );
+  if (replacement !== null) {
+    const source = additions[0];
+    return source
+      ? models.map((model, index) =>
+          index === replacement
+            ? { name: source, source, quantity: model.quantity }
+            : model,
+        )
+      : models;
+  }
+  return [
+    ...models,
+    ...additions.map((source) => ({ name: source, source, quantity: 1 })),
+  ];
+}
 type Device = { id: string; machine_profile_key: string };
 export function machineChoices(printers: Device[]) {
   return [...new Set(printers.map((p) => p.machine_profile_key))].sort();
@@ -44,12 +75,12 @@ export function initialConditions(
     support_enabled: value.support_enabled ?? false,
     support_interface_filament_id: value.support_interface_filament_id ?? null,
   };
+  if (!creation) return result;
   for (const key of Object.keys(emptyConditions) as (keyof PlateConditions)[]) {
     const strength = key in emptyStrength;
     if (
       result[key] == null &&
       !edited.has(key) &&
-      (!strength || creation) &&
       (strength ||
         key === "required_machine_profile_key" ||
         key === "bed_type" ||

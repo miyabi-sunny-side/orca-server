@@ -88,6 +88,18 @@ export async function request<T>(
   if (response.ok)
     return response.status === 204 ? (undefined as T) : response.json();
   const data = await response.json().catch(() => ({}));
+  if (/^\/api\/plates\/[^/]+\/duplicate$/.test(path)) {
+    const messages: Record<number, string> = {
+      400: "プレート名は空欄にせず、制御文字を含まない256バイト以内で入力してください。",
+      404: "複製元のプレートが見つかりません。一覧から開き直してください。",
+      422: "プレート名の入力を確認してください。",
+    };
+    throw new ApiError(
+      response.status,
+      messages[response.status] ??
+        "プレートの保存先を利用できません。名前を保ったまま再試行できます。",
+    );
+  }
   if (
     path.startsWith("/api/plates/file") &&
     response.status === 400 &&

@@ -485,6 +485,48 @@ impl Store {
         tx.commit()?;
         Ok(plate)
     }
+    /// Copy a saved composition with independent ownership of its originals.
+    /// # Errors
+    /// Rejects invalid names, missing plates and unavailable storage.
+    pub fn duplicate(&self, source: &str, name: &str) -> Result<Plate> {
+        valid_id(source)?;
+        validate_metadata(name)?;
+        let mut c = self.db.connection()?;
+        let tx = c.transaction()?;
+        if is_deleted(&tx, source)? {
+            return Err(Error::NotFound);
+        }
+        let plate = load(&tx, source)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO plates(id,name) VALUES (?1,?2)",
+            rusqlite::params![id, name.trim()],
+        )?;
+        // Saved conditions are copied verbatim; defaults and current printer availability do not apply.
+        save_conditions(&tx, &id, &plate.conditions)?;
+        let mut imported = plate.imported;
+        let imported_source = imported.as_ref().map(|value| value.model_id.clone());
+        if let Some(value) = &mut imported {
+            // An original can remain downloadable after its model was removed from the composition.
+            value.model_id = uuid::Uuid::new_v4().to_string();
+        }
+        for model in plate.models {
+            let item = uuid::Uuid::new_v4().to_string();
+            tx.execute("INSERT INTO plate_items(id,plate_id,position,name,source_kind,model_key,original,quantity) SELECT ?1,?2,position,name,source_kind,model_key,original,quantity FROM plate_items WHERE id=?3 AND plate_id=?4", rusqlite::params![item,id,model.id,source])?;
+            if imported_source.as_deref() == Some(&model.id)
+                && let Some(metadata) = &mut imported
+            {
+                metadata.model_id = item;
+            }
+        }
+        if let Some(metadata) = imported {
+            let metadata = serde_json::to_string(&metadata).map_err(std::io::Error::other)?;
+            tx.execute("INSERT INTO plate_imports(plate_id,metadata_json,original) SELECT ?1,?2,original FROM plate_imports WHERE plate_id=?3", rusqlite::params![id,metadata,source])?;
+        }
+        let copy = load(&tx, &id)?;
+        tx.commit()?;
+        Ok(copy)
+    }
     /// Read a saved composition.
     /// # Errors
     /// Rejects invalid IDs, missing plates or unavailable storage.
@@ -695,6 +737,148 @@ fn checked(root: &Path, relative: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn duplicate_preserves_references_order_conditions_and_independent_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut input = edit("天馬ルームケース: base前", 10);
+        input.conditions.bed_type = Some("Textured PEI Plate".into());
+        input.conditions.strength.wall_loops = Some(4);
+        input.conditions.strength.sparse_infill_density = Some(30.0);
+        input.conditions.brim_enabled = true;
+        input.conditions.support_enabled = true;
+        input.models.push(ItemEdit {
+            name: "second.stl".into(),
+            source: Some("second.stl".into()),
+            quantity: 3,
+            id: None,
+        });
+        let source = store.edit(None, input).unwrap();
+        let copy = store
+            .duplicate(&source.id, "  天馬ルームケース: base後  ")
+            .unwrap();
+        assert_eq!(copy.name, "天馬ルームケース: base後");
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.version, 1);
+        assert_eq!(copy.conditions, source.conditions);
+        for (old, new) in source.models.iter().zip(&copy.models) {
+            assert_ne!(old.id, new.id);
+            assert_eq!(
+                (&old.name, &old.source, old.quantity),
+                (&new.name, &new.source, new.quantity)
+            );
+        }
+        assert_eq!(copy.models.len(), 2);
+        let mut update = edit("changed copy", 5);
+        update.version = Some(copy.version);
+        store.edit(Some(&copy.id), update).unwrap();
+        assert_eq!(store.get(&source.id).unwrap(), source);
+        store.delete(&source.id).unwrap();
+        assert_eq!(store.get(&copy.id).unwrap().version, 2);
+        let blank = store.edit(None, edit("nullable", 1)).unwrap();
+        let copied_blank = store.duplicate(&blank.id, "nullable copy").unwrap();
+        assert_eq!(copied_blank.conditions, Conditions::default());
+        assert_eq!(
+            Store::open(root.path())
+                .unwrap()
+                .get(&copied_blank.id)
+                .unwrap(),
+            copied_blank
+        );
+    }
+
+    #[test]
+    fn duplicate_owns_stl_and_3mf_originals_and_remaps_imported_model() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let stl = include_bytes!("../tests/fixtures/triangle.stl").to_vec();
+        for imported in [false, true] {
+            let selection = crate::model_import::Selection {
+                name: "Plate 2".into(),
+                root_model: "3D/3dmodel.model".into(),
+                plate_id: Some("2".into()),
+                items: vec![crate::model_import::SourceItem {
+                    build_index: 1,
+                    object_id: 42,
+                    instance_id: 3,
+                }],
+                print_reason: Some("painted model".into()),
+            };
+            let original = b"source 3mf including untouched color and object metadata".to_vec();
+            let source = store
+                .save_upload(
+                    Input {
+                        name: "uploaded".into(),
+                        conditions: Conditions::default(),
+                        models: vec![ModelInput {
+                            name: "bin.stl".into(),
+                            source: None,
+                            data: stl.clone(),
+                        }],
+                    },
+                    &[10],
+                    imported.then(|| crate::file_import::Original {
+                        file_name: "bins.3mf".into(),
+                        data: original.clone(),
+                        selection: selection.clone(),
+                    }),
+                )
+                .unwrap();
+            let copy = store.duplicate(&source.id, "uploaded copy").unwrap();
+            let model = &copy.models[0];
+            assert_ne!(model.id, source.models[0].id);
+            assert_eq!(model.quantity, 10);
+            assert_eq!(store.read_file(&copy.id, &model.id).unwrap(), stl);
+            assert!(store.read_file(&copy.id, &source.models[0].id).is_err());
+            if imported {
+                assert_eq!(
+                    copy.imported,
+                    Some(Imported {
+                        file_name: "bins.3mf".into(),
+                        model_id: model.id.clone(),
+                        selection
+                    })
+                );
+                assert_eq!(store.read_import(&copy.id).unwrap(), original);
+                assert!(copy.ensure_printable().is_err());
+            }
+            store.delete(&source.id).unwrap();
+            let restored = Store::open(root.path()).unwrap();
+            assert_eq!(restored.get(&copy.id).unwrap(), copy);
+            assert_eq!(restored.read_file(&copy.id, &model.id).unwrap(), stl);
+            if imported {
+                assert_eq!(restored.read_import(&copy.id).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_rejects_bad_sources_and_rolls_back_partial_copies() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let source = store.edit(None, edit("source", 10)).unwrap();
+        for name in ["", " ", "bad\nname", &"あ".repeat(86)] {
+            assert!(store.duplicate(&source.id, name).is_err());
+        }
+        for id in ["../outside", &uuid::Uuid::new_v4().to_string()] {
+            assert!(store.duplicate(id, "copy").is_err());
+        }
+        store.db.connection().unwrap().execute_batch("CREATE TRIGGER fail_copy BEFORE INSERT ON plate_items BEGIN SELECT RAISE(ABORT, 'unavailable storage'); END;").unwrap();
+        assert!(store.duplicate(&source.id, "failed copy").is_err());
+        assert_eq!(store.list("").unwrap(), vec![source.clone()]);
+        store
+            .db
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_copy")
+            .unwrap();
+        store.delete(&source.id).unwrap();
+        assert!(matches!(
+            store.duplicate(&source.id, "deleted copy"),
+            Err(Error::NotFound)
+        ));
+        assert!(store.list("").unwrap().is_empty());
+    }
     fn edit(name: &str, quantity: u16) -> Edit {
         Edit {
             conditions: Conditions::default(),

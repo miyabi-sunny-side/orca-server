@@ -110,3 +110,9 @@ fn queue_official() {
 fn filament_picker() {
     plates::filament_picker(true);
 }
+
+#[test]
+#[ignore = "requires Chromium"]
+fn plate_duplication() {
+    plates::plate_duplication(true);
+}

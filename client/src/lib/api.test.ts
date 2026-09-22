@@ -3,6 +3,22 @@ import { request } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
+it("duplication failures identify the name or storage without blaming the slicer", async () => {
+  for (const [status, message] of [
+    [400, "プレート名"],
+    [404, "複製元"],
+    [503, "保存先"],
+  ] as const) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("{}", { status })),
+    );
+    await expect(
+      request("/api/plates/id/duplicate", { method: "POST" }),
+    ).rejects.toThrow(message);
+  }
+});
+
 it("passes typed responses and request options through the API", async () => {
   const fetchMock = vi
     .fn()

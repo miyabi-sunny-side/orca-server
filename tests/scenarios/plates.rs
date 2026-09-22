@@ -69,6 +69,62 @@ fn assign(rig: &Rig, pid: &str, index: u64, material: Value) {
     rig.put(&format!("/api/printers/{pid}/ams/{}", id(slot)), &body, 204);
 }
 
+pub fn plate_duplication(browser: bool) {
+    let mut rig = Rig::new("plate-duplication");
+    for name in [
+        "gridfinity/base-front.stl",
+        "gridfinity/base-back.stl",
+        "gridfinity/bin.stl",
+    ] {
+        rig.files
+            .lock()
+            .unwrap()
+            .insert(name.into(), fixture("cube.stl"));
+    }
+    rig.launch();
+    rig.seed();
+    let base = rig.configure(None, None);
+    let conditions = merge(
+        &base["conditions"],
+        &json!({"wall_loops":4,"sparse_infill_density":30,"sparse_infill_pattern":"gyroid","brim_enabled":true,"support_enabled":true,"support_interface_filament_id":rig.materials[1]["id"]}),
+    );
+    let source = rig.post("/api/plates/import", &json!({"name":"天馬ルームケース: base前","models":[{"name":"gridfinity/base-front.stl","source":"gridfinity/base-front.stl","quantity":10}],"conditions":conditions}),201);
+    let path = format!("/api/plates/{}/duplicate", id(&source));
+    let copy = rig.post(&path, &json!({"name":"API copy"}), 201);
+    assert_eq!(copy["conditions"], source["conditions"]);
+    assert_ne!(copy["models"][0]["id"], source["models"][0]["id"]);
+    for body in [json!({"name":""}), json!({"name":"x","models":[]})] {
+        rig.post(
+            &path,
+            &body,
+            if body.get("models").is_some() {
+                422
+            } else {
+                400
+            },
+        );
+    }
+    rig.request("DELETE", &format!("/api/plates/{}", id(&copy)), None, 204);
+    rig.post(
+        &format!("/api/plates/{}/duplicate", id(&copy)),
+        &json!({"name":"deleted"}),
+        404,
+    );
+    if browser {
+        rig.browser(
+            "E2E_DUPLICATE_CONTEXT",
+            &json!({"source":source,"second_material":rig.materials[0]["id"]}),
+            None,
+        );
+    }
+    assert_eq!(rig.get(&format!("/api/plates/{}", id(&source))), source);
+    assert!(array(&rig.queue()["waiting"]).is_empty());
+    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    rig.stop(false);
+    rig.launch();
+    assert_eq!(rig.get(&format!("/api/plates/{}", id(&source))), source);
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn plate_admission(browser: bool) {
     let mut rig = Rig::new("plate-admission");

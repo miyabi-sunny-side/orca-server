@@ -23,11 +23,16 @@ test('saved defaults start complete and manual material survives at desktop and 
     await expectMaterial(page,saved.conditions.filament_id);
   }
   const old=await (await request.get('/api/plates/'+ctx.old)).json();
-  await page.goto('/plates/'+ctx.old);await page.getByRole('button',{name:'構成を編集'}).click();
-  for(const [i,value] of [ctx.machine,ctx.first,ctx.process,ctx.bed].entries()) { if(i===1) await expectMaterial(page,value); else await expect(fields()[i]).toHaveValue(value); }
-  expect(await (await request.get('/api/plates/'+ctx.old)).json()).toEqual(old);
-  await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByRole('button',{name:'構成を編集'})).toBeVisible();
-  const updated=await (await request.get('/api/plates/'+ctx.old)).json();expect(updated.version).toBe(old.version+1);expect(updated.conditions.filament_id).toBe(ctx.first);
+  const cloneResponse=await request.post('/api/plates/'+ctx.old+'/duplicate',{data:{name:'未設定条件の複製'}});expect(cloneResponse.status()).toBe(201);
+  const clone=await cloneResponse.json();expect(clone.conditions).toEqual(old.conditions);
+  for(const target of [old,clone]) {
+    await page.goto('/plates/'+target.id);await page.getByRole('button',{name:'構成を編集'}).click();
+    for(const [i,value] of ['',null,'',''].entries()) { if(i===1) await expectMaterial(page,null); else await expect(fields()[i]).toHaveValue(value!); }
+    expect(await (await request.get('/api/plates/'+target.id)).json()).toEqual(target);
+    await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByRole('button',{name:'構成を編集'})).toBeVisible();
+    const saved=await (await request.get('/api/plates/'+target.id)).json();expect(saved.version).toBe(target.version+1);expect(saved.conditions).toEqual(target.conditions);
+  }
+  const updated=await (await request.get('/api/plates/'+ctx.old)).json();
   await page.goto('/printers');await expect(page.getByLabel('新規プレートの初期値に使うプリンター')).toHaveValue('p1');
   await page.getByRole('link',{name:'設定を編集'}).click();await page.getByLabel('プレート種類').selectOption('High Temp Plate');
   await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(/\/printers$/);

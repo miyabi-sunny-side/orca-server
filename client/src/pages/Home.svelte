@@ -19,6 +19,11 @@
     notice = $state("");
   let cancelButton = $state<HTMLButtonElement>(),
     deleteButton = $state<HTMLButtonElement>();
+  let duplicateName = $state("");
+  let confirmDuplicate = $state(false),
+    duplicating = $state(false);
+  let duplicateButton = $state<HTMLButtonElement>(),
+    nameInput = $state<HTMLInputElement>();
   let press: ReturnType<typeof setTimeout> | undefined,
     point = { x: 0, y: 0 },
     longPressed = false;
@@ -35,11 +40,13 @@
     menuError = "";
     queueBusy = false;
     confirmDelete = false;
+    confirmDuplicate = false;
   }
   async function closeMenu() {
-    if (deleting) return;
+    if (deleting || duplicating) return;
     menuPlate = undefined;
     confirmDelete = false;
+    confirmDuplicate = false;
     await tick();
     (menuRow?.isConnected
       ? menuRow
@@ -59,6 +66,7 @@
       menuError = "";
       queueBusy = false;
       confirmDelete = false;
+      confirmDuplicate = false;
     }, 500);
   }
   async function askToDelete() {
@@ -91,6 +99,44 @@
       deleting = false;
       await tick();
       cancelButton?.focus();
+    }
+  }
+
+  async function askToDuplicate() {
+    if (!menuPlate || queueBusy) return;
+    duplicateName = menuPlate.name;
+    confirmDuplicate = true;
+    menuError = "";
+    await tick();
+    nameInput?.focus();
+  }
+  async function cancelDuplicate() {
+    if (duplicating) return;
+    confirmDuplicate = false;
+    menuError = "";
+    await tick();
+    duplicateButton?.focus();
+  }
+  async function duplicate(event: SubmitEvent) {
+    event.preventDefault();
+    if (!menuPlate || duplicating) return;
+    duplicating = true;
+    menuError = "";
+    try {
+      const copy = await request<Plate>(
+        `/api/plates/${menuPlate.id}/duplicate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: duplicateName.trim() }),
+        },
+      );
+      location.assign(`/plates/${copy.id}?edit=1`);
+    } catch (cause) {
+      menuError = (cause as Error).message;
+      duplicating = false;
+      await tick();
+      nameInput?.focus();
     }
   }
 
@@ -231,11 +277,44 @@
 
 {#if menuPlate}
   <Modal
-    title={confirmDelete ? "プレートを削除" : menuPlate.name}
-    dismissible={!deleting}
-    onclose={() => void (confirmDelete ? cancelDelete() : closeMenu())}
+    title={confirmDelete
+      ? "プレートを削除"
+      : confirmDuplicate
+        ? "プレートを複製"
+        : menuPlate.name}
+    dismissible={!deleting && !duplicating}
+    onclose={() =>
+      void (confirmDelete
+        ? cancelDelete()
+        : confirmDuplicate
+          ? cancelDuplicate()
+          : closeMenu())}
   >
-    {#if confirmDelete}
+    {#if confirmDuplicate}
+      <form onsubmit={duplicate}>
+        <label class="field"
+          ><span>プレート名</span><input
+            bind:this={nameInput}
+            bind:value={duplicateName}
+            required
+            maxlength="256"
+            disabled={duplicating}
+          /></label
+        >
+        {#if menuError}<p role="alert">{menuError}</p>{/if}
+        <div class="actions">
+          <button class="btn primary" type="submit" disabled={duplicating}
+            >{duplicating ? "複製中…" : "複製"}</button
+          >
+          <button
+            class="btn"
+            type="button"
+            disabled={duplicating}
+            onclick={() => void cancelDuplicate()}>キャンセル</button
+          >
+        </div>
+      </form>
+    {:else if confirmDelete}
       <p class="delete-name">「{menuPlate.name}」を削除しますか？</p>
       <p class="caption">
         保存済み一覧から削除します。追加済みのキューは残ります。
@@ -273,6 +352,12 @@
           >編集</button
         >
         <button
+          class="btn"
+          bind:this={duplicateButton}
+          disabled={queueBusy || deleting}
+          onclick={() => void askToDuplicate()}>複製</button
+        >
+        <button
           class="btn danger"
           bind:this={deleteButton}
           disabled={queueBusy || deleting}
@@ -301,6 +386,8 @@
     :global(.queue-add > .actions)
       display: grid
       margin: 0
+  .plate-menu :global(.btn), form .btn
+    min-height: 44px
   .delete-name
     overflow-wrap: anywhere
 </style>

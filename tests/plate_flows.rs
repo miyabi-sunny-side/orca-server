@@ -18,3 +18,8 @@ fn recover_default_process() {
 fn filament_picker() {
     plates::filament_picker(false);
 }
+
+#[test]
+fn plate_duplication() {
+    plates::plate_duplication(false);
+}

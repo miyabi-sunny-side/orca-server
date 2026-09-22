@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -48,6 +48,7 @@ pub fn router(store: Store) -> Router {
     Router::new()
         .route("/api/plates", get(list).post(create))
         .route("/api/plates/{id}", get(read).delete(remove))
+        .route("/api/plates/{id}/duplicate", post(duplicate))
         .route("/api/plates/{id}/files/{*path}", get(file))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(store)
@@ -105,6 +106,21 @@ async fn read(State(store): State<Store>, Path(id): Path<String>) -> Result<Json
 async fn remove(State(store): State<Store>, Path(id): Path<String>) -> Result<StatusCode> {
     blocking(move || store.delete(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Duplicate {
+    name: String,
+}
+
+async fn duplicate(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+    Json(input): Json<Duplicate>,
+) -> Result<(StatusCode, Json<Plate>)> {
+    let copy = blocking(move || store.duplicate(&id, &input.name)).await?;
+    Ok((StatusCode::CREATED, Json(copy)))
 }
 
 async fn create(

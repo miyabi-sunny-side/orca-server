@@ -1,11 +1,54 @@
 import { expect, test } from "vitest";
-import { machineChoices, destinations, choosePrinter } from "./plate";
+import {
+  machineChoices,
+  destinations,
+  choosePrinter,
+  chooseModels,
+} from "./plate";
+test("catalog additions deduplicate and replacement preserves quantity and position without the old ID", () => {
+  const models = [
+    { id: "upload", name: "original.stl", source: null, quantity: 10 },
+    { id: "reference", name: "other.stl", source: "other.stl", quantity: 3 },
+  ];
+  expect(chooseModels(models, ["new.stl", "other.stl", "new.stl"])).toEqual([
+    ...models,
+    { name: "new.stl", source: "new.stl", quantity: 1 },
+  ]);
+  expect(chooseModels(models, ["new.stl"], 0)).toEqual([
+    { name: "new.stl", source: "new.stl", quantity: 10 },
+    models[1],
+  ]);
+  expect(chooseModels(models, ["other.stl"], 0)).toEqual(models);
+  expect(chooseModels(models, [], 0)).toEqual(models);
+  expect(models[0].id).toBe("upload");
+  expect(chooseModels([], ["new.stl"])).toEqual([
+    { name: "new.stl", source: "new.stl", quantity: 1 },
+  ]);
+});
 const printers = [
   { id: "p1", machine_profile_key: "P1S 0.4" },
   { id: "a3", machine_profile_key: "A1 mini 0.2" },
   { id: "a1", machine_profile_key: "A1 mini 0.2" },
   { id: "a2", machine_profile_key: "A1 mini 0.2" },
 ];
+test("editing never backfills saved nullable conditions with creation defaults", async () => {
+  const { initialConditions, emptyConditions } = await import("./plate");
+  expect(
+    initialConditions(
+      emptyConditions,
+      {
+        ...emptyConditions,
+        required_machine_profile_key: "P1S",
+        filament_id: "white",
+        process_profile_key: "standard",
+        bed_type: "Cool Plate",
+        wall_loops: 2,
+      },
+      new Set(),
+      false,
+    ),
+  ).toEqual(emptyConditions);
+});
 test("owned profiles deduplicate and only exact machine/nozzle destinations are selectable", () => {
   expect(machineChoices(printers)).toEqual(["A1 mini 0.2", "P1S 0.4"]);
   expect(destinations(printers, "P1S 0.4").map((p) => p.id)).toEqual(["p1"]);
