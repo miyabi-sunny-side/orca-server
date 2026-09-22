@@ -168,6 +168,8 @@ impl Profiles {
         self.machine(machine)?;
         let mut profile = selectable(&self.process, process, machine)?;
         strength.apply(&mut profile)?;
+        profile.insert("enable_support".into(), "0".into());
+        profile.insert("enforce_support_layers".into(), "0".into());
         Ok(profile)
     }
 
@@ -242,7 +244,11 @@ impl Profiles {
             ("printer.json".into(), self.machine(&selection.machine)?),
             (
                 "process.json".into(),
-                selectable(&self.process, &selection.process, &selection.machine)?,
+                self.resolve_process(
+                    &selection.machine,
+                    &selection.process,
+                    &crate::strength::Strength::default(),
+                )?,
             ),
             (
                 "filament.json".into(),
@@ -310,6 +316,66 @@ fn flatten(profiles: &BTreeMap<String, Value>, name: &str) -> Result<Map<String,
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn support_is_off_after_inheritance_for_preview_and_slice_settings() {
+        let parent = json!({"enable_support":"1","enforce_support_layers":"8",
+            "brim_type":"outer_only","brim_width":"7","skirt_loops":"2","raft_layers":"3",
+            "enable_prime_tower":"1","wall_loops":"4","sparse_infill_density":"25%","layer_height":"0.16"});
+        let mut profiles = Profiles {
+            machine: BTreeMap::from([(
+                PRINTER.into(),
+                json!({"instantiation":"true","nozzle_diameter":["0.4"]}),
+            )]),
+            process: BTreeMap::from([
+                ("parent".into(), parent.clone()),
+                (
+                    "child".into(),
+                    json!({"inherits":"parent","instantiation":"true","compatible_printers":[PRINTER]}),
+                ),
+            ]),
+            filament: BTreeMap::from([(
+                "pla".into(),
+                json!({"instantiation":"true","compatible_printers":[PRINTER],"nozzle_temperature":["220"]}),
+            )]),
+        };
+        let selection = Selection {
+            process: "child".into(),
+            filament: "pla".into(),
+            ..Default::default()
+        };
+        for inherited_support in [true, false] {
+            if !inherited_support {
+                let parent = profiles
+                    .process
+                    .get_mut("parent")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                parent.remove("enable_support");
+                parent.remove("enforce_support_layers");
+            }
+            let resolved = profiles.resolved(&selection).unwrap();
+            for process in [
+                resolved["process.json"].clone(),
+                profiles
+                    .resolve_process(PRINTER, "child", &crate::strength::Strength::default())
+                    .unwrap(),
+            ] {
+                assert_eq!(process["enable_support"], "0");
+                assert_eq!(process["enforce_support_layers"], "0");
+                for (key, value) in parent.as_object().unwrap() {
+                    if !["enable_support", "enforce_support_layers"].contains(&key.as_str()) {
+                        assert_eq!(&process[key], value);
+                    }
+                }
+            }
+            assert_eq!(
+                resolved["filament.json"]["nozzle_temperature"],
+                json!(["220"])
+            );
+        }
+    }
 
     #[test]
     fn selected_bed_requires_both_temperatures_without_inventing_a_default() {
