@@ -80,6 +80,31 @@ export type Command = {
   action: Action;
 };
 
+export function menuReasons(
+  job: Pick<Job, "state" | "plate_deleted"> | undefined,
+  admission: QueueState["admission"],
+) {
+  if (!job) {
+    const reason = "このジョブはキューにありません。";
+    return { edit: reason, duplicate: reason, remove: reason };
+  }
+  const edit = job.plate_deleted ? "プレートは一覧から削除されています。" : "";
+  const duplicate =
+    edit ||
+    (!admission
+      ? "追加条件を確認しています…"
+      : admission.allowed
+        ? ""
+        : failureMessage(admission.reason ?? "追加条件を確認してください。"));
+  const remove =
+    job.state === "queued"
+      ? ""
+      : job.state === "awaiting_removal" || job.state === "needs_attention"
+        ? "現在のジョブは、造形物を取り外してから取り外し確認の操作で終了してください。"
+        : `${phaseText[job.state]}のジョブは削除できません。`;
+  return { edit, duplicate, remove };
+}
+
 export function slotLabel(slot: number, ams: Ams | null) {
   const unit = Math.floor(slot / 4),
     tray = slot % 4;

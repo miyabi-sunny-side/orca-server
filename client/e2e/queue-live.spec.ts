@@ -152,7 +152,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
     });
     await next().click();
     if (colorScheme === "dark") {
-      await expect(page.getByText("送信結果が不明です。別の印刷を始めず、同じ要求の結果を確認します。")).toBeVisible();
+      await expect(page.getByText("送信結果が不明です。同じ操作を重ねず、同じ要求の結果を確認します。")).toBeVisible();
       await page.getByRole("button", { name: "同じ要求を再確認" }).click();
       await expect(page.getByRole("alert")).toHaveCount(0);
     }

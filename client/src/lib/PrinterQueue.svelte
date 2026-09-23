@@ -12,6 +12,7 @@
     failureMessage,
     jobStatus,
     moveIndex,
+    menuReasons,
     type Job,
     printerText,
     type Action,
@@ -19,6 +20,7 @@
     type QueueState,
   } from "../lib/queue";
   import Icon from "./Icon.svelte";
+  import Modal from "./Modal.svelte";
   let { printer, filaments }: { printer: Device; filaments: Filament[] } =
     $props();
   const printerId = $derived(printer.id);
@@ -39,6 +41,86 @@
   });
   const controller = new AbortController();
   const disabled = $derived(busy || !!pending || !!readError || !queue);
+  let menu = $state<{
+    id: string;
+    plate_id: string;
+    name: string;
+    printerId: string;
+    index: number;
+  }>();
+  let menuRow: HTMLElement | undefined;
+  let settingsLink = $state<HTMLAnchorElement>();
+  const menuJob = $derived(
+    menu?.printerId === printerId
+      ? [queue?.current, ...(queue?.waiting ?? [])].find(
+          (j) => j?.id === menu?.id,
+        )
+      : undefined,
+  );
+  const reasons = $derived(menuReasons(menuJob ?? undefined, queue?.admission));
+  let press: ReturnType<typeof setTimeout> | undefined;
+  let point = { x: 0, y: 0 },
+    longPressed = false;
+  function cancelPress() {
+    clearTimeout(press);
+  }
+  function showMenu(job: Job, row: HTMLElement) {
+    cancelPress();
+    drag = undefined;
+    menuRow = row;
+    menu = {
+      id: job.id,
+      plate_id: job.plate_id,
+      name: job.name,
+      printerId,
+      index: queue?.waiting.findIndex((j) => j.id === job.id) ?? 0,
+    };
+    if (queue) queue.admission = null;
+    void refresh();
+  }
+  function openMenu(event: Event, job: Job) {
+    event.preventDefault();
+    showMenu(job, event.currentTarget as HTMLElement);
+  }
+  async function closeMenu() {
+    const index = menu?.index ?? 0;
+    menu = undefined;
+    await tick();
+    const rows = list?.querySelectorAll<HTMLElement>("summary");
+    (menuRow?.isConnected
+      ? menuRow
+      : (rows?.[Math.min(Math.max(index, 0), rows.length - 1)] ?? settingsLink)
+    )?.focus();
+  }
+  function startPress(event: PointerEvent, job: Job) {
+    cancelPress();
+    longPressed = false;
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    point = { x: event.clientX, y: event.clientY };
+    const row = event.currentTarget as HTMLElement;
+    press = setTimeout(() => {
+      longPressed = true;
+      if (event.pointerType === "touch") {
+        row.addEventListener("touchend", (e) => e.preventDefault(), {
+          once: true,
+          passive: false,
+        });
+      }
+      showMenu(job, row);
+    }, 500);
+  }
+  function menuKey(event: KeyboardEvent, job: Job) {
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))
+      openMenu(event, job);
+  }
+  async function duplicate() {
+    if (disabled || reasons.duplicate || !menuJob || !queue?.admission) return;
+    await send({
+      type: "add",
+      plate_id: menuJob.plate_id,
+      plate_version: queue.admission.plate_version,
+    });
+  }
 
   function receive(value: QueueState) {
     if (
@@ -57,24 +139,37 @@
     if (reading || busy || pending || !printerId) return;
     reading = true;
     const ticket = ++sequence;
+    const target = menu?.id;
+    const path =
+      queuePath +
+      (menu ? `&plate_id=${encodeURIComponent(menu.plate_id)}` : "");
     try {
-      const value = await request<QueueState>(queuePath, {
+      const value = await request<QueueState>(path, {
         signal: controller.signal,
       });
       const slots = await request<AmsInventory>(
         `/api/printers/${printerId}/ams`,
         { signal: controller.signal },
       );
-      if (!controller.signal.aborted && ticket === sequence) {
+      if (
+        !controller.signal.aborted &&
+        ticket === sequence &&
+        target === menu?.id
+      ) {
         receive(value);
         inventory = slots;
       }
     } catch (cause) {
-      if (!controller.signal.aborted && ticket === sequence) {
+      if (
+        !controller.signal.aborted &&
+        ticket === sequence &&
+        target === menu?.id
+      ) {
         readError = (cause as Error).message;
       }
     } finally {
       reading = false;
+      if (!controller.signal.aborted && target !== menu?.id) void refresh();
     }
   }
   onMount(() => {
@@ -84,6 +179,7 @@
     }, 2000);
     return () => {
       clearInterval(timer);
+      cancelPress();
       controller.abort();
     };
   });
@@ -103,6 +199,7 @@
     notice = "";
     sequence++;
     let rejected = false;
+    let applied = false;
     try {
       const value = await request<QueueState>(queuePath, {
         method: "POST",
@@ -113,9 +210,10 @@
       if (controller.signal.aborted) return;
       receive(value);
       pending = undefined;
+      applied = true;
     } catch (cause) {
       if (controller.signal.aborted) return;
-      error = (cause as Error).message;
+      error = failureMessage((cause as Error).message);
       if (
         cause instanceof ApiError &&
         cause.status >= 400 &&
@@ -129,6 +227,16 @@
       if (rejected) {
         void refresh();
       }
+    }
+    if (
+      applied &&
+      (command.action.type === "add" || command.action.type === "remove")
+    ) {
+      notice =
+        command.action.type === "add"
+          ? "キューを複製しました"
+          : "キューから削除しました";
+      if (menu) await closeMenu();
     }
   }
 
@@ -206,6 +314,8 @@
     document.getElementById(`handle-${done.id}`)?.focus();
   }
   function handleKey(event: KeyboardEvent, job: Job) {
+    menuKey(event, job);
+    if (event.defaultPrevented) return;
     if (["Enter", " "].includes(event.key)) {
       event.preventDefault();
       if (drag?.mode === "keyboard" && drag.id === job.id) void finishDrag();
@@ -241,6 +351,51 @@
     }
   }
 </script>
+
+{#snippet issue()}
+  {#if error || readError}<div class="notice">
+      <p role="alert">{error || readError}</p>
+      {#if pending}<p>
+          送信結果が不明です。同じ操作を重ねず、同じ要求の結果を確認します。
+        </p>
+        <button class="btn" disabled={busy} onclick={() => void send()}
+          >同じ要求を再確認</button
+        >
+      {:else}<button class="btn" disabled={busy} onclick={() => void refresh()}
+          >最新状態を読み直す</button
+        >{/if}
+    </div>{/if}
+{/snippet}
+
+{#snippet summary(job: Job)}
+  <summary
+    class="job-summary"
+    aria-haspopup="dialog"
+    oncontextmenu={(e) => openMenu(e, job)}
+    onkeydown={(e) => menuKey(e, job)}
+    onpointerdown={(e) => startPress(e, job)}
+    onpointermove={(e) => {
+      if (Math.hypot(e.clientX - point.x, e.clientY - point.y) > 10)
+        cancelPress();
+    }}
+    onpointerup={cancelPress}
+    onpointercancel={cancelPress}
+    onpointerleave={cancelPress}
+    onclick={(e) => {
+      if (longPressed) {
+        e.preventDefault();
+        longPressed = false;
+      }
+    }}
+  >
+    <span class="job-lines"
+      ><strong>{job.name}</strong><span class="caption"
+        >{jobStatus(job, queue?.printer)}</span
+      ></span
+    >
+    <span class="disclosure"><Icon name="chevron-left" /></span>
+  </summary>
+{/snippet}
 
 {#snippet details(job: Job)}
   {@const slot = inventory?.slots.find((s) => s.id === job.ams_slot_id)}
@@ -303,21 +458,10 @@
 <section class="printer-queue" aria-label={`${printer.name}のキュー`}>
   <div class="printer-heading">
     <h2>{printer.name}</h2>
-    <a href={`/printers/${printerId}`}>設定</a>
+    <a bind:this={settingsLink} href={`/printers/${printerId}`}>設定</a>
   </div>
-  {#if error || readError}<div class="notice">
-      <p role="alert">{error || readError}</p>
-      {#if pending}<p>
-          送信結果が不明です。別の印刷を始めず、同じ要求の結果を確認します。
-        </p>
-        <button class="btn" disabled={busy} onclick={() => void send()}
-          >同じ要求を再確認</button
-        >
-      {:else}<button class="btn" disabled={busy} onclick={() => void refresh()}
-          >最新状態を読み直す</button
-        >{/if}
-    </div>{/if}
-  <p class="sr-only" role="status">{notice}</p>
+  {#if !menu}{@render issue()}{/if}
+  {#if notice}<p class="queue-notice" role="status">{notice}</p>{/if}
   {#if queue}
     {#if queue.printer.connection !== "connected" || !queue.printer.synchronized || queue.printer.print.error}<p
         class="printer-state"
@@ -331,14 +475,7 @@
           id={`job-${queue.current.id}`}
           bind:open={expanded[queue.current.id]}
         >
-          <summary class="job-summary"
-            ><span class="job-lines"
-              ><strong>{queue.current.name}</strong><span class="caption"
-                >{jobStatus(queue.current, queue.printer)}</span
-              ></span
-            ><span class="disclosure"><Icon name="chevron-left" /></span
-            ></summary
-          >
+          {@render summary(queue.current)}
           {@render details(queue.current)}
         </details>{/key}
     {/if}
@@ -435,17 +572,11 @@
             onpointercancel={() => {
               drag = undefined;
             }}
+            oncontextmenu={(e) => openMenu(e, job)}
             onkeydown={(e) => handleKey(e, job)}><Icon name="menu" /></button
           >
           <details id={`job-${job.id}`} bind:open={expanded[job.id]}>
-            <summary class="job-summary"
-              ><span class="job-lines"
-                ><strong>{job.name}</strong><span class="caption"
-                  >{jobStatus(job)}</span
-                ></span
-              ><span class="disclosure"><Icon name="chevron-left" /></span
-              ></summary
-            >
+            {@render summary(job)}
             {@render details(job)}
           </details>
         </li>
@@ -456,7 +587,52 @@
     </p>{/if}
 </section>
 
+{#if menu}
+  <Modal title={menu.name} onclose={() => void closeMenu()} dismissible={!busy}>
+    <div class="queue-menu">
+      <button
+        class="btn"
+        disabled={disabled || !!reasons.edit}
+        onclick={() => {
+          if (menuJob) location.assign(`/plates/${menuJob.plate_id}?edit=1`);
+        }}>プレート編集</button
+      >
+      <button
+        class="btn"
+        disabled={disabled || !!reasons.duplicate}
+        onclick={() => void duplicate()}>キュー複製</button
+      >
+      <button
+        class="btn danger"
+        disabled={disabled || !!reasons.remove}
+        onclick={() => {
+          if (menuJob) void send({ type: "remove", job_id: menuJob.id });
+        }}>キュー削除</button
+      >
+      {#each [...new Set([reasons.edit, reasons.duplicate, reasons.remove].filter(Boolean))] as reason}<p
+          class="caption"
+        >
+          {reason}
+        </p>{/each}
+      {#if busy}<p role="status">キューを更新しています…</p>{/if}
+      {@render issue()}
+    </div>
+  </Modal>
+{/if}
+
 <style lang="sass">
+  .queue-menu
+    display: grid
+    gap: var(--sp-2)
+    > .btn
+      width: 100%
+      min-height: 44px
+    p
+      margin: 0
+  .queue-notice
+    font-size: var(--fs-sm)
+    color: var(--c-muted)
+
   .printer-queue
     margin-bottom: var(--sp-5)
   .printer-heading
@@ -572,10 +748,4 @@
     display: flex
     flex-wrap: wrap
     gap: var(--sp-2)
-  .sr-only
-    position: absolute
-    width: 1px
-    height: 1px
-    overflow: hidden
-    clip-path: inset(50%)
 </style>

@@ -1,4 +1,5 @@
 import { estimateText } from "./queue";
+import { menuReasons, type Job } from "./queue";
 import { describe, expect, it } from "vitest";
 import { slotLabel, printerText, type Printer } from "./queue";
 const printer: Printer = {
@@ -8,6 +9,41 @@ const printer: Printer = {
   print: { state: "IDLE", percent: null, remaining_minutes: null, error: 0 },
   ams: null,
 };
+
+it("keeps duplication available during the current job and removal limited to waiting", () => {
+  const admission = { plate_version: 7, allowed: true, reason: null };
+  for (const state of [
+    "queued",
+    "preparing",
+    "printing",
+    "awaiting_removal",
+    "needs_attention",
+  ] as const) {
+    const reasons = menuReasons({ state, plate_deleted: false }, admission);
+    expect(reasons.edit).toBe("");
+    expect(reasons.duplicate).toBe("");
+    expect(Boolean(reasons.remove)).toBe(state !== "queued");
+  }
+});
+
+it("explains missing jobs, deleted plates and server admission without blocking waiting removal", () => {
+  const job: Pick<Job, "state" | "plate_deleted"> = { state: "queued" };
+  const missing = menuReasons(undefined, null);
+  expect(Object.values(missing).every(Boolean)).toBe(true);
+  const deleted = menuReasons({ ...job, plate_deleted: true }, null);
+  expect(deleted.edit).toContain("削除");
+  expect(deleted.duplicate).toContain("削除");
+  expect(deleted.remove).toBe("");
+  expect(menuReasons(job, null).duplicate).toContain("確認");
+  for (const [reason, text] of [
+    ["Queue holds at most 100 waiting jobs", "100件"],
+    ["No confirmed AMS slot contains the plate material", "AMS"],
+  ]) {
+    expect(
+      menuReasons(job, { plate_version: 7, allowed: false, reason }).duplicate,
+    ).toContain(text);
+  }
+});
 it("uses physical AMS numbering and keeps empty/unknown material distinct", () => {
   const ams = {
     units: [

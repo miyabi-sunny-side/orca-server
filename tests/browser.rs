@@ -116,3 +116,49 @@ fn filament_picker() {
 fn plate_duplication() {
     plates::plate_duplication(true);
 }
+
+#[test]
+#[ignore = "requires Chromium and official Orca 2.4.2"]
+fn queue_context_menu() {
+    let mut rig = Rig::with_options("queue-context-menu", "v3", Some(&appdir()));
+    rig.launch();
+    rig.seed();
+    let plate = rig.configure(None, None);
+    let mut body = edit(&plate);
+    body["name"] = json!("bin · 1モデル10個");
+    body["models"][0]["quantity"] = json!(10);
+    rig.plate = rig.put(&format!("/api/plates/{}", id(&plate)), &body, 200);
+    rig.send(
+        json!({"type":"add","plate_id":rig.plate["id"],"plate_version":rig.plate["version"]}),
+        200,
+    );
+    let items = rig.rows("SELECT * FROM plate_items ORDER BY id", &[]);
+    let plates = rig.get("/api/plates");
+    let control = rig.control();
+    rig.browser(
+        "E2E_QUEUE_MENU_CONTEXT",
+        &json!({"plate":rig.plate}),
+        Some(&control),
+    );
+    assert_eq!(rig.get("/api/plates"), plates);
+    assert_eq!(
+        rig.rows("SELECT * FROM plate_items ORDER BY id", &[]),
+        items
+    );
+    assert_eq!(
+        rig.broker.prints().len(),
+        1,
+        "only the explicit original start is sent"
+    );
+    assert_eq!(rig.ftp.uploads().len(), 1);
+    let queue = rig.queue();
+    assert!(queue["current"].is_null());
+    assert_eq!(array(&queue["waiting"]).len(), 2);
+    assert!(
+        array(&queue["waiting"])
+            .iter()
+            .all(|job| job["state"] == "queued"
+                && job["attempt_id"].is_null()
+                && job["artifact_path"].is_null())
+    );
+}
