@@ -27,7 +27,6 @@
     `/api/queue?printer_id=${encodeURIComponent(printerId)}`,
   );
   let queue = $state<QueueState>();
-  let cleared = $state(false);
   let busy = $state(false);
   let pending = $state<Command>();
   let error = $state("");
@@ -39,19 +38,9 @@
     [location.hash.replace(/^#job-/, "")]: true,
   });
   const controller = new AbortController();
-  const choices = $derived({
-    retry: queue?.allowed.retry ? queue.current : null,
-    discard: queue?.allowed.discard ? queue.current : null,
-  });
   const disabled = $derived(busy || !!pending || !!readError || !queue);
 
   function receive(value: QueueState) {
-    if (
-      queue?.epoch !== value.epoch ||
-      queue?.generation !== value.generation ||
-      queue?.printer.ready_to_print !== value.printer.ready_to_print
-    )
-      cleared = false;
     if (
       drag &&
       (drag.basis.epoch !== value.epoch ||
@@ -83,7 +72,6 @@
     } catch (cause) {
       if (!controller.signal.aborted && ticket === sequence) {
         readError = (cause as Error).message;
-        cleared = false;
       }
     } finally {
       reading = false;
@@ -113,7 +101,6 @@
     busy = true;
     error = "";
     notice = "";
-    cleared = false;
     sequence++;
     let rejected = false;
     try {
@@ -310,33 +297,6 @@
         >
       {/if}
     </div>
-    {#if job.state === "needs_attention" && (choices.retry || choices.discard)}
-      <p>本体の印刷状況を確認してください。</p>
-      <label class="confirm"
-        ><input type="checkbox" bind:checked={cleared} {disabled} /><span
-          >造形物を取り外し、空のビルドプレートを戻しました</span
-        ></label
-      >
-      <div class="row-actions">
-        {#if choices.retry}<button
-            class="btn primary"
-            disabled={disabled || !cleared}
-            onclick={() =>
-              void send({ type: "retry", expected_job: job.id, cleared: true })}
-            >同じプレートを再印刷</button
-          >{/if}
-        {#if choices.discard}<button
-            class="btn"
-            disabled={disabled || !cleared}
-            onclick={() =>
-              void send({
-                type: "discard",
-                expected_job: job.id,
-                cleared: true,
-              })}>現在のジョブを除く</button
-          >{/if}
-      </div>
-    {/if}
   </div>
 {/snippet}
 
@@ -381,6 +341,40 @@
           >
           {@render details(queue.current)}
         </details>{/key}
+    {/if}
+    {#if queue.current?.state === "needs_attention"}
+      <div class="actions">
+        <button
+          class="btn primary"
+          disabled={disabled || !queue.allowed.retry}
+          onclick={() =>
+            void send({
+              type: "retry",
+              expected_job: queue!.current!.id,
+              cleared: true,
+            })}>取り外した・最初から再印刷</button
+        >
+        <button
+          class="btn"
+          disabled={disabled || !queue.allowed.discard}
+          onclick={() =>
+            void send({
+              type: "discard",
+              expected_job: queue!.current!.id,
+              cleared: true,
+            })}>取り外した・現在のジョブを除く</button
+        >
+      </div>
+      {#if queue.recovery?.retry_reason}
+        <p class="failure" role="status">
+          {failureMessage(queue.recovery.retry_reason)}
+        </p>
+      {/if}
+      {#if queue.recovery?.discard_reason && queue.recovery.discard_reason !== queue.recovery.retry_reason}
+        <p class="failure" role="status">
+          {failureMessage(queue.recovery.discard_reason)}
+        </p>
+      {/if}
     {/if}
     {#if !queue.current || queue.current.state === "awaiting_removal"}
       {#if queue.waiting[0]}<div class="actions">
@@ -571,15 +565,13 @@
     color: var(--c-on-surface)
   .failure
     color: var(--c-danger)
+  .actions .btn
+    min-height: 44px
+    white-space: normal
   .row-actions
     display: flex
     flex-wrap: wrap
     gap: var(--sp-2)
-  .confirm
-    display: flex
-    align-items: flex-start
-    gap: var(--sp-2)
-    margin: var(--sp-3) 0
   .sr-only
     position: absolute
     width: 1px

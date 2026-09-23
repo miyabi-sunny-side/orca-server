@@ -571,6 +571,48 @@ fn continuation(q: &Value) -> Value {
     json!({"printer_id":"p1","epoch":q["epoch"],"generation":q["generation"],"request_id":q["request_id"],
         "next_job":q["waiting"][0]["id"],"removed_job":q["current"]["id"]})
 }
+
+#[test]
+fn stopped_queue_retry_shares_rest_guards_and_replay_detection() {
+    let mut rig = common::Rig::new("mcp-retry");
+    rig.launch();
+    rig.seed();
+    let job = rig.add(3);
+    rig.next(&job, 200);
+    common::until(|| rig.broker.prints().len() == 1, 12);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.report("FAILED");
+    rig.phase("needs_attention");
+    let controller = rig.control();
+    let base = rig.base.clone();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = ().serve(StreamableHttpClientTransport::from_uri(format!("{base}/mcp"))).await.unwrap();
+        let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+        assert_eq!(q["allowed"]["retry"], true);
+        let args = json!({"printer_id":"p1", "epoch":q["epoch"], "generation":q["generation"], "request_id":q["request_id"], "expected_job":q["current"]["id"]});
+        let mut wrong = args.clone(); wrong["expected_job"] = json!("another-job");
+        assert_eq!(call(&client, "queue_retry", wrong, true).await["status"], 409);
+        let mut stale = args.clone(); stale["epoch"] = json!("old-epoch");
+        assert_eq!(call(&client, "queue_retry", stale, true).await["status"], 409);
+        let mut stale = args.clone(); stale["generation"] = json!(q["generation"].as_i64().unwrap() - 1);
+        assert_eq!(call(&client, "queue_retry", stale, true).await["status"], 409);
+        let (one, two) = tokio::join!(call(&client, "queue_retry", args.clone(), false), call(&client, "queue_retry", args.clone(), false));
+        assert_eq!(one["data"]["current"]["id"], q["current"]["id"]);
+        assert_eq!(two["data"]["current"]["attempt_id"], one["data"]["current"]["attempt_id"]);
+        assert_ne!(one["data"]["current"]["attempt_id"], q["current"]["attempt_id"]);
+        wait_value(&controller.base, "", "/count", json!(2)).await;
+        call(&client, "queue_retry", args, false).await;
+        assert_eq!(read(&controller.base, "").await["count"], 2);
+        control(&controller.base, json!({"state":"RUNNING"})).await;
+        wait_value(&base, "/api/queue", "/current/state", json!("printing")).await;
+        let current = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+        let busy = json!({"printer_id":"p1", "epoch":current["epoch"], "generation":current["generation"], "request_id":current["request_id"], "expected_job":current["current"]["id"]});
+        assert_eq!(call(&client, "queue_retry", busy, true).await["status"], 409);
+        assert_eq!(read(&controller.base, "").await["count"], 2);
+        client.cancel().await.unwrap();
+    });
+}
 #[test]
 #[allow(clippy::too_many_lines)] // Observe one complete two-print cycle and its rejected/replayed requests.
 fn queue_continuation() {

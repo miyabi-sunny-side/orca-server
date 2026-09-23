@@ -77,6 +77,9 @@ enum Action {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Execution {
     pub plate: crate::plates::Plate,
+    // Only an explicit recovery may reuse this observed FAILED attempt during preparation/transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_attempt: Option<String>,
     #[serde(flatten)]
     pub settings: Resolved,
 }
@@ -196,21 +199,70 @@ fn binding(
         ams_slot: slot.ams_id * 4 + slot.slot_index,
     })
 }
+fn recovery_state(c: &Connection, job: &Job, status: &Status) -> Result<Option<String>> {
+    let has_identity = [&status.print.name, &status.print.file]
+        .into_iter()
+        .any(|s| s.as_ref().is_some_and(|v| !v.is_empty()));
+    if status.ready_to_print && !has_identity {
+        return Ok(None);
+    }
+    let id = job.attempt_id.as_deref().unwrap_or("");
+    let mut target = id.to_owned();
+    if !status.matches_attempt(id) {
+        let (execution, attempt): (Option<String>, Option<String>) = c.query_row(
+            "SELECT execution_json,attempt_json FROM print_jobs WHERE id=?1",
+            [&job.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let attempt: Option<Attempt> = attempt
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(std::io::Error::other)?;
+        let execution: Option<Execution> = execution
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(std::io::Error::other)?;
+        // An unsent or explicitly rejected attempt can retain the previous stop; an uncertain send cannot.
+        if attempt
+            .as_ref()
+            .is_none_or(|a| !a.was_sent() || a.phase == Phase::Rejected)
+        {
+            match execution.and_then(|e| e.stopped_attempt) {
+                Some(previous) if status.matches_attempt(&previous) => target = previous,
+                // An unsent/rejected start can leave the preceding completed job's name on the printer.
+                None if status.ready_to_print => return Ok(None),
+                _ => {}
+            }
+        }
+    }
+    if status.ready_to_print {
+        if !status.matches_attempt(&target) {
+            return Err(Error::Conflict(
+                "Printer report does not match the recovery target",
+            ));
+        }
+        return Ok(None);
+    }
+    status.check_stopped(&target)?;
+    Ok(Some(target))
+}
+
 fn retry_execution(
     c: &Connection,
     device: &Device,
     job: &Job,
     status: &Status,
 ) -> Result<Execution> {
-    if !status.ready_to_print {
-        return Err(Error::Conflict("Wait for a current, ready printer report"));
-    }
+    let stopped_attempt = recovery_state(c, job, status)?;
     let raw: String = c.query_row(
         "SELECT execution_json FROM print_jobs WHERE id=?1",
         [&job.id],
         |r| r.get(0),
     )?;
     let mut execution: Execution = serde_json::from_str(&raw).map_err(std::io::Error::other)?;
+    execution.stopped_attempt = stopped_attempt;
     if execution.settings.main.ams_slot_id.is_empty() {
         execution
             .settings
@@ -591,13 +643,18 @@ impl Service {
         let next = idle
             && current.is_none_or(|j| j.state == "awaiting_removal")
             && waiting.first().is_some_and(|j| j["hold_reason"].is_null());
-        let retry = idle
-            && current.is_some_and(|j| j.state == "needs_attention")
-            && current.is_some_and(|j| retry_execution(&c, &self.device, j, &status).is_ok());
-        let discard = idle
-            && current.is_some_and(|j| {
-                matches!(j.state.as_str(), "needs_attention" | "awaiting_removal")
-            });
+        let retry = current
+            .filter(|j| j.state == "needs_attention")
+            .map(|j| retry_execution(&c, &self.device, j, &status));
+        let discard = current
+            .filter(|j| matches!(j.state.as_str(), "needs_attention" | "awaiting_removal"))
+            .map(|j| recovery_state(&c, j, &status));
+        let recovery = json!({
+            "retry_reason": retry.as_ref().and_then(|r| r.as_ref().err()).map(message),
+            "discard_reason": discard.as_ref().and_then(|r| r.as_ref().err()).map(message),
+        });
+        let retry = retry.is_some_and(|r| r.is_ok());
+        let discard = discard.is_some_and(|r| r.is_ok());
         let admission = plate_id.map(|id| -> Result<Value> {
             let plate = crate::plates::load(&c, id)?;
             let result = self.admission(&c, &plate, &status);
@@ -627,7 +684,7 @@ impl Service {
             })
             .transpose()?;
         Ok(
-            json!({"epoch":self.epoch,"generation":generation(&c,&self.device.id)?,"request_id":uuid::Uuid::new_v4().to_string(),"current":current_view,"admission":admission,"waiting":waiting,"printer":status,"allowed":{"next":next,"retry":retry,"discard":discard}}),
+            json!({"epoch":self.epoch,"generation":generation(&c,&self.device.id)?,"request_id":uuid::Uuid::new_v4().to_string(),"current":current_view,"admission":admission,"waiting":waiting,"printer":status,"recovery":recovery,"allowed":{"next":next,"retry":retry,"discard":discard}}),
         )
     }
     pub(crate) async fn apply(self: &Arc<Self>, command: Command) -> Result<Value> {
@@ -731,7 +788,7 @@ impl Service {
                 let job = current
                     .filter(|j| j.id == *expected_job && j.state == "needs_attention")
                     .ok_or(Error::Conflict("Recovery target changed"))?;
-                if !cleared || !status.ready_to_print {
+                if !cleared {
                     return Err(Error::Conflict(
                         "Inspect the printer and empty plate before retrying",
                     ));
@@ -748,11 +805,12 @@ impl Service {
                             && matches!(j.state.as_str(), "awaiting_removal" | "needs_attention")
                     })
                     .ok_or(Error::Conflict("Removal target changed"))?;
-                if !cleared || !status.ready_to_print {
+                if !cleared {
                     return Err(Error::Conflict(
                         "Inspect the printer and empty plate before clearing this job",
                     ));
                 }
+                recovery_state(&tx, job, status)?;
                 tx.execute(
                     "UPDATE print_jobs SET state=?1 WHERE id=?2",
                     params![
@@ -893,7 +951,11 @@ impl Service {
                 status,
                 &slicer.profiles,
             )?;
-            Execution { plate, settings }
+            Execution {
+                plate,
+                settings,
+                stopped_attempt: None,
+            }
         } else {
             retry_execution(c, &self.device, &job, status)?
         };
@@ -1056,8 +1118,12 @@ impl Database {
         let c = self.connection()?;
         let (raw,slot_id,filament_id,machine):(String,String,String,String)=c.query_row("SELECT execution_json,ams_slot_id,filament_id,required_machine_profile_key FROM print_jobs WHERE printer_id=?1 AND id=?2 AND attempt_id=?3 AND state IN ('preparing','printing','needs_attention')",params![device.id,attempt.job_id,attempt.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(Error::Conflict("Execution is no longer active"))?;
         let mut execution: Execution = serde_json::from_str(&raw).map_err(std::io::Error::other)?;
-        if !status.ready_to_print
-            || machine != device.settings.machine_profile_key
+        if let Some(stopped) = &execution.stopped_attempt {
+            status.check_stopped(stopped)?;
+        } else if !status.ready_to_print {
+            return Err(Error::Conflict("Wait for a current, ready printer report"));
+        }
+        if machine != device.settings.machine_profile_key
             || execution.settings.main.filament.id != filament_id
         {
             return Err(Error::Conflict(
@@ -1630,6 +1696,213 @@ mod tests {
                 .is_some()
         );
     }
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn stopped_recovery_is_bound_to_the_observed_attempt_through_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let id = add(&s);
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Next {
+                        expected_job: id.clone(),
+                        removed_job: None,
+                        cleared: true,
+                    },
+                ),
+                &status(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut original = Attempt::new(prep.job.plate_id.clone(), id.clone(), 0, "PLA".into());
+        original.id = prep.job.attempt_id.unwrap();
+        original.sent(1);
+        original.phase = Phase::Unknown;
+        s.store.db.persist_attempt("one", &original).unwrap();
+        let stopped = || {
+            let mut report = status();
+            report.ready_to_print = false;
+            report.print.state = Some("FAILED".into());
+            report.print.name = Some(original.name());
+            report.print.file = Some(original.filename());
+            report
+        };
+        let mut invalid = Vec::new();
+        for state in ["RUNNING", "PREPARE", "PAUSE", "UNKNOWN"] {
+            let mut report = stopped();
+            report.print.state = Some(state.into());
+            invalid.push(report);
+        }
+        for connection in ["disconnected", "stale", "synchronizing"] {
+            let mut report = stopped();
+            report.connection = connection;
+            report.synchronized = false;
+            invalid.push(report);
+        }
+        for error in [None, Some(12)] {
+            let mut report = stopped();
+            report.print.error = error;
+            invalid.push(report);
+        }
+        let mut other = stopped();
+        other.print.file = Some("another-job.gcode.3mf".into());
+        invalid.push(other);
+        let mut unidentified = stopped();
+        unidentified.print.file = None;
+        unidentified.print.name = None;
+        invalid.push(unidentified);
+        for report in &invalid {
+            for action in [
+                Action::Retry {
+                    expected_job: id.clone(),
+                    cleared: true,
+                },
+                Action::Discard {
+                    expected_job: id.clone(),
+                    cleared: true,
+                },
+            ] {
+                assert!(s.mutate(&command(&s, action), report).is_err());
+            }
+        }
+        for action in [
+            Action::Retry {
+                expected_job: id.clone(),
+                cleared: false,
+            },
+            Action::Discard {
+                expected_job: id.clone(),
+                cleared: false,
+            },
+        ] {
+            assert!(s.mutate(&command(&s, action), &stopped()).is_err());
+        }
+        let request = command(
+            &s,
+            Action::Retry {
+                expected_job: id.clone(),
+                cleared: true,
+            },
+        );
+        let prep = s.mutate(&request, &stopped()).unwrap().unwrap();
+        assert_ne!(prep.job.attempt_id.as_deref(), Some(original.id.as_str()));
+        assert!(s.mutate(&request, &stopped()).unwrap().is_none());
+        let mut attempt = Attempt::new(prep.job.plate_id, id.clone(), 0, "PLA".into());
+        attempt.id = prep.job.attempt_id.unwrap();
+        s.store
+            .db
+            .check_attempt(&s.device, &attempt, &stopped())
+            .unwrap();
+        // A different final observation cannot consume the stopped-print authorization.
+        invalid.push(status());
+        for report in &invalid {
+            assert!(
+                s.store
+                    .db
+                    .check_attempt(&s.device, &attempt, report)
+                    .is_err()
+            );
+        }
+        // A preparation failure before sending may retry the same observed stop.
+        s.store
+            .db
+            .fail_job(&id, &attempt.id, "Preparation failed")
+            .unwrap();
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Retry {
+                        expected_job: id.clone(),
+                        cleared: true,
+                    },
+                ),
+                &stopped(),
+            )
+            .unwrap()
+            .unwrap();
+        attempt.id = prep.job.attempt_id.unwrap();
+        attempt.sent(2);
+        attempt.phase = Phase::Unknown;
+        s.store.db.persist_attempt("one", &attempt).unwrap();
+        // After a send, a report for the older attempt is no proof that this attempt stopped.
+        assert!(
+            s.mutate(
+                &command(
+                    &s,
+                    Action::Retry {
+                        expected_job: id,
+                        cleared: true
+                    }
+                ),
+                &stopped()
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn unsent_or_rejected_start_can_retry_while_previous_finished_name_remains() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let id = add(&s);
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Next {
+                        expected_job: id.clone(),
+                        removed_job: None,
+                        cleared: true,
+                    },
+                ),
+                &status(),
+            )
+            .unwrap()
+            .unwrap();
+        s.store
+            .db
+            .fail_job(&id, prep.job.attempt_id.as_ref().unwrap(), "Upload failed")
+            .unwrap();
+        let mut ready = status();
+        ready.print.state = Some("FINISH".into());
+        ready.print.name = Some("orca-previous-finished-attempt".into());
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Retry {
+                        expected_job: id.clone(),
+                        cleared: true,
+                    },
+                ),
+                &ready,
+            )
+            .unwrap()
+            .unwrap();
+        let mut rejected = Attempt::new(prep.job.plate_id, id.clone(), 0, "PLA".into());
+        rejected.id = prep.job.attempt_id.unwrap();
+        rejected.sent(1);
+        rejected.phase = Phase::Rejected;
+        s.store.db.persist_attempt("one", &rejected).unwrap();
+        assert!(
+            s.mutate(
+                &command(
+                    &s,
+                    Action::Retry {
+                        expected_job: id,
+                        cleared: true
+                    }
+                ),
+                &ready
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn prepared_attempt_rejects_a_reassigned_slot() {
         let root = tempfile::tempdir().unwrap();

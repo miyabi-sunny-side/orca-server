@@ -177,10 +177,32 @@ fn isolated_notification_delivery() {
     sleep(1.1);
     assert_eq!(webhook.len(), 0);
     assert!(rows(&rig).is_empty());
+    let stopped = rig.queue()["current"]["attempt_id"].clone();
+    rig.report("FAILED");
+    rig.phase("needs_attention");
+    rig.send(
+        json!({"type":"retry","expected_job":first["id"],"cleared":true}),
+        200,
+    );
+    until(|| rig.broker.prints().len() == 2, 12);
+    let restarted = rig.queue()["current"]["attempt_id"].clone();
+    assert_ne!(restarted, stopped);
+    assert!(rows(&rig).is_empty());
+    rig.report("RUNNING");
+    rig.phase("printing");
     rig.report("FINISH");
     rig.phase("awaiting_removal");
     until(|| last(&rig)["state"] == "sent", 12);
     let sent = rows(&rig)[0].clone();
+    assert_eq!(
+        rig.db()
+            .query_row("SELECT attempt_id FROM print_notifications", [], |r| r
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+        restarted.as_str().unwrap()
+    );
     assert_eq!(sent["job_id"], first["id"]);
     assert_eq!(sent["message_id"], "1001");
     let payload = webhook.requests.lock().unwrap()[0].1.clone();

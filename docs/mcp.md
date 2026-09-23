@@ -117,10 +117,31 @@ MCPからファイル本体をアップロードする操作はありません�
 `allowed.discard`の範囲で取り外しを完了します。この操作では印刷を開始しません。両方なければ操作は不要です。
 2つの項目は省略できず、対象がない側へ明示的に`null`を送ります。成功時は`data`に更新後のキューを返します。
 
-先頭が保留なら`hold_reason`を伝え、後続へ飛ばしません。`needs_attention`は通常の継続と分け、
-[画面の復旧操作](queue.md#失敗再起動からの復旧)で本体・試行を確認します。
+先頭が保留なら`hold_reason`を伝え、後続へ飛ばしません。`needs_attention`の再印刷には以下の`queue_retry`を使います。
 FINISH、再起動、画面表示だけでは次の印刷を始めません。結果不明時は保存した引数をそのまま再送できます。
 409では状態を読み直して対象の変化を伝え、別ジョブへ自動で差し替えません。
+
+## 停止したジョブを最初から再印刷する
+
+対象の再印刷指示と、造形物を取り外して空のプレートを戻したという申告を受けたら、`queue_get`で状態を取得します。
+同じ確認を聞き直す必要はありません。`current.state`が`needs_attention`で`allowed.retry`がtrueなら、
+取得した値を次の引数へ入れて`queue_retry`を呼びます。
+
+```json
+{
+  "printer_id": "対象の実機ID",
+  "epoch": "取得したepoch",
+  "generation": 1,
+  "request_id": "取得したrequest_id",
+  "expected_job": "current.id"
+}
+```
+
+前の試行のモデル・印刷条件を使い、新しい試行として最初から準備・転送します。
+成功応答は準備の受理です。印刷開始は`queue_get`の`current.state: printing`で確認してください。
+`allowed.retry`がfalseなら`recovery.retry_reason`を伝え、本体や材料の状態を確認します。
+停止報告・画面表示だけで実行せず、通常継続の`queue_continue`で代用しません。
+結果が不明なら同じ引数を再送します。409では状態を読み直し、変わった対象へ自動で差し替えません。
 
 ## Toolと引数
 
@@ -147,8 +168,9 @@ FINISH、再起動、画面表示だけでは次の印刷を始めません。�
 | `ams_prioritize` | `printer_id`、`priority: {filament_id,order:[{id,revision}]}`。現在の同一材料グループ全件を使用順に指定。 |
 | `plate_options` | 任意の`machine`。所持機の機種/ノズル一覧と、指定機種の工程・材料・bed候補。 |
 | `plate_admission` | `printer_id`、`plate_id`。現在版の`plate_version`、`allowed`、`reason`。 |
-| `queue_get` | `printer_id`。現在ジョブ・待機先頭・可否・要求に使う識別値。 |
+| `queue_get` | `printer_id`。現在ジョブ・待機先頭・可否・復旧できない理由・要求に使う識別値。 |
 | `queue_continue` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`next_job: string or null`、`removed_job: string or null`。開始・継続または最後の取り外し完了。 |
+| `queue_retry` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`expected_job: string`。要確認ジョブを固定済み条件から新しい試行で再印刷。 |
 
 `plate_admission`は、条件の不足、実機との不一致、未同期や該当材料の未装填など、通常のキュー追加と同じ判断を返します。
 機種候補は要求profile、`printer_id`は実物を識別します。同型機が複数あるときも対象を区別してください。

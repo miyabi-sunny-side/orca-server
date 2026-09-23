@@ -29,6 +29,140 @@ fn restore_assignments(rig: &Rig) {
 }
 
 #[test]
+fn stopped_print_retries_from_the_beginning_and_can_be_discarded() {
+    let mut rig = Rig::new("stopped-retry");
+    rig.launch();
+    rig.seed();
+    let job = rig.add(3);
+    rig.next(&job, 200);
+    until(|| rig.broker.prints().len() == 1, 12);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    let original = rig.queue()["current"]["attempt_id"].clone();
+    let inputs = rig.stored(&job, "execution_json");
+    rig.report("FAILED");
+    rig.phase("needs_attention");
+    let path = format!("/api/plates/{}", id(&rig.plate));
+    let mut edited = edit(&rig.get(&path));
+    edited["models"][0]["quantity"] = json!(4);
+    rig.put(&path, &edited, 200);
+    let stopped = rig.queue();
+    assert_eq!(stopped["printer"]["ready_to_print"], false);
+    assert_eq!(
+        stopped["allowed"],
+        json!({"next":false,"retry":true,"discard":true})
+    );
+    assert!(stopped["recovery"]["retry_reason"].is_null());
+    let request = retry(&rig, &job);
+    post_queue(&rig, &request, 200);
+    until(|| rig.broker.prints().len() == 2, 12);
+    post_queue(&rig, &request, 200);
+    assert_eq!(rig.broker.prints().len(), 2);
+    let current = rig.queue();
+    assert_ne!(current["current"]["attempt_id"], original);
+    assert_eq!(current["current"]["id"], job["id"]);
+    assert_eq!(current["current"]["state"], "preparing");
+    let before: Value = serde_json::from_str(&inputs).unwrap();
+    let after: Value = serde_json::from_str(&rig.stored(&job, "execution_json")).unwrap();
+    for key in ["plate", "selection", "profiles", "filament", "ams_slot"] {
+        assert_eq!(
+            after.get(key).unwrap(),
+            before.get(key).unwrap(),
+            "frozen {key}"
+        );
+    }
+    let sent = rig.broker.prints()[1].clone();
+    assert_ne!(sent["file"], rig.broker.prints()[0]["file"]);
+    assert_eq!(sent["ams_mapping"], json!([3]));
+    rig.broker.send(&json!({"print":{"command":"project_file","sequence_id":sent["sequence_id"],"result":"success"}}));
+    rig.start_phase("accepted");
+    assert_eq!(rig.queue()["current"]["state"], "preparing");
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.report("FAILED");
+    rig.phase("needs_attention");
+    rig.send(
+        json!({"type":"discard","expected_job":job["id"],"cleared":true}),
+        200,
+    );
+    assert!(rig.queue()["current"].is_null());
+    assert_eq!(rig.broker.prints().len(), 2);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn stopped_retry_rechecks_changes_after_transfer() {
+    for change in [
+        "RUNNING",
+        "PREPARE",
+        "PAUSE",
+        "other-job",
+        "error",
+        "disconnect",
+        "material",
+        "nozzle",
+    ] {
+        let mut rig = Rig::new(&format!("stopped-transfer-{change}"));
+        rig.launch();
+        rig.seed();
+        let job = rig.add(3);
+        rig.next(&job, 200);
+        until(|| rig.broker.prints().len() == 1, 12);
+        rig.report("RUNNING");
+        rig.phase("printing");
+        rig.report("FAILED");
+        rig.phase("needs_attention");
+        rig.ftp.action(Action::Wait);
+        post_queue(&rig, &retry(&rig, &job), 200);
+        until(|| rig.ftp.received.load(Ordering::SeqCst), 10);
+        match change {
+            "disconnect" => {
+                rig.broker.action(Action::Disconnect);
+                until(|| rig.queue()["printer"]["synchronized"] == false, 10);
+            }
+            "material" => {
+                let slot = rig.slot(3);
+                rig.put(
+                    &format!("/api/printers/p1/ams/{}", id(&slot)),
+                    &json!({"revision":slot["revision"],"filament_id":null}),
+                    204,
+                );
+            }
+            _ => {
+                let mut report = rig.full.clone();
+                report["print"]["gcode_state"] = json!("FAILED");
+                report["print"]["subtask_name"] = rig.broker.prints()[0]["subtask_name"].clone();
+                report["print"]["gcode_file"] = rig.broker.prints()[0]["file"].clone();
+                let (field, value) = match change {
+                    "other-job" => ("subtask_name", json!("other-job")),
+                    "error" => ("print_error", json!(12)),
+                    "nozzle" => ("nozzle_diameter", json!("0.6")),
+                    state => ("gcode_state", json!(state)),
+                };
+                report["print"][field] = value.clone();
+                rig.broker.send(&report);
+                until(
+                    || {
+                        let status = rig.queue()["printer"].clone();
+                        match change {
+                            "other-job" => status["print"]["name"] == value,
+                            "error" => status["print"]["error"] == value,
+                            "nozzle" => status["nozzle_diameter"] == value,
+                            _ => status["print"]["state"] == value,
+                        }
+                    },
+                    10,
+                );
+            }
+        }
+        rig.ftp.release();
+        rig.start_phase("not_sent");
+        assert_eq!(rig.broker.prints().len(), 1, "{change}");
+        rig.phase("needs_attention");
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn queue_survives_crashes_without_replaying_prints() {
     let mut rig = Rig::new("queue-recovery");

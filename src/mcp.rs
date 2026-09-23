@@ -88,6 +88,16 @@ struct Continue {
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct Retry {
+    printer_id: String,
+    epoch: String,
+    generation: i64,
+    request_id: String,
+    /// `queue_get` current.id. Retry this exact `needs_attention` job from the beginning.
+    expected_job: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Assign {
     printer_id: String,
     slot_id: String,
@@ -503,7 +513,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Read one explicit printer's queue, current job, waiting head, hold reasons, allowed actions and epoch/generation/request_id. Does not start printing. Use printers to resolve the physical printer; never infer it from a machine model alone.",
+        description = "Read one explicit printer's queue, current job, waiting head, hold reasons, allowed actions, recovery.retry_reason/discard_reason and epoch/generation/request_id. Does not start printing. Use printers to resolve the physical printer; never infer it from a machine model alone.",
         annotations(read_only_hint = true)
     )]
     async fn queue_get(&self, Parameters(a): Parameters<Printer>) -> CallToolResult {
@@ -518,7 +528,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Start/continue the waiting head after the user has made the build plate empty and ready. One clear instruction such as 'removed it, continue' with an established printer/continuation context is sufficient; do not ask for the same confirmation again. Read queue_get and pass its epoch/generation/request_id, waiting[0].id as next_job, and current.id as removed_job (null for first print). When no jobs are waiting, next_job:null with removed_job closes the completed current job without starting anything. With no current or waiting job, do not call. Respect allowed.next/discard and hold reasons; never skip the head. needs_attention is recovery, not ordinary continuation: use the UI recovery actions. Never call merely because FINISH arrived, a page opened or the server restarted. On a lost response, resend exactly the same arguments. On 409, read and report the changed target; never silently substitute another job. Uses the same guarded queue API as the UI."
+        description = "Start/continue the waiting head after the user has made the build plate empty and ready. One clear instruction such as 'removed it, continue' with an established printer/continuation context is sufficient; do not ask for the same confirmation again. Read queue_get and pass its epoch/generation/request_id, waiting[0].id as next_job, and current.id as removed_job (null for first print). When no jobs are waiting, next_job:null with removed_job closes the completed current job without starting anything. With no current or waiting job, do not call. Respect allowed.next/discard and hold reasons; never skip the head. To restart a needs_attention job from the beginning, use queue_retry. Never call merely because FINISH arrived, a page opened or the server restarted. On a lost response, resend exactly the same arguments. On 409, read and report the changed target; never silently substitute another job. Uses the same guarded queue API as the UI."
     )]
     async fn queue_continue(&self, Parameters(a): Parameters<Continue>) -> CallToolResult {
         let action = match (a.next_job, a.removed_job) {
@@ -537,6 +547,23 @@ impl Tools {
         };
         answer(self.api(Method::POST, &["api", "queue"], &[("printer_id", &a.printer_id)],
             Some(json!({"epoch":a.epoch,"generation":a.generation,"request_id":a.request_id,"action":action}))).await)
+    }
+    #[tool(
+        description = "Restart the exact needs_attention job from the beginning as a new attempt, keeping its frozen models and print settings. First read queue_get and use its current.id as expected_job with the returned epoch/generation/request_id; respect allowed.retry and recovery.retry_reason. Requires the user's explicit instruction to reprint this job and confirmation that the build plate is empty and returned. Once these are established in the conversation, do not ask the same confirmation again. A stopped/FAILED report or opening the page alone is not authorization. Uses the same guarded Retry API as the Web UI, never direct SQL or a separate printer start path. On a lost response, resend exactly the same arguments. On 409, reread and report the changed target/reason; never silently substitute another job. Use queue_continue only for ordinary waiting-head continuation."
+    )]
+    async fn queue_retry(&self, Parameters(a): Parameters<Retry>) -> CallToolResult {
+        answer(
+            self.api(
+                Method::POST,
+                &["api", "queue"],
+                &[("printer_id", &a.printer_id)],
+                Some(
+                    json!({"epoch":a.epoch,"generation":a.generation,"request_id":a.request_id,
+                "action":{"type":"retry","expected_job":a.expected_job,"cleared":true}}),
+                ),
+            )
+            .await,
+        )
     }
 }
 #[tool_handler(router=self.tool_router)]

@@ -109,6 +109,9 @@ impl Attempt {
         self.phase = Phase::AwaitingConfirmation;
         self.sent_at = Some(now);
     }
+    pub(crate) fn was_sent(&self) -> bool {
+        self.sent_at.is_some()
+    }
     pub fn fail(&mut self, phase: Phase, message: &'static str) {
         self.phase = phase;
         self.message = Some(message.into());

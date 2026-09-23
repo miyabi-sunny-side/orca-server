@@ -18,7 +18,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
   };
   const report = async (name: string) => {
     await request.post(control, { data: { state: name } });
-    await expect.poll(async () => (await state()).current?.state).toBe(name === "RUNNING" ? "printing" : "awaiting_removal");
+    await expect.poll(async () => (await state()).current?.state).toBe(name === "RUNNING" ? "printing" : name === "FAILED" ? "needs_attention" : "awaiting_removal");
   };
   await page.goto('/plates/new');
   await page.getByRole('checkbox').check();
@@ -191,15 +191,16 @@ test("queue starts and continues with one action on mobile and desktop", async (
   await page.locator(".waiting-job summary").first().click();
   await page.getByRole("button", { name: `${plates[0].name}をキューから削除` }).click();
   await expect(confirm()).toHaveCount(0); await page.getByRole("button", { name: "取り外した", exact: true }).click();
-  // A transfer failure remains visible until an explicit checked retry.
+  // A transfer failure exposes one recovery action without another confirmation.
   await add(2, 3); await request.post(control, { data: { fail_upload: true } });
   await next().click();
   await expect(page.locator(".current-job summary")).toContainText("確認が必要");
   await page.locator(".current-job summary").click();
   await expect(page.getByRole("alert")).toContainText("印刷データを転送できませんでした");
   await expect(page.getByRole('link',{name:'材料の温度を設定'})).toHaveCount(0);
-  const retry = page.getByRole("button", { name: "同じプレートを再印刷" });
-  await expect(retry).toBeDisabled();
+  const retry = page.getByRole("button", { name: "取り外した・最初から再印刷", exact: true });
+  await expect(retry).toBeEnabled();
+  await expect(confirm()).toHaveCount(0);
   expect((await peer()).prints.length).toBe(6);
   await page.setViewportSize({ width: 320, height: 812 });
   for (const colorScheme of ["dark", "light"] as const) {
@@ -207,9 +208,21 @@ test("queue starts and continues with one action on mobile and desktop", async (
   }
   await page.addStyleTag({ content: ":root { --fs-xs:24px; --fs-sm:28px; --fs-md:30px; --fs-lg:32px; --fs-xl:34px; }" });
   await capture("failed-320-text-200");
-  await confirm().check(); await retry.click();
+  await retry.click();
   await expect.poll(async () => (await peer()).prints.length).toBe(7);
-  await report("RUNNING"); await report("FINISH");
+  await report("RUNNING");
+  const stoppedAttempt = (await state()).current!.attempt_id;
+  await report("FAILED");
+  await page.reload();
+  await expect(page.locator('.current-job')).not.toHaveAttribute('open');
+  await expect(retry).toBeEnabled();
+  await capture('stopped-retry');
+  await retry.focus(); await page.keyboard.press('Enter');
+  await expect.poll(async () => (await peer()).prints.length).toBe(8);
+  expect((await state()).current!.attempt_id).not.toBe(stoppedAttempt);
+  await report("RUNNING");
+  await expect(page.getByLabel("現在の印刷")).toContainText("印刷中");
+  await report("FINISH");
   await expect(page.getByRole("button", { name: "取り外した", exact: true })).toBeVisible();
   await expect(confirm()).toHaveCount(0);
   await page.getByRole("button", { name: "取り外した", exact: true }).focus();

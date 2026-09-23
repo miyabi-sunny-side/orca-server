@@ -51,6 +51,7 @@ export type QueueState = {
   generation: number;
   request_id: string;
   allowed: { next: boolean; retry: boolean; discard: boolean };
+  recovery?: { retry_reason: string | null; discard_reason: string | null };
   waiting: Job[];
   current: Job | null;
   printer: Printer;
@@ -111,6 +112,18 @@ export const phaseText = {
   needs_attention: "確認が必要です",
 };
 export const failureText: Record<string, string> = {
+  "Wait for a fresh synchronized printer report":
+    "本体の最新状態を取得するまでお待ちください。",
+  "Clear the printer error before recovery":
+    "本体のエラーを解消してから再操作してください。",
+  "Printer is still printing or preparing":
+    "本体は印刷・準備中です。停止を確認してください。",
+  "Printer is paused; stop the print before recovery":
+    "本体は一時停止中です。印刷を停止してから再操作してください。",
+  "Stopped print is not confirmed by the current report":
+    "本体の停止を確認できません。印刷状況を確認してください。",
+  "Printer report does not match the recovery target":
+    "本体のジョブが変わっています。印刷状況を確認してください。",
   "No confirmed AMS slot contains the support interface material":
     "接触面用のフィラメントをAMSに装填し、材料を割り当ててください。",
   "No confirmed AMS slot contains the selected material":

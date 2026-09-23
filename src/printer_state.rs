@@ -99,6 +99,50 @@ pub struct Status {
     pub auto_refill: AutoRefill,
 }
 
+impl Status {
+    pub(crate) fn matches_attempt(&self, id: &str) -> bool {
+        let name = self.print.name.as_deref().filter(|s| !s.is_empty());
+        let file = self.print.file.as_deref().filter(|s| !s.is_empty());
+        (name.is_some() || file.is_some())
+            && name.is_none_or(|s| s == format!("orca-{id}"))
+            && file.is_none_or(|s| s == format!("orca-{id}.gcode.3mf"))
+    }
+
+    pub(crate) fn check_stopped(&self, id: &str) -> crate::plates::Result<()> {
+        use crate::plates::Error;
+        if self.connection != "connected" || !self.synchronized {
+            return Err(Error::Conflict(
+                "Wait for a fresh synchronized printer report",
+            ));
+        }
+        if self.print.error != Some(0) {
+            return Err(Error::Conflict("Clear the printer error before recovery"));
+        }
+        match self.print.state.as_deref() {
+            Some("FAILED") => {}
+            Some("RUNNING" | "PREPARE") => {
+                return Err(Error::Conflict("Printer is still printing or preparing"));
+            }
+            Some("PAUSE") => {
+                return Err(Error::Conflict(
+                    "Printer is paused; stop the print before recovery",
+                ));
+            }
+            _ => {
+                return Err(Error::Conflict(
+                    "Stopped print is not confirmed by the current report",
+                ));
+            }
+        }
+        if !self.matches_attempt(id) {
+            return Err(Error::Conflict(
+                "Printer report does not match the recovery target",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub struct State {
     nozzle_diameter: Option<String>,
     nozzle_material: Option<String>,
