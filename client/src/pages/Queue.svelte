@@ -73,9 +73,17 @@
         {filaments}
       />{/each}
   {/if}
+  <a class="history-link" href="/history">プリント履歴</a>
 </section>
 
 <style lang="sass">
+  .history-link
+    display: flex
+    align-items: center
+    min-height: 44px
+    width: fit-content
+    margin-top: var(--sp-3)
+    font-size: var(--fs-sm)
   .sr-only
     position: absolute
     width: 1px

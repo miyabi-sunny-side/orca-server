@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { tick, onDestroy } from "svelte";
+  import { tick } from "svelte";
   import { request, type Plate } from "../lib/api";
+  import { contextMenu } from "../lib/context-menu";
   import Modal from "../lib/Modal.svelte";
   import PlateQueueAdd from "../lib/PlateQueueAdd.svelte";
   let query = $state("");
@@ -24,18 +25,8 @@
     duplicating = $state(false);
   let duplicateButton = $state<HTMLButtonElement>(),
     nameInput = $state<HTMLInputElement>();
-  let press: ReturnType<typeof setTimeout> | undefined,
-    point = { x: 0, y: 0 },
-    longPressed = false;
-  function cancelPress() {
-    clearTimeout(press);
-    press = undefined;
-  }
-  onDestroy(cancelPress);
-  function openMenu(event: Event, plate: Plate) {
-    event.preventDefault();
-    cancelPress();
-    menuRow = event.currentTarget as HTMLAnchorElement;
+  function openMenu(row: HTMLElement, plate: Plate) {
+    menuRow = row as HTMLAnchorElement;
     menuPlate = plate;
     menuError = "";
     queueBusy = false;
@@ -52,22 +43,6 @@
       ? menuRow
       : (list?.querySelector("a") ?? search)
     )?.focus();
-  }
-  function startPress(event: PointerEvent, plate: Plate) {
-    cancelPress();
-    longPressed = false;
-    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
-    point = { x: event.clientX, y: event.clientY };
-    const row = event.currentTarget as HTMLAnchorElement;
-    press = setTimeout(() => {
-      longPressed = true;
-      menuRow = row;
-      menuPlate = plate;
-      menuError = "";
-      queueBusy = false;
-      confirmDelete = false;
-      confirmDuplicate = false;
-    }, 500);
   }
   async function askToDelete() {
     if (!menuPlate || queueBusy || deleting) return;
@@ -234,31 +209,9 @@
             class="plate-row"
             aria-haspopup="dialog"
             href={`/plates/${plate.id}`}
-            oncontextmenu={(event) => openMenu(event, plate)}
+            use:contextMenu={(row) => openMenu(row, plate)}
             onkeydown={(event) => {
-              if (
-                event.key === "ContextMenu" ||
-                (event.shiftKey && event.key === "F10")
-              )
-                openMenu(event, plate);
-              else move(event);
-            }}
-            onpointerdown={(event) => startPress(event, plate)}
-            onpointermove={(event) => {
-              if (
-                Math.hypot(event.clientX - point.x, event.clientY - point.y) >
-                10
-              )
-                cancelPress();
-            }}
-            onpointerup={cancelPress}
-            onpointercancel={cancelPress}
-            onpointerleave={cancelPress}
-            onclick={(event) => {
-              if (longPressed) {
-                event.preventDefault();
-                longPressed = false;
-              }
+              if (!event.defaultPrevented) move(event);
             }}
           >
             <strong>{plate.name}</strong>

@@ -61,6 +61,8 @@ test('touch scroll starts on the card, drag is confined to the handle',async({br
   await expect.poll(()=>page.evaluate(()=>scrollY)).toBeGreaterThan(60);
   await expect(page.locator('.dragging')).toHaveCount(0);expect(commands).toHaveLength(0);
   await page.evaluate(()=>scrollTo(0,0));
+  // Wait for native touch scrolling to settle before measuring the next gesture.
+  await page.locator('.drag-handle').first().scrollIntoViewIfNeeded();
   const handle=(await page.locator('.drag-handle').first().boundingBox())!,target=(await page.locator('.waiting-job').nth(2).boundingBox())!,id=q.waiting[0].id;
   await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:handle.x+20,y:handle.y+20}]});
   await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:handle.x+20,y:target.y+target.height-6}]});

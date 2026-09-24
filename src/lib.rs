@@ -4,6 +4,7 @@ mod database;
 mod estimates;
 mod filament;
 mod file_import;
+mod history;
 mod mcp;
 mod model_import;
 pub mod notifications;
@@ -47,6 +48,7 @@ pub fn app_with_slicer(
     app()
         .merge(plate_api::router(store.clone()))
         .merge(file_import::router(store.clone()))
+        .merge(history::router(store.clone()))
         .merge(scad::router(store, source))
         .merge(slicer::router(slicer))
         .layer(axum::middleware::from_fn(plate_api::same_origin))

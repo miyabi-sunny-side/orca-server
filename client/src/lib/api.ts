@@ -119,6 +119,12 @@ export async function request<T>(
   }
   if (response.status === 413)
     throw new ApiError(413, "ファイルの合計を64 MiB以内にしてください。");
+  if (path.split("?")[0] === "/api/history") {
+    throw new ApiError(
+      response.status,
+      "履歴を取得できませんでした。時間を置いて再試行してください。",
+    );
+  }
   if (path.split("?")[0] === "/api/queue") {
     const message =
       response.status === 409
@@ -186,7 +192,8 @@ export async function request<T>(
         : "スライサーを利用できません。サーバーのOrcaSlicer設定を確認してください。",
     504: "処理が時間の上限に達しました。モデルを減らすか、時間設定を確認して再試行してください。",
   };
-  throw new Error(
+  throw new ApiError(
+    response.status,
     messages[response.status] ??
       "処理に失敗しました。時間を置いて再試行してください。",
   );

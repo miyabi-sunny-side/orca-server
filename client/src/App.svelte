@@ -3,6 +3,7 @@
   import Filaments from "./pages/Filaments.svelte";
   import Ams from "./pages/Ams.svelte";
   import Printers from "./pages/Printers.svelte";
+  import History from "./pages/History.svelte";
   import Queue from "./pages/Queue.svelte";
   import About from "./pages/About.svelte";
   import Home from "./pages/Home.svelte";
@@ -20,6 +21,7 @@
     />
   {:else if path === "/printers" || path.startsWith("/printers/")}<Printers />
   {:else if path === "/" || path === "/queue"}<Queue />
+  {:else if path === "/history"}<History />
   {:else if path === "/about"}<About />
   {:else if path === "/plates/new"}<NewPlate />
   {:else if id}<PlateDetail {id} />

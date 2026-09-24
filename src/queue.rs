@@ -1333,6 +1333,14 @@ impl Database {
         tx.execute("UPDATE print_jobs SET state=?1,attempt_json=?2,last_error=?3 WHERE id=?4 AND attempt_id=?5",params![state,raw,attempt.message,attempt.job_id,attempt.id])?;
         if state == "awaiting_removal"
             && previous != state
+            && let Some(completed_at) = attempt.completed_at
+        {
+            let completed_at = i64::try_from(completed_at)
+                .map_err(|_| Error::Invalid("Invalid completion time"))?;
+            tx.execute("INSERT INTO print_history(attempt_id,job_id,plate_id,printer_id,name,completed_at) SELECT ?1,id,plate_id,printer_id,name,?3 FROM print_jobs WHERE id=?2 AND attempt_id=?1 ON CONFLICT(attempt_id) DO NOTHING", params![attempt.id,attempt.job_id,completed_at])?;
+        }
+        if state == "awaiting_removal"
+            && previous != state
             && self
                 .notifications_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -2240,6 +2248,120 @@ mod tests {
         );
     }
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Observe atomic failure, recovery and cleanup in the same store.
+    async fn history_commits_with_finish_without_notifications_and_survives_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let id = add(&s);
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Next {
+                        expected_job: id,
+                        removed_job: None,
+                        cleared: true,
+                    },
+                ),
+                &status(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut a = Attempt::new(prep.job.plate_id.clone(), prep.job.id, 0, "PLA".into());
+        a.id = prep.job.attempt_id.unwrap();
+        for phase in [Phase::Accepted, Phase::Printing, Phase::Unknown] {
+            a.phase = phase;
+            s.store.db.persist_attempt("one", &a).unwrap();
+            assert_eq!(
+                s.store
+                    .db
+                    .connection()
+                    .unwrap()
+                    .query_row("SELECT count(*) FROM print_history", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        a.phase = Phase::Printing;
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.store.db.connection().unwrap().execute_batch("UPDATE plates SET name='Renamed' WHERE name='parts'; CREATE TRIGGER reject_history BEFORE INSERT ON print_history BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        a.phase = Phase::Finished;
+        a.completed_at = Some(123);
+        assert!(s.store.db.persist_attempt("one", &a).is_err());
+        assert_eq!(
+            jobs(&s.store.db.connection().unwrap(), "one").unwrap()[0].state,
+            "printing"
+        );
+        s.store
+            .db
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_history;")
+            .unwrap();
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.store.db.persist_attempt("one", &a).unwrap();
+        a.message = Some("repeated status".into());
+        a.completed_at = Some(456);
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.mutate(
+            &command(
+                &s,
+                Action::Discard {
+                    expected_job: a.job_id.clone(),
+                    cleared: true,
+                },
+            ),
+            &status(),
+        )
+        .unwrap();
+        s.cleanup().unwrap();
+        assert!(
+            jobs(&s.store.db.connection().unwrap(), "one")
+                .unwrap()
+                .is_empty()
+        );
+        drop(s);
+        let store = Store::open(root.path().join("data")).unwrap();
+        let c = store.db.connection().unwrap();
+        let rows = c
+            .prepare(
+                "SELECT attempt_id,job_id,plate_id,printer_id,name,completed_at FROM print_history",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                a.id,
+                a.job_id,
+                prep.job.plate_id,
+                "one".into(),
+                "parts".into(),
+                123
+            )]
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM print_notifications", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn completion_intent_commits_with_finish_and_survives_job_removal() {
         let root = tempfile::tempdir().unwrap();
         let s = service(root.path(), "one").await;
@@ -2349,13 +2471,33 @@ mod tests {
         a.id = prep.job.attempt_id.unwrap();
         a.phase = Phase::Finished;
         s.store.db.persist_attempt("one", &a).unwrap();
+        // A real v15 finished attempt has no completion timestamp. Migration must
+        // not turn notification scheduling or migration time into print history.
         s.store
+            .db
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TABLE print_history; PRAGMA user_version=15;")
+            .unwrap();
+        let store = Store::open(root.path().join("data")).unwrap();
+        store
             .db
             .notifications_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let mut restored = s.store.db.restore_attempt("one").unwrap().unwrap();
+        let mut restored = store.db.restore_attempt("one").unwrap().unwrap();
+        assert!(restored.completed_at.is_none());
+        assert_eq!(
+            store
+                .db
+                .connection()
+                .unwrap()
+                .query_row("SELECT count(*) FROM print_history", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         restored.message = Some("old finished report".into());
-        s.store.db.persist_attempt("one", &restored).unwrap();
+        store.db.persist_attempt("one", &restored).unwrap();
         assert_eq!(
             s.store
                 .db

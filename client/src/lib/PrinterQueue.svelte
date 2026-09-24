@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { contextMenu } from "./context-menu";
   import { onMount, tick } from "svelte";
   import {
     ApiError,
@@ -58,14 +59,7 @@
       : undefined,
   );
   const reasons = $derived(menuReasons(menuJob ?? undefined, queue?.admission));
-  let press: ReturnType<typeof setTimeout> | undefined;
-  let point = { x: 0, y: 0 },
-    longPressed = false;
-  function cancelPress() {
-    clearTimeout(press);
-  }
   function showMenu(job: Job, row: HTMLElement) {
-    cancelPress();
     drag = undefined;
     menuRow = row;
     menu = {
@@ -91,23 +85,6 @@
       ? menuRow
       : (rows?.[Math.min(Math.max(index, 0), rows.length - 1)] ?? settingsLink)
     )?.focus();
-  }
-  function startPress(event: PointerEvent, job: Job) {
-    cancelPress();
-    longPressed = false;
-    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
-    point = { x: event.clientX, y: event.clientY };
-    const row = event.currentTarget as HTMLElement;
-    press = setTimeout(() => {
-      longPressed = true;
-      if (event.pointerType === "touch") {
-        row.addEventListener("touchend", (e) => e.preventDefault(), {
-          once: true,
-          passive: false,
-        });
-      }
-      showMenu(job, row);
-    }, 500);
   }
   function menuKey(event: KeyboardEvent, job: Job) {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))
@@ -179,7 +156,6 @@
     }, 2000);
     return () => {
       clearInterval(timer);
-      cancelPress();
       controller.abort();
     };
   });
@@ -371,22 +347,7 @@
   <summary
     class="job-summary"
     aria-haspopup="dialog"
-    oncontextmenu={(e) => openMenu(e, job)}
-    onkeydown={(e) => menuKey(e, job)}
-    onpointerdown={(e) => startPress(e, job)}
-    onpointermove={(e) => {
-      if (Math.hypot(e.clientX - point.x, e.clientY - point.y) > 10)
-        cancelPress();
-    }}
-    onpointerup={cancelPress}
-    onpointercancel={cancelPress}
-    onpointerleave={cancelPress}
-    onclick={(e) => {
-      if (longPressed) {
-        e.preventDefault();
-        longPressed = false;
-      }
-    }}
+    use:contextMenu={(row) => showMenu(job, row)}
   >
     <span class="job-lines"
       ><strong>{job.name}</strong><span class="caption"

@@ -162,3 +162,84 @@ fn queue_context_menu() {
                 && job["artifact_path"].is_null())
     );
 }
+
+#[test]
+#[ignore = "requires Chromium and official Orca 2.4.2"]
+fn print_history() {
+    let mut rig = Rig::with_options("history-live", "v3", Some(&appdir()));
+    rig.full["print"]["ams"]["tray_exist_bits"] = json!("b");
+    rig.full["print"]["ams"]["ams"][0]["tray"][1] = merge(
+        &rig.full["print"]["ams"]["ams"][0]["tray"][1],
+        &json!({"tray_type":"PETG","tray_color":"FFFFFFFF"}),
+    );
+    rig.launch();
+    rig.seed();
+    let original = rig.add(3);
+    rig.next(&original, 200);
+    until(|| rig.broker.prints().len() == 1, 60);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.report("FINISH");
+    rig.phase("awaiting_removal");
+    let history = rig.get("/api/history");
+    rig.send(
+        json!({"type":"discard","expected_job":original["id"],"cleared":true}),
+        200,
+    );
+    rig.idle();
+    let other = rig.post("/api/filaments", &json!({"name":"History support PETG","vendor":"Fixture","material":"PETG","color":"FFFFFFFF"}),201);
+    rig.post(&format!("/api/filaments/{}/settings",id(&other)), &json!({"machine_profile_key":MACHINE,"base_profile_key":"Generic PETG","overrides_json":{}}),201);
+    rig.materials.push(other);
+    rig.map_material(1, 2);
+    rig.files.lock().unwrap().insert(
+        "parts/roles.3mf".into(),
+        fixture("material-roles-support.3mf"),
+    );
+    let path = format!("/api/plates/{}", id(&rig.plate));
+    let mut changed = edit(&rig.get(&path));
+    changed["name"] = json!("Current roles and quantity");
+    changed["models"] = json!([{"name":"roles.3mf","source":"parts/roles.3mf","quantity":3}]);
+    changed["conditions"] = merge(
+        &changed["conditions"],
+        &json!({"filament_id":rig.materials[0]["id"],"secondary_filament_id":rig.materials[1]["id"],"support_enabled":true,"support_interface_filament_id":rig.materials[2]["id"]}),
+    );
+    rig.plate = rig.put(&path, &changed, 200);
+    // A pre-existing waiting item must stay before both independent history additions.
+    rig.send(
+        json!({"type":"add","plate_id":rig.plate["id"],"plate_version":rig.plate["version"]}),
+        200,
+    );
+    let control = rig.control();
+    rig.browser(
+        "E2E_HISTORY_CONTEXT",
+        &json!({"plate":rig.plate,"history":history}),
+        Some(&control),
+    );
+    let queue = rig.queue();
+    assert!(queue["current"].is_null());
+    assert_eq!(array(&queue["waiting"]).len(), 3);
+    for job in array(&queue["waiting"]) {
+        assert_eq!(job["state"], "queued");
+        assert!(job["attempt_id"].is_null() && job["artifact_path"].is_null());
+        let estimate = rig.estimated(job);
+        assert_eq!(estimate["input"]["plate"]["models"][0]["quantity"], 3);
+        assert_eq!(
+            estimate["input"]["plate"]["models"][0]["source"],
+            "parts/roles.3mf"
+        );
+        for key in [
+            "filament_id",
+            "secondary_filament_id",
+            "support_interface_filament_id",
+        ] {
+            assert_eq!(
+                estimate["input"]["plate"]["conditions"][key],
+                rig.plate["conditions"][key]
+            );
+        }
+    }
+    assert_eq!(rig.get("/api/history"), history);
+    assert_eq!(rig.get(&path)["models"], rig.plate["models"]);
+    assert_eq!(rig.broker.prints().len(), 1);
+    assert_eq!(rig.ftp.uploads().len(), 1);
+}

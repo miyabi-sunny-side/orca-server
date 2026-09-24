@@ -130,3 +130,20 @@ it("plate material search failures describe material storage, not slicing", asyn
     message: expect.stringContaining("材料の保存先"),
   });
 });
+
+it("history read failures identify history storage and missing plates retain status", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
+      .mockResolvedValueOnce(new Response("missing", { status: 404 })),
+  );
+  await expect(request("/api/history?before=123:4")).rejects.toMatchObject({
+    status: 503,
+    message: expect.stringContaining("履歴"),
+  });
+  await expect(request("/api/plates/removed")).rejects.toMatchObject({
+    status: 404,
+  });
+});

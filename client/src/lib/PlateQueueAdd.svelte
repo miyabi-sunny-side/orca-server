@@ -7,14 +7,16 @@
     plate = $bindable(),
     paused = false,
     label = "印刷キューへ",
+    preferredPrinter = "",
     onbusy,
     onadded,
   }: {
     plate: Plate;
     paused?: boolean;
     label?: string;
+    preferredPrinter?: string;
     onbusy?: (blocked: boolean) => void;
-    onadded?: () => void;
+    onadded?: (printerId: string) => void;
   } = $props();
   const id = $derived(plate.id);
   let printers = $state<Printer[]>([]),
@@ -162,7 +164,7 @@
       savePending();
       queue = undefined;
       notice = "キューに追加しました";
-      onadded?.();
+      onadded?.(printerId);
     } catch (e) {
       if (controller.signal.aborted) return;
       error = (e as Error).message;
@@ -180,7 +182,7 @@
   }
   onMount(() => {
     try {
-      printerId = localStorage.getItem(printerKey) ?? "";
+      printerId = preferredPrinter || localStorage.getItem(printerKey) || "";
       const saved = JSON.parse(sessionStorage.getItem(pendingKey) ?? "null");
       if (
         saved?.command?.action?.type === "add" &&

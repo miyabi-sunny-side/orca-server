@@ -38,6 +38,9 @@ pub struct Attempt {
     pub interface: Option<MaterialSlot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary: Option<MaterialSlot>,
+    /// UTC seconds at the first matching FINISH observation, absent on old attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
     sequence: String,
     sent_at: Option<u64>,
     observed_printing: bool,
@@ -73,6 +76,7 @@ impl Attempt {
             material,
             interface: None,
             secondary: None,
+            completed_at: None,
             sequence: (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string(),
             sent_at: None,
             observed_printing: false,
@@ -200,7 +204,10 @@ impl Attempt {
                 self.message = None;
             }
             Some("PREPARE") if self.phase != Phase::Printing => self.phase = Phase::Accepted,
-            Some("FINISH") if self.observed_printing => self.phase = Phase::Finished,
+            Some("FINISH") if self.observed_printing => {
+                self.phase = Phase::Finished;
+                self.completed_at = status.updated_at;
+            }
             Some("FAILED" | "PAUSE") => {
                 self.fail(Phase::Unknown, "Print stopped; inspect the printer");
             }
@@ -447,6 +454,44 @@ mod tests {
         a.observe(&json!({"print":{"command":"push_status"}}), &status);
         assert_eq!(a.phase, Phase::Finished);
         assert!(!a.blocks_start());
+    }
+
+    #[test]
+    fn completion_time_is_the_first_matching_finish_observation() {
+        let mut status = ready();
+        let mut attempt = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        attempt.sent(10);
+        status.print.name = Some(attempt.name());
+        status.print.state = Some("FINISH".into());
+        status.updated_at = Some(20);
+        let report = json!({"print":{"command":"push_status"}});
+        attempt.observe(&report, &status);
+        assert!(
+            json!(attempt)["completed_at"].is_null(),
+            "FINISH without real printing is not completion"
+        );
+        status.print.state = Some("RUNNING".into());
+        attempt.observe(&report, &status);
+        status.print.state = Some("FINISH".into());
+        status.updated_at = Some(30);
+        attempt.observe(&report, &status);
+        assert_eq!(json!(attempt)["completed_at"], 30);
+        let mut restored: Attempt = serde_json::from_value(json!(attempt)).unwrap();
+        status.updated_at = Some(90);
+        restored.observe(&report, &status);
+        assert_eq!(
+            json!(restored)["completed_at"],
+            30,
+            "repeated finish after restart must keep the first time"
+        );
+        let mut old = json!(restored);
+        old.as_object_mut().unwrap().remove("completed_at");
+        let mut legacy: Attempt = serde_json::from_value(old).unwrap();
+        legacy.observe(&report, &status);
+        assert!(
+            json!(legacy)["completed_at"].is_null(),
+            "old finished attempts have no known completion time"
+        );
     }
 
     #[test]
