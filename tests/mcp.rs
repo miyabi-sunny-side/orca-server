@@ -849,3 +849,37 @@ fn support_plate_conditions() {
     });
     assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
 }
+
+#[test]
+fn named_role_plate_conditions_round_trip_and_reject_unknown_assignments() {
+    let mut rig = common::Rig::new("mcp-roles");
+    rig.launch();
+    rig.seed();
+    rig.files
+        .lock()
+        .unwrap()
+        .insert("role.3mf".into(), common::fixture("material-roles.3mf"));
+    let base = rig.base.clone();
+    let primary = rig.materials[0]["id"].clone();
+    let secondary = rig.materials[1]["id"].clone();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = ().serve(StreamableHttpClientTransport::from_uri(format!("{base}/mcp"))).await.unwrap();
+        let mut plate = call(&client,"plate_save",json!({"plate":{"name":"MCP roles","models":[{"name":"role.3mf","source":"role.3mf","quantity":2}],"conditions":{"filament_id":primary,"secondary_filament_id":secondary}}}),false).await["data"].clone();
+        let id = plate["id"].as_str().unwrap().to_owned();
+        for secondary in [Value::Null,primary,secondary] {
+            let mut edit = common::edit(&plate);
+            edit["conditions"]["secondary_filament_id"] = secondary.clone();
+            plate = call(&client,"plate_save",json!({"id":id,"plate":edit}),false).await["data"].clone();
+            assert_eq!(plate["conditions"]["secondary_filament_id"],secondary);
+            assert_eq!(plate["models"][0]["roles"],json!(["primary","secondary"]));
+            assert_eq!(call(&client,"plate_get",json!({"id":id}),false).await["data"],plate);
+            assert_eq!(read(&base,&format!("/api/plates/{id}")).await,plate);
+        }
+        let mut bad = common::edit(&plate);
+        bad["conditions"]["secondary_filament_id"] = json!("missing");
+        call(&client,"plate_save",json!({"id":id,"plate":bad}),true).await;
+        assert_eq!(read(&base,&format!("/api/plates/{id}")).await,plate);
+        client.cancel().await.unwrap();
+    });
+    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+}

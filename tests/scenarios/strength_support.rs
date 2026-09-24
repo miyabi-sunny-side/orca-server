@@ -181,7 +181,7 @@ pub fn strength_settings(browser: bool) {
                 .unwrap();
         }
     }
-    db.execute_batch("ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; DROP TABLE plate_imports; PRAGMA user_version=9;").unwrap();
+    db.execute_batch("ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; DROP TABLE plate_imports; PRAGMA user_version=9;").unwrap();
     drop(db);
     rig.launch();
     rig.report("RUNNING");
@@ -251,7 +251,7 @@ pub fn legacy_support() {
         [execution.to_string(), id(&job).to_owned()],
     )
     .unwrap();
-    db.execute_batch("DROP TABLE plate_imports; PRAGMA user_version=12;")
+    db.execute_batch("ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; PRAGMA user_version=12;")
         .unwrap();
     drop(db);
     rig.launch();
@@ -266,7 +266,7 @@ pub fn legacy_support() {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        14
+        15
     );
     rig.send(
         json!({"type":"retry","expected_job":job["id"],"cleared":true}),

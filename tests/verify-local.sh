@@ -31,6 +31,7 @@ cargo test --locked
 cargo build --locked --release
 bash tests/embedded_ui.sh "${CARGO_TARGET_DIR:-target}/release/orca-server"
 cargo test --locked --test official_cli -- --ignored
+ORCA_ROLE_UI=1 cargo test --locked --test material_roles -- --ignored --nocapture
 cargo test --locked --test registry_flows independent_printers -- --ignored
 cargo test --locked --test browser -- --ignored --test-threads=1 --nocapture
 docker build -t "$image" .

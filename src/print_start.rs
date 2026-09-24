@@ -36,6 +36,8 @@ pub struct Attempt {
     pub material: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<MaterialSlot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<MaterialSlot>,
     sequence: String,
     sent_at: Option<u64>,
     observed_printing: bool,
@@ -70,6 +72,7 @@ impl Attempt {
             message: None,
             material,
             interface: None,
+            secondary: None,
             sequence: (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string(),
             sent_at: None,
             observed_printing: false,
@@ -83,6 +86,7 @@ impl Attempt {
     }
     pub fn command(&self) -> Value {
         let mapping: Vec<_> = std::iter::once(self.ams_slot)
+            .chain(self.secondary.iter().map(|i| i.ams_slot))
             .chain(self.interface.iter().map(|i| i.ams_slot))
             .collect();
         json!({"print":{
@@ -341,9 +345,6 @@ fn check_used_materials(xml: &str, profiles: &[serde_json::Map<String, Value>]) 
         } else if profiles.len() > 1 {
             return Err(invalid());
         }
-        if index == 2 && filament.attribute("used_for_object") == Some("true") {
-            return Err(invalid());
-        }
     }
     if !used.contains(&1) {
         return Err(invalid());
@@ -400,6 +401,20 @@ mod tests {
         raw.as_object_mut().unwrap().remove("interface");
         let old: Attempt = serde_json::from_value(raw).unwrap();
         assert_eq!(old.command()["print"]["ams_mapping"], json!([3]));
+    }
+
+    #[test]
+    fn role_and_interface_slots_preserve_three_material_order() {
+        let mut attempt = Attempt::new("plate".into(), "job".into(), 3, "PLA".into());
+        attempt.secondary = Some(MaterialSlot {
+            ams_slot: 0,
+            material: "PLA".into(),
+        });
+        attempt.interface = Some(MaterialSlot {
+            ams_slot: 2,
+            material: "PETG".into(),
+        });
+        assert_eq!(attempt.command()["print"]["ams_mapping"], json!([3, 0, 2]));
     }
 
     #[test]

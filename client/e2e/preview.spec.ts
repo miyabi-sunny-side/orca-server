@@ -95,6 +95,7 @@ test('sticky search retains selected models across scrolling, filtering and savi
   await page.route('**/api/**',route=>{
     const url=new URL(route.request().url());
     if(url.pathname==='/api/default-settings')return route.fulfill({json:emptyDefaults});
+    if(url.pathname==='/api/scad/model-info')return route.fulfill({json:{roles:['primary']}});
     if(url.pathname==='/api/scad/models')return route.fulfill({json:names.filter(n=>n.includes(url.searchParams.get('q')??''))});
     if(url.pathname==='/api/plates/import'){saved=route.request().postDataJSON();return route.fulfill({status:201,json:{...plate,...saved}});}
     if(url.pathname===`/api/plates/${id}`)return route.fulfill({json:{...plate,...saved}});

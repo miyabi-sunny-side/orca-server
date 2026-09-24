@@ -52,13 +52,13 @@ pub fn compact_queue(browser: bool) {
         .map(|j| j["id"].clone())
         .collect();
     rig.stop(false);
-    rig.db().execute_batch("DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;").unwrap();
+    rig.db().execute_batch("ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;").unwrap();
     rig.launch();
     rig.idle();
     ready(&rig);
     assert_eq!(
         rig.rows("PRAGMA user_version", &[]),
-        vec![vec![rusqlite::types::Value::Integer(14)]]
+        vec![vec![rusqlite::types::Value::Integer(15)]]
     );
     assert_eq!(
         rig.rows("SELECT * FROM plate_items ORDER BY id", &[]),

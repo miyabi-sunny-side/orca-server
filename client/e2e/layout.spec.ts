@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test.beforeEach(async ({page})=>{await page.route("**/api/printers",route=>route.fulfill({json:[]})); await page.route("**/api/filaments",route=>route.fulfill({json:[]})); await page.route("**/api/default-settings*",route=>route.fulfill({json:{"default_printer_id":null,"conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null},"reason":"printer"}}));});
+test.beforeEach(async ({page})=>{await page.route("**/api/scad/model-info?*",route=>route.fulfill({json:{roles:["primary"]}}));await page.route("**/api/printers",route=>route.fulfill({json:[]})); await page.route("**/api/filaments",route=>route.fulfill({json:[]})); await page.route("**/api/default-settings*",route=>route.fulfill({json:{"default_printer_id":null,"conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null},"reason":"printer"}}));});
 
 const plates = Array.from({ length: 100 }, (_, i) => ({
   id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,

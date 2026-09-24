@@ -8,6 +8,7 @@ test('late defaults preserve deliberate selections and clearing, without repeate
   await page.route('**/api/**',async route=>{
     const path=new URL(route.request().url()).pathname;
     if(path==='/api/default-settings'){reads++;await gate;return route.fulfill({json:defaults});}
+    if(path==='/api/scad/model-info')return route.fulfill({json:{roles:['primary']}});
     if(path==='/api/scad/models')return route.fulfill({json:['cube.stl']});
     if(path==='/api/printers')return route.fulfill({json:[{id:'p1',machine_profile_key:machine}]});
     if(path==='/api/plate-filaments') {const id=new URL(route.request().url()).searchParams.get('selected_id');return route.fulfill({json:{filaments,selected:filaments.find(f=>f.id===id)??null,selected_state:id?'loaded':'unset',loaded_ids:filaments.map(f=>f.id),printers:[{id:'p1',name:'P1',state:'current',unassigned:false}]}});}

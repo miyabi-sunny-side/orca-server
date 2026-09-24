@@ -113,7 +113,20 @@ pub fn validate(
     }
     crate::support::check_materials(&settings, filaments)?;
     if sliced {
-        check_slice(&read("Metadata/slice_info.config")?, models)?;
+        let info = read("Metadata/slice_info.config")?;
+        check_slice(&info, models)?;
+        let directory = path
+            .parent()
+            .ok_or(Error::Invalid("Missing execution directory"))?;
+        if directory.join("assemblies.json").is_file() {
+            // Model bindings precede the independent, possibly unused support interface binding.
+            let required = if directory.join("secondary.json").is_file() {
+                BTreeSet::from([1, 2])
+            } else {
+                BTreeSet::from([1])
+            };
+            check_object_materials(&info, &required)?;
+        }
         crate::print_start::materials_for(&std::fs::read(path)?, &selection.machine, filaments)?;
         let mut gcode = archive
             .by_name("Metadata/plate_1.gcode")
@@ -124,6 +137,25 @@ pub fn validate(
             .map_err(|_| Error::Upstream("Empty print G-code"))?;
     }
     Ok(())
+}
+
+fn check_object_materials(xml: &str, required: &BTreeSet<usize>) -> Result<()> {
+    let invalid = || {
+        Error::Invalid(
+            "割り当てたモデル材料がスライス結果に使われていません。形状と役割を確認してください。",
+        )
+    };
+    let doc = Document::parse(xml).map_err(|_| invalid())?;
+    let used: BTreeSet<usize> = doc
+        .descendants()
+        .filter(|n| n.has_tag_name("filament") && n.attribute("used_for_object") == Some("true"))
+        .filter_map(|n| n.attribute("id").and_then(|id| id.parse().ok()))
+        .collect();
+    if required.is_subset(&used) {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
 }
 
 fn prediction(xml: &str) -> Result<u64> {
@@ -169,6 +201,24 @@ pub(crate) fn estimated_seconds(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_assigned_model_material_must_be_used_for_objects() {
+        let both = r#"<config><plate><filament id="1" used_for_object="true"/><filament id="2" used_for_object="true"/><filament id="3" used_for_support="true"/></plate></config>"#;
+        assert!(check_object_materials(both, &BTreeSet::from([1, 2])).is_ok());
+        assert!(check_object_materials(both, &BTreeSet::from([1])).is_ok());
+        assert!(check_object_materials(both, &BTreeSet::from([1, 3])).is_err());
+        assert!(
+            check_object_materials(
+                &both.replace(
+                    r#"id="2" used_for_object="true""#,
+                    r#"id="2" used_for_object="false""#
+                ),
+                &BTreeSet::from([1, 2])
+            )
+            .is_err()
+        );
+    }
 
     const LAYOUT: &str = r#"<config><object id="2"/><object id="4"/><plate><metadata key="plater_id" value="1"/><model_instance><metadata key="object_id" value="2"/></model_instance><model_instance><metadata key="object_id" value="4"/></model_instance></plate></config>"#;
     const SLICE: &str = r#"<config><header><header_item key="OrcaSlicer-Version" value="2.4.2"/></header><plate><metadata key="outside" value="false"/><object skipped="false"/><object skipped="false"/></plate></config>"#;

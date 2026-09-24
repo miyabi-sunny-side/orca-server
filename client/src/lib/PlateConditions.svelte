@@ -8,8 +8,9 @@
     type Printer,
     type Profiles,
     type FilamentSetting,
+    type MaterialRole,
   } from "./api";
-  import { machineChoices } from "./plate";
+  import { machineChoices, roleFields } from "./plate";
   import StrengthFields from "./StrengthFields.svelte";
   import PlateFilamentPicker from "./PlateFilamentPicker.svelte";
   let {
@@ -19,6 +20,7 @@
     defaultsError,
     changed,
     legacy = false,
+    roles = ["primary"],
   }: {
     value: PlateConditions;
     defaults?: DefaultSettings;
@@ -26,6 +28,7 @@
     defaultsError: string;
     changed: (key: keyof PlateConditions) => void;
     legacy?: boolean;
+    roles?: MaterialRole[];
   } = $props();
   const reasons = {
     printer: "プリンターを登録すると初期値を使えます。",
@@ -39,10 +42,13 @@
   const missing = $derived(
     [
       value.required_machine_profile_key,
-      value.filament_id,
+      ...roles.map((role) => value[roleFields[role]]),
       value.process_profile_key,
       value.bed_type,
     ].some((v) => v == null),
+  );
+  const mainMaterial = $derived(
+    value[roleFields[roles[0] ?? "primary"]] ?? null,
   );
   let printers = $state<Printer[]>([]),
     profiles = $state<Profiles>();
@@ -74,7 +80,7 @@
   });
   $effect(() => {
     const machine = value.required_machine_profile_key,
-      material = value.filament_id;
+      material = mainMaterial;
     const read = new AbortController();
     profiles = undefined;
     setting = undefined;
@@ -164,14 +170,17 @@
       <a href="/printers/new">プリンターを登録</a
       >すると、所持機の機種・ノズルを選べます。
     </p>{/if}
-  <PlateFilamentPicker
-    value={value.filament_id}
-    machine={value.required_machine_profile_key}
-    choose={(id) => {
-      value.filament_id = id;
-      changed("filament_id");
-    }}
-  />
+  {#each roles as role (role)}<PlateFilamentPicker
+      label={roles.length === 1 && role === "primary"
+        ? "フィラメント"
+        : `${role}のフィラメント`}
+      value={value[roleFields[role]] ?? null}
+      machine={value.required_machine_profile_key}
+      choose={(id) => {
+        value[roleFields[role]] = id;
+        changed(roleFields[role]);
+      }}
+    />{/each}
   <label class="field"
     ><span>工程（品質）</span><select
       bind:value={value.process_profile_key}
@@ -226,7 +235,7 @@
         bind:checked={value.support_enabled}
         onchange={(e) => {
           if (e.currentTarget.checked)
-            value.support_interface_filament_id ??= value.filament_id;
+            value.support_interface_filament_id ??= mainMaterial;
           changed("support_enabled");
         }}
       />
@@ -236,16 +245,14 @@
       <PlateFilamentPicker
         label="接触面のフィラメント"
         clearLabel="主材料と同じにする"
-        value={value.support_interface_filament_id ?? value.filament_id}
+        value={value.support_interface_filament_id ?? mainMaterial}
         machine={value.required_machine_profile_key}
         choose={(id) => {
           value.support_interface_filament_id = id;
           changed("support_interface_filament_id");
         }}
       />
-      <p class="caption">
-        本体とサポートの支柱には、上で選んだフィラメントを使います。
-      </p>
+      <p class="caption">サポートの支柱には、最初のフィラメントを使います。</p>
     {/if}
   </details>
   {#if loading || reading}<p class="caption" role="status">
@@ -257,11 +264,11 @@
         >条件を読み直す</button
       >
     </div>{/if}
-  {#if !reading && materialFound && value.required_machine_profile_key && value.filament_id && (!setting || setting.error)}<p
+  {#if !reading && materialFound && value.required_machine_profile_key && mainMaterial && (!setting || setting.error)}<p
       class="notice"
     >
       この機種で使う材料設定を確認してください。<a
-        href={`/filaments/${value.filament_id}`}>材料設定へ</a
+        href={`/filaments/${mainMaterial}`}>材料設定へ</a
       >
     </p>{/if}
   {#if !reading && profiles && value.process_profile_key && !profiles.processes.includes(value.process_profile_key)}<p

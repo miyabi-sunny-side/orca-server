@@ -1,11 +1,26 @@
-import type { PlateConditions } from "./api";
+import type { MaterialRole, PlateConditions } from "./api";
 export type EditModel = {
   id?: string;
   fileIndex?: number;
   name: string;
   source: string | null;
   quantity: number;
+  roles?: MaterialRole[];
 };
+export const roleFields = {
+  primary: "filament_id",
+  secondary: "secondary_filament_id",
+} as const;
+export function materialRoles(
+  models: { roles?: MaterialRole[] }[],
+): MaterialRole[] {
+  const used = new Set(
+    models.flatMap((m) => (m.roles?.length ? m.roles : ["primary"])),
+  );
+  return (["primary", "secondary"] as MaterialRole[]).filter((role) =>
+    used.has(role),
+  );
+}
 
 export function chooseModels(
   models: EditModel[],

@@ -16,6 +16,7 @@ test('hover and row focus show one passive shape without changing composition or
   await page.route('**/api/**',async route=>{
     const r=route.request(),url=new URL(r.url());
     if(r.method()!=='GET')mutations.push(r.method()+' '+url.pathname);
+    if(url.pathname==='/api/scad/model-info')return route.fulfill({json:{roles:['primary']}});
     if(url.pathname==='/api/scad/models')return route.fulfill({json:names});
     if(url.pathname==='/api/scad/model'){
       reads++;const isTriangle=url.searchParams.get('path')===names[1];

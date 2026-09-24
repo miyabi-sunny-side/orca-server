@@ -15,6 +15,7 @@ export type PlateConditions = Strength & {
   support_interface_filament_id?: string | null;
   required_machine_profile_key: string | null;
   filament_id: string | null;
+  secondary_filament_id?: string | null;
   process_profile_key: string | null;
   bed_type: string | null;
 };
@@ -37,7 +38,9 @@ export type ImportedSelection = {
   plate_id: string | null;
   items: { build_index: number; object_id: number; instance_id: number }[];
   print_reason: string | null;
+  roles?: MaterialRole[];
 };
+export type MaterialRole = "primary" | "secondary";
 export type Plate = {
   imported?: {
     file_name: string;
@@ -53,6 +56,7 @@ export type Plate = {
     name: string;
     source: string | null;
     quantity: number;
+    roles?: MaterialRole[];
   }[];
 };
 export type Profiles = {

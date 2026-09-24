@@ -60,6 +60,13 @@ pub fn array(value: &Value) -> &[Value] {
 pub fn edit(value: &Value) -> Value {
     let mut value = value.clone();
     value.as_object_mut().unwrap().remove("id");
+    value.as_object_mut().unwrap().remove("imported");
+    value.as_object_mut().unwrap().remove("roles");
+    if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models {
+            model.as_object_mut().unwrap().remove("roles");
+        }
+    }
     value
 }
 pub fn printer_settings(value: &Value) -> Value {

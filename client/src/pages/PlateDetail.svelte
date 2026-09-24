@@ -4,7 +4,7 @@
   import StlPreview from "../lib/StlPreview.svelte";
   import PlateEditor from "../lib/PlateEditor.svelte";
   import PlateQueueAdd from "../lib/PlateQueueAdd.svelte";
-  import { emptyConditions } from "../lib/plate";
+  import { emptyConditions, materialRoles, roleFields } from "../lib/plate";
   let { id }: { id: string } = $props();
   let plate = $state<Plate>(),
     loading = $state(true),
@@ -18,6 +18,7 @@
       plate?.models[0],
   );
   const conditions = $derived(plate?.conditions ?? emptyConditions);
+  const roles = $derived(materialRoles(plate?.models ?? []));
   const controller = new AbortController();
   async function load() {
     loading = true;
@@ -89,12 +90,15 @@
             <p>
               {conditions.required_machine_profile_key ?? "機種・ノズル未設定"}
             </p>
-            <p>
-              {filaments.find((f) => f.id === conditions.filament_id)?.name ??
-                (conditions.filament_id
-                  ? "材料を確認中"
-                  : "フィラメント未設定")}
-            </p>
+            {#each roles as role}<p>
+                {#if roles.length > 1 || role === "secondary"}{role}:
+                {/if}
+                {filaments.find((f) => f.id === conditions[roleFields[role]])
+                  ?.name ??
+                  (conditions[roleFields[role]]
+                    ? "材料を確認中"
+                    : "フィラメント未設定")}
+              </p>{/each}
             <p>
               {conditions.process_profile_key ?? "工程未設定"} · {conditions.bed_type ??
                 "ビルドプレート未設定"}

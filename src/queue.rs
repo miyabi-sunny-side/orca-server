@@ -101,10 +101,14 @@ pub(crate) struct Resolved {
     pub main: Binding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<Binding>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<crate::model_import::Role, usize>,
 }
 impl Resolved {
     pub(crate) fn filament_profiles(&self) -> Vec<serde_json::Map<String, Value>> {
-        ["filament.json", "interface.json"]
+        ["filament.json", "secondary.json", "interface.json"]
             .into_iter()
             .filter_map(|key| self.profiles.get(key).cloned())
             .collect()
@@ -134,7 +138,10 @@ impl Resolved {
             .ok_or(Error::Invalid("Invalid nozzle profile"))?;
         crate::print_start::check_nozzle(status, diameter, &device.settings.nozzle_material)?;
         let filaments = crate::database::load_filaments(c)?;
-        for binding in std::iter::once(&mut self.main).chain(self.interface.iter_mut()) {
+        for binding in std::iter::once(&mut self.main)
+            .chain(self.secondary.iter_mut())
+            .chain(self.interface.iter_mut())
+        {
             let slot = crate::ams::resolve(c, &device.id, &binding.filament.id, &machine)?
                 .into_iter()
                 .find(|s| s.id == binding.ams_slot_id && s.ams_id < 4)
@@ -361,41 +368,82 @@ pub(crate) fn resolve(
         None,
     )?;
     crate::profiles::validate_bed(&primary, &selection.bed)?;
-    let interface = if let Some(id) = plate
-        .conditions
-        .interface_id()
-        .filter(|id| *id != main.filament.id)
-    {
-        let secondary =
-            binding(c, pid, id, &selection.machine, None).map_err(|error| match error {
-                Error::Conflict(_) => {
-                    Error::Conflict("No confirmed AMS slot contains the support interface material")
-                }
-                other => other,
-            })?;
+    let additional = |id| -> Result<_> {
+        let material = binding(c, pid, id, &selection.machine, None)?;
         let profile = profiles.resolve_filament(
-            secondary.setting.as_ref().expect("resolved setting"),
-            &secondary.filament.data.material,
+            material.setting.as_ref().expect("resolved setting"),
+            &material.filament.data.material,
         )?;
-        resolved.insert(
-            "interface.json".into(),
-            crate::support::material_profile(profile, &secondary.filament, Some(&primary))?,
-        );
-        Some(secondary)
+        let profile =
+            crate::support::material_profile(profile, &material.filament, Some(&primary))?;
+        Ok((material, profile))
+    };
+    let mut roles = BTreeMap::new();
+    let mut secondary = None;
+    for role in plate.roles() {
+        let id = plate.conditions.role_id(role)?;
+        let index = if id == main.filament.id {
+            1
+        } else {
+            let (material, profile) = additional(id)?;
+            resolved.insert("secondary.json".into(), profile);
+            secondary = Some(material);
+            2
+        };
+        roles.insert(role, index);
+    }
+    let interface_id = plate.conditions.support_enabled.then(|| {
+        plate
+            .conditions
+            .support_interface_filament_id
+            .as_deref()
+            .unwrap_or(&main.filament.id)
+    });
+    let interface = if let Some(id) = interface_id
+        .filter(|id| *id != main.filament.id)
+        .filter(|id| secondary.as_ref().is_none_or(|b| b.filament.id != *id))
+    {
+        let (material, profile) = additional(id).map_err(|error| match error {
+            Error::Conflict(_) => {
+                Error::Conflict("No confirmed AMS slot contains the support interface material")
+            }
+            other => other,
+        })?;
+        resolved.insert("interface.json".into(), profile);
+        Some(material)
     } else {
         None
     };
     resolved.insert("filament.json".into(), primary);
-    plate.conditions.apply(
-        resolved
-            .get_mut("process.json")
-            .ok_or(Error::Invalid("Resolved process is missing"))?,
-    )?;
+    let process = resolved
+        .get_mut("process.json")
+        .ok_or(Error::Invalid("Resolved process is missing"))?;
+    plate.conditions.apply(process)?;
+    let material_count = 1 + usize::from(secondary.is_some()) + usize::from(interface.is_some());
+    if plate.conditions.support_enabled {
+        let index = if interface.is_some() {
+            material_count
+        } else if secondary
+            .as_ref()
+            .is_some_and(|b| Some(b.filament.id.as_str()) == interface_id)
+        {
+            2
+        } else {
+            1
+        };
+        process.insert(
+            "support_interface_filament".into(),
+            index.to_string().into(),
+        );
+    }
+    crate::support::configure_materials(process, material_count)?;
     Ok(Resolved {
         selection,
         profiles: resolved,
         main,
         interface,
+        secondary,
+        roles,
     })
 }
 fn available(
@@ -436,7 +484,14 @@ pub(crate) fn planned(
         .required_machine_profile_key
         .as_ref()
         .ok_or_else(missing)?;
-    let filament = condition.filament_id.as_ref().ok_or_else(missing)?;
+    let roles = plate.roles();
+    let filament = roles
+        .first()
+        .ok_or_else(missing)
+        .and_then(|r| condition.role_id(*r))?;
+    for role in roles {
+        condition.role_id(role)?;
+    }
     let process = condition.process_profile_key.as_ref().ok_or_else(missing)?;
     let bed = condition.bed_type.as_ref().ok_or_else(missing)?;
     let registered: String = c.query_row(
@@ -457,7 +512,7 @@ pub(crate) fn planned(
         ))?;
     Ok(Specification {
         ams_slot_id: slot.id,
-        filament_id: filament.clone(),
+        filament_id: filament.to_owned(),
         required_machine_profile_key: machine.clone(),
         process_profile_key: process.clone(),
         bed_type: bed.clone(),
@@ -490,13 +545,24 @@ pub(crate) fn originals(
     let mut originals = Vec::new();
     let mut index = 0;
     for model in &plate.models {
+        // Once all inputs were written, retry must not substitute a newer model.
+        // A failure before fetching inputs may still retry the initial fetch.
+        let frozen = cached.is_some_and(|path| path.join("process.json").is_file());
         let cached = cached
-            .map(|path| path.join(format!("{index}.stl")))
-            .filter(|path| path.is_file())
+            .and_then(|path| {
+                ["3mf", "stl"]
+                    .iter()
+                    .map(|ext| path.join(format!("{index}.{ext}")))
+                    .find(|p| p.is_file())
+            })
             .map(std::fs::read)
             .transpose()?;
         let original = if cached.is_some() {
             cached
+        } else if frozen {
+            return Err(Error::Conflict(
+                "Original model for this attempt is unavailable",
+            ));
         } else if model.source.is_none() {
             c.query_row(
                 "SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2",
@@ -527,6 +593,8 @@ pub(crate) async fn write_inputs(
 ) -> Result<usize> {
     let mut count = 0;
     let mut remaining = crate::plates::MAX_UPLOAD;
+    let mut assemblies = Vec::new();
+    let mut has_3mf = false;
     for (model, original) in plate.models.iter().zip(originals) {
         let bytes = if let Some(bytes) = original {
             bytes
@@ -538,6 +606,49 @@ pub(crate) async fn write_inputs(
         } else {
             return Err(Error::Unavailable("Uploaded original is unavailable"));
         };
+        let roles = crate::model_import::roles(&bytes)?;
+        if roles
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            != model.roles.iter().copied().collect()
+        {
+            return Err(Error::Conflict(
+                "モデルの材料役割が変わりました。プレートを開き、材料を確認して保存してください。",
+            ));
+        }
+        let is_3mf = bytes.starts_with(b"PK");
+        has_3mf |= is_3mf;
+        let parts = if is_3mf {
+            crate::model_import::Package::read(&bytes)?.role_meshes(0)?
+        } else {
+            vec![(crate::model_import::Role::Primary, bytes.clone())]
+        };
+        for (part, (role, mesh)) in parts.into_iter().enumerate() {
+            let name = if is_3mf {
+                format!("{count}-part-{part}.stl")
+            } else {
+                format!("{count}.stl")
+            };
+            let material = settings
+                .roles
+                .get(&role)
+                .copied()
+                .or_else(|| {
+                    (settings.roles.is_empty() && role == crate::model_import::Role::Primary)
+                        .then_some(1)
+                })
+                .ok_or(Error::Conflict(
+                    "モデルの材料役割が実行時の割当と一致しません。",
+                ))?;
+            if is_3mf {
+                remaining = remaining
+                    .checked_sub(mesh.len())
+                    .ok_or(Error::Invalid("Models exceed 64 MiB"))?;
+                std::fs::write(path.join(&name), mesh)?;
+            }
+            assemblies.push(json!({"path":name,"count":model.quantity,"filaments":[material],"assemble_index":(count+1..=count+usize::from(model.quantity)).collect::<Vec<_>>()}));
+        }
         let size = bytes
             .len()
             .checked_mul(usize::from(model.quantity))
@@ -546,9 +657,17 @@ pub(crate) async fn write_inputs(
             .checked_sub(size)
             .ok_or(Error::Invalid("Models exceed 64 MiB"))?;
         for _ in 0..model.quantity {
-            std::fs::write(path.join(format!("{count}.stl")), &bytes)?;
+            let extension = if is_3mf { "3mf" } else { "stl" };
+            std::fs::write(path.join(format!("{count}.{extension}")), &bytes)?;
             count += 1;
         }
+    }
+    if has_3mf {
+        serde_json::to_writer(
+            std::fs::File::create(path.join("assemblies.json"))?,
+            &json!({"plates":[{"plate_name":"plate","need_arrange":true,"objects":assemblies}]}),
+        )
+        .map_err(std::io::Error::other)?;
     }
     for (name, profile) in &settings.profiles {
         serde_json::to_writer(std::fs::File::create(path.join(name))?, profile)
@@ -1038,6 +1157,15 @@ impl Service {
             execution.settings.main.ams_slot,
             materials[0].clone(),
         );
+        attempt.secondary =
+            execution
+                .settings
+                .secondary
+                .as_ref()
+                .map(|b| crate::print_start::MaterialSlot {
+                    ams_slot: b.ams_slot,
+                    material: materials[1].clone(),
+                });
         attempt.interface =
             execution
                 .settings
@@ -1045,7 +1173,8 @@ impl Service {
                 .as_ref()
                 .map(|i| crate::print_start::MaterialSlot {
                     ams_slot: i.ams_slot,
-                    material: materials[1].clone(),
+                    material: materials[1 + usize::from(execution.settings.secondary.is_some())]
+                        .clone(),
                 });
         attempt.id = attempt_id.into();
         self.printer.start(attempt, bytes).await?;
@@ -1148,11 +1277,27 @@ impl Database {
             }
             _ => false,
         };
+        let secondary_matches = match (&attempt.secondary, &execution.settings.secondary) {
+            (None, None) => true,
+            (Some(actual), Some(expected)) => {
+                actual.ams_slot == expected.ams_slot
+                    && execution
+                        .settings
+                        .profiles
+                        .get("secondary.json")
+                        .and_then(|p| p.get("filament_type"))
+                        .and_then(|v| v.get(0))
+                        .and_then(Value::as_str)
+                        == Some(actual.material.as_str())
+            }
+            _ => false,
+        };
         if attempt.plate_id != execution.plate.id
             || execution.settings.main.ams_slot_id != slot_id
             || attempt.ams_slot != execution.settings.main.ams_slot
             || execution.settings.profiles["filament.json"]["filament_type"][0] != attempt.material
             || !interface_matches
+            || !secondary_matches
         {
             return Err(Error::Conflict(
                 "Print material order or AMS mapping differs from the frozen execution",
@@ -1393,6 +1538,107 @@ mod tests {
         let restored: Execution = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(json!(restored), raw);
         assert_eq!(prep.job.id, job_id);
+    }
+
+    #[tokio::test]
+    async fn named_role_admission_requires_only_used_roles_and_deduplicates_filaments() {
+        use crate::model_import::Role;
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        add(&s);
+        let j = jobs(&s.store.db.connection().unwrap(), "one")
+            .unwrap()
+            .remove(0);
+        let mut plate = s.store.get(&j.plate_id).unwrap();
+        plate.models[0].roles = vec![Role::Primary, Role::Secondary];
+        assert!(
+            s.plan(&s.store.db.connection().unwrap(), &plate, &status())
+                .is_err()
+        );
+        plate.conditions.secondary_filament_id = plate.conditions.filament_id.clone();
+        let c = s.store.db.connection().unwrap();
+        let spec = s.plan(&c, &plate, &status()).unwrap();
+        let settings = resolve(
+            &c,
+            "one",
+            &spec,
+            &s.slicer.as_ref().unwrap().profiles,
+            &plate,
+        )
+        .unwrap();
+        assert_eq!(settings.filament_profiles().len(), 1);
+        assert_eq!(
+            settings.roles,
+            BTreeMap::from([(Role::Primary, 1), (Role::Secondary, 1)])
+        );
+        plate.models[0].roles = vec![Role::Secondary];
+        plate.conditions.filament_id = None;
+        assert!(s.plan(&c, &plate, &status()).is_ok());
+        plate.conditions.secondary_filament_id = Some("missing".into());
+        assert!(s.plan(&c, &plate, &status()).is_err());
+    }
+
+    #[tokio::test]
+    async fn role_inputs_freeze_original_assembly_and_repeat_all_parts_together() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        add(&s);
+        let j = jobs(&s.store.db.connection().unwrap(), "one")
+            .unwrap()
+            .remove(0);
+        let mut plate = s.store.get(&j.plate_id).unwrap();
+        plate.models[0].quantity = 2;
+        plate.models[0].roles = vec![
+            crate::model_import::Role::Primary,
+            crate::model_import::Role::Secondary,
+        ];
+        plate.conditions.secondary_filament_id = plate.conditions.filament_id.clone();
+        let settings = {
+            let c = s.store.db.connection().unwrap();
+            resolve(
+                &c,
+                "one",
+                &planned(&c, "one", &plate).unwrap(),
+                &s.slicer.as_ref().unwrap().profiles,
+                &plate,
+            )
+            .unwrap()
+        };
+        let path = root.path().join("input");
+        std::fs::create_dir(&path).unwrap();
+        let bytes = include_bytes!("../tests/fixtures/material-roles.3mf").to_vec();
+        assert_eq!(
+            write_inputs(&path, &plate, &settings, vec![Some(bytes.clone())], None)
+                .await
+                .unwrap(),
+            2
+        );
+        let plan: Value =
+            serde_json::from_slice(&std::fs::read(path.join("assemblies.json")).unwrap()).unwrap();
+        let objects = plan["plates"][0]["objects"].as_array().unwrap();
+        assert_eq!(objects.len(), 2);
+        for object in objects {
+            assert_eq!(object["assemble_index"], json!([1, 2]));
+            assert_eq!(object["count"], 2);
+            assert_eq!(object["filaments"], json!([1]));
+            crate::plates::validate_stl(
+                &std::fs::read(path.join(object["path"].as_str().unwrap())).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(std::fs::read(path.join("0.3mf")).unwrap(), bytes);
+        assert_eq!(
+            originals(&s.store.db.connection().unwrap(), &plate, Some(&path)).unwrap(),
+            vec![Some(bytes.clone())]
+        );
+        std::fs::remove_file(path.join("0.3mf")).unwrap();
+        assert!(originals(&s.store.db.connection().unwrap(), &plate, Some(&path)).is_err());
+        plate.models[0].roles.pop();
+        assert!(
+            write_inputs(&path, &plate, &settings, vec![Some(bytes)], None)
+                .await
+                .is_err()
+        );
     }
 
     fn command(s: &Service, action: Action) -> Command {

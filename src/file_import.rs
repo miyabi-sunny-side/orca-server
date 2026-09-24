@@ -103,13 +103,22 @@ impl Upload {
             let index = self.selected(&package)?;
             let derived = package.mesh(index)?;
             let source = self.models.pop().expect("one 3MF");
-            let name = format!("{}.stl", &source.name[..source.name.len() - 4]);
+            let role_model = !package.plates[index].roles.is_empty();
+            let name = if role_model {
+                source.name.clone()
+            } else {
+                format!("{}.stl", &source.name[..source.name.len() - 4])
+            };
             if !crate::plates::valid_model_name(&name) {
                 return Err(bad_form());
             }
             self.models.push(ModelInput {
                 name,
-                data: derived,
+                data: if role_model {
+                    source.data.clone()
+                } else {
+                    derived
+                },
                 source: None,
             });
             Some(Original {

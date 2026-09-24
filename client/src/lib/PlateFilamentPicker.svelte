@@ -143,12 +143,7 @@
 </div>
 
 {#if open}
-  <Modal
-    title={label === "フィラメント"
-      ? "フィラメントを選択"
-      : "接触面のフィラメントを選択"}
-    onclose={() => void close()}
-  >
+  <Modal title={`${label}を選択`} onclose={() => void close()}>
     <FilamentSearch {search} choose={select} close={() => void close()}>
       {#snippet filters()}
         <label class="all-option"

@@ -7,6 +7,7 @@ test('a plate saves model references and quantities with nullable print conditio
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     if(path==='/api/default-settings')return route.fulfill({json:emptyDefaults});
+    if(path==='/api/scad/model-info')return route.fulfill({json:{roles:['primary']}});
     if (path === '/api/scad/models') return route.fulfill({ json: ['parts/box.stl', 'parts/lid.stl'] });
     if (path === '/api/plates/import') { saved = route.request().postDataJSON(); return route.fulfill({ status: 201, json: plate }); }
     if (path === '/api/plates/11111111-1111-4111-8111-111111111111') return route.fulfill({ json: plate });

@@ -131,9 +131,18 @@ impl Slicer {
             .acquire()
             .await
             .map_err(|_| Error::Unavailable("Slicer stopped"))?;
+        let material_files: Vec<_> = ["filament.json", "secondary.json", "interface.json"]
+            .into_iter()
+            .filter(|name| *name == "filament.json" || directory.join(name).is_file())
+            .collect();
         self.run(
             &directory,
-            arrange_args(&selection.bed, count, filaments.len() == 2),
+            arrange_args(
+                &selection.bed,
+                count,
+                &material_files,
+                directory.join("assemblies.json").is_file(),
+            ),
             id,
             "arrange",
         )
@@ -151,8 +160,16 @@ impl Slicer {
             )
         })
         .await?;
-        self.run(&directory, slice_args(filaments.len() == 2), id, "slice")
-            .await?;
+        self.run(
+            &directory,
+            slice_args(
+                filaments.len() > 1,
+                directory.join("assemblies.json").is_file(),
+            ),
+            id,
+            "slice",
+        )
+        .await?;
         blocking(move || {
             artifacts::validate(
                 &directory.join("print.gcode.3mf"),
@@ -248,22 +265,16 @@ async fn drain(
     Ok(String::from_utf8_lossy(&captured).into_owned())
 }
 
-fn arrange_args(bed: &str, models: usize, interface: bool) -> Vec<OsString> {
+fn arrange_args(bed: &str, models: usize, filaments: &[&str], assembled: bool) -> Vec<OsString> {
     let mut args: Vec<_> = [
         "--datadir",
         "data",
         "--load-settings",
         "printer.json;process.json",
         "--load-filaments",
-        if interface {
-            "filament.json;interface.json"
-        } else {
-            "filament.json"
-        },
+        &filaments.join(";"),
         "--curr-bed-type",
         bed,
-        "--arrange",
-        "1",
         "--export-3mf",
         "project.3mf",
         "--outputdir",
@@ -271,10 +282,15 @@ fn arrange_args(bed: &str, models: usize, interface: bool) -> Vec<OsString> {
     ]
     .map(OsString::from)
     .into();
-    args.extend((0..models).map(|index| OsString::from(format!("{index}.stl"))));
+    if assembled {
+        args.extend(["--load-assemble-list", "assemblies.json"].map(OsString::from));
+    } else {
+        args.extend(["--arrange", "1"].map(OsString::from));
+        args.extend((0..models).map(|index| OsString::from(format!("{index}.stl"))));
+    }
     args
 }
-fn slice_args(interface: bool) -> Vec<OsString> {
+fn slice_args(interface: bool, assembled: bool) -> Vec<OsString> {
     let mut args: Vec<_> = [
         "--datadir",
         "data",
@@ -288,6 +304,11 @@ fn slice_args(interface: bool) -> Vec<OsString> {
     ]
     .map(OsString::from)
     .into();
+    // Orca 2.4.2's assembly-list arrangement underestimates the interface tower.
+    // Its selected-plate arrange path includes the tower clearance before slicing.
+    if assembled {
+        args.extend(["--arrange", "1"].map(OsString::from));
+    }
     // Orca's native option permits the explicitly chosen interface pair without altering temperatures.
     if interface {
         args.insert(0, "--allow-mix-temp".into());
@@ -363,6 +384,31 @@ async fn choices(
 mod tests {
     use super::*;
 
+    #[test]
+    fn assembled_inputs_use_native_grouping_with_three_explicit_material_files() {
+        let args = arrange_args(
+            "Textured PEI Plate",
+            2,
+            &["filament.json", "secondary.json", "interface.json"],
+            true,
+        );
+        assert!(
+            args.windows(2)
+                .any(|v| v == ["--load-assemble-list", "assemblies.json"])
+        );
+        assert!(args.windows(2).any(|v| v
+            == [
+                "--load-filaments",
+                "filament.json;secondary.json;interface.json"
+            ]));
+        assert!(!args.iter().any(|v| v == "--arrange" || v == "0.stl"));
+        assert!(
+            slice_args(true, true)
+                .windows(2)
+                .any(|v| v == ["--arrange", "1"])
+        );
+    }
+
     #[tokio::test]
     async fn cli_exit_timeout_and_busy_leave_the_saved_plate_readable() {
         use crate::profiles::PRINTER;
@@ -417,7 +463,7 @@ mod tests {
 
     #[test]
     fn independent_inputs_are_arranged_and_reslice_uses_only_saved_project() {
-        let args = arrange_args("Textured PEI Plate", 2, false);
+        let args = arrange_args("Textured PEI Plate", 2, &["filament.json"], false);
         let args: Vec<_> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert!(args.windows(2).any(|a| a == ["--arrange", "1"]));
         assert!(
@@ -426,15 +472,24 @@ mod tests {
         );
         assert_eq!(&args[args.len() - 2..], ["0.stl", "1.stl"]);
         assert!(!args.contains(&"--assemble"));
-        let two = arrange_args("Textured PEI Plate", 1, true);
+        let two = arrange_args(
+            "Textured PEI Plate",
+            1,
+            &["filament.json", "interface.json"],
+            false,
+        );
         assert!(
             two.windows(2)
                 .any(|a| a == ["--load-filaments", "filament.json;interface.json"])
         );
-        let mixed = slice_args(true);
+        let mixed = slice_args(true, false);
         assert!(mixed.iter().any(|v| v == "--allow-mix-temp"));
-        assert!(!slice_args(false).iter().any(|v| v == "--allow-mix-temp"));
-        let slice = slice_args(false);
+        assert!(
+            !slice_args(false, false)
+                .iter()
+                .any(|v| v == "--allow-mix-temp")
+        );
+        let slice = slice_args(false, false);
         assert_eq!(
             slice,
             [

@@ -55,6 +55,16 @@ pub(crate) fn configure(
         );
     }
     if distinct {
+        configure_materials(process, 2)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn configure_materials(process: &mut Map<String, Value>, count: usize) -> Result<()> {
+    if !(1..=3).contains(&count) {
+        return Err(Error::Invalid("Expected one to three print materials"));
+    }
+    if count > 1 {
         process.insert("enable_prime_tower".into(), "1".into());
         for key in [
             "flush_into_infill",
@@ -78,7 +88,18 @@ pub(crate) fn configure(
                 .unwrap_or(280.0)
                 .to_string()
         };
-        let matrix = json!(["0", volume(1), volume(side), "0"]);
+        let matrix = Value::Array(
+            (0..count)
+                .flat_map(|row| (0..count).map(move |column| (row, column)))
+                .map(|(row, column)| {
+                    Value::String(if row == column {
+                        "0".into()
+                    } else {
+                        volume(row * side + column)
+                    })
+                })
+                .collect(),
+        );
         process.insert("flush_volumes_matrix".into(), matrix);
         if !process
             .get("flush_multiplier")
@@ -108,7 +129,7 @@ pub(crate) fn material_profile(
             .ok_or(Error::Invalid("Material profile has no name"))?;
         profile.insert(
             "name".into(),
-            format!("{name} / interface {}", filament.id).into(),
+            format!("{name} / material {}", filament.id).into(),
         );
         for prefix in ["cool_plate", "eng_plate", "hot_plate", "textured_plate"] {
             for suffix in ["temp", "temp_initial_layer"] {
@@ -125,7 +146,7 @@ pub(crate) fn material_profile(
 pub(crate) fn check_materials(settings: &Value, profiles: &[Map<String, Value>]) -> Result<()> {
     let invalid =
         || Error::Invalid("3MF did not preserve the ordered material profiles, types and colours");
-    if !(1..=2).contains(&profiles.len()) {
+    if !(1..=3).contains(&profiles.len()) {
         return Err(invalid());
     }
     for (output, input) in [
@@ -165,6 +186,19 @@ pub(crate) fn check_materials(settings: &Value, profiles: &[Map<String, Value>])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_roles_enable_purge_without_support_and_three_materials_keep_positive_pairs() {
+        let mut process = Map::new();
+        configure_materials(&mut process, 3).unwrap();
+        assert_eq!(process["enable_prime_tower"], "1");
+        let table = process["flush_volumes_matrix"].as_array().unwrap();
+        assert_eq!(table.len(), 9);
+        for (i, value) in table.iter().enumerate() {
+            assert_eq!(number(value).unwrap() > 0., i / 3 != i % 3);
+        }
+        assert!(!process.contains_key("enable_support"));
+    }
     use serde_json::json;
 
     #[test]
@@ -177,7 +211,7 @@ mod tests {
         let original = json!({"name":"PETG", "filament_type":["PETG"],"nozzle_temperature":["250"], "cool_plate_temp":["0"], "cool_plate_temp_initial_layer":["0"]}).as_object().unwrap().clone();
         let filament: crate::filament::Filament = serde_json::from_value(json!({"id":"petg-black", "name":"black", "vendor":"fixture", "material":"PETG-GF", "color":"000000FF", "bambu_filament_id":null})).unwrap();
         let secondary = material_profile(original.clone(), &filament, Some(&main)).unwrap();
-        assert_eq!(secondary["name"], "PETG / interface petg-black");
+        assert_eq!(secondary["name"], "PETG / material petg-black");
         assert_eq!(
             secondary["nozzle_temperature"],
             original["nozzle_temperature"]

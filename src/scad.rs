@@ -20,6 +20,7 @@ pub(crate) fn router(store: crate::plates::Store, source: Option<Source>) -> Rou
     Router::new()
         .route("/api/scad/models", get(list_models))
         .route("/api/scad/model", get(public_preview))
+        .route("/api/scad/model-info", get(model_info))
         .route("/api/plates/import", post(import))
         .route("/api/plates/{id}", put(replace))
         .route("/api/plates/{id}/models/{model_id}", get(preview))
@@ -52,7 +53,7 @@ async fn preview(
     } else {
         crate::plate_api::blocking(move || store.read_file(&id, &model.id)).await?
     };
-    Ok(stl_response(bytes))
+    Ok(stl_response(crate::model_import::preview(bytes)?))
 }
 
 fn stl_response(bytes: Vec<u8>) -> Response {
@@ -80,13 +81,26 @@ async fn public_preview(
         return Err(Error::Invalid("Invalid STL model path"));
     }
     let source = require_source(state.source)?;
-    if source.models().await?.binary_search(&query.path).is_err() {
+    if resolved_path(&source.models().await?, &query.path).is_none() {
         return Err(Error::NotFound);
     }
     source
         .model(&query.path, crate::plates::MAX_UPLOAD)
         .await
+        .and_then(crate::model_import::preview)
         .map(stl_response)
+}
+
+async fn model_info(
+    State(state): State<ImportState>,
+    Query(query): Query<ModelPath>,
+) -> Result<Json<serde_json::Value>> {
+    let bytes = require_source(state.source)?
+        .model(&query.path, crate::plates::MAX_UPLOAD)
+        .await?;
+    Ok(Json(
+        serde_json::json!({"roles":crate::model_import::roles(&bytes)?}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -134,20 +148,33 @@ async fn save_composition(
     id: Option<String>,
     edit: crate::plates::Edit,
 ) -> Result<crate::plates::Plate> {
+    crate::plates::validate_items(&edit.models)?;
+    let mut roles = std::collections::BTreeMap::new();
     if edit.models.iter().any(|model| model.source.is_some()) {
-        let known = require_source(state.source)?.models().await?;
-        if edit
-            .models
-            .iter()
-            .filter_map(|model| model.source.as_ref())
-            .any(|source| known.binary_search(source).is_err())
-        {
-            return Err(Error::Invalid(
-                "Unknown SCAD model; list the available models again",
-            ));
+        let source = require_source(state.source)?;
+        let known = source.models().await?;
+        let mut remaining = crate::plates::MAX_UPLOAD;
+        for model in &edit.models {
+            if let Some(path) = &model.source {
+                if roles.contains_key(path) {
+                    continue;
+                }
+                let resolved = resolved_path(&known, path).ok_or(Error::Invalid(
+                    "Unknown SCAD model; list the available models again",
+                ))?;
+                let used = if resolved.to_ascii_lowercase().ends_with(".stl") {
+                    vec![crate::model_import::Role::Primary]
+                } else {
+                    let bytes = source.model(&resolved, remaining).await?;
+                    remaining -= bytes.len();
+                    crate::model_import::roles(&bytes)?
+                };
+                roles.insert(path.clone(), used);
+            }
         }
     }
-    crate::plate_api::blocking(move || state.store.edit(id.as_deref(), edit)).await
+    crate::plate_api::blocking(move || state.store.edit_with_roles(id.as_deref(), edit, &roles))
+        .await
 }
 
 #[derive(Clone)]
@@ -211,8 +238,13 @@ impl Source {
     /// # Errors
     /// Rejects invalid paths, missing/oversized models and malformed STL.
     pub async fn model(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
-        let bytes = self.fetch(model_url(&self.base, path)?, limit).await?;
-        crate::plates::validate_stl(&bytes)?;
+        if !valid_model_name(path) {
+            return Err(Error::Invalid("Invalid model path"));
+        }
+        let models = self.models().await?;
+        let path = resolved_path(&models, path).unwrap_or_else(|| path.to_owned());
+        let bytes = self.fetch(model_url(&self.base, &path)?, limit).await?;
+        crate::model_import::roles(&bytes)?;
         Ok(bytes)
     }
 
@@ -247,6 +279,19 @@ impl Source {
         }
         Ok(data)
     }
+}
+
+fn resolved_path(models: &[String], path: &str) -> Option<String> {
+    if path.to_ascii_lowercase().ends_with(".stl") {
+        let next = format!("{}.3mf", &path[..path.len() - 4]);
+        if models.binary_search(&next).is_ok() {
+            return Some(next);
+        }
+    }
+    models
+        .binary_search_by(|p| p.as_str().cmp(path))
+        .ok()
+        .map(|_| path.to_owned())
 }
 
 fn model_url(base: &Url, path: &str) -> Result<Url> {
@@ -420,6 +465,49 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn old_stl_reference_resolves_named_3mf_without_accepting_arbitrary_uploads() {
+        let fixture = Fixture::default();
+        let data = include_bytes!("../tests/fixtures/material-roles.3mf").to_vec();
+        fixture
+            .files
+            .lock()
+            .unwrap()
+            .insert("folder/sign.3mf".into(), data.clone());
+        let server = fixture_server(fixture.clone()).await;
+        let source = Source::new(&server.base).unwrap();
+        assert_eq!(source.models().await.unwrap(), vec!["folder/sign.3mf"]);
+        assert_eq!(
+            source
+                .model("folder/sign.stl", crate::plates::MAX_UPLOAD)
+                .await
+                .unwrap(),
+            data
+        );
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::plates::Store::open(root.path()).unwrap();
+        let edit = serde_json::from_value(serde_json::json!({"name":"old ref", "models":[{"name":"old name.stl","source":"folder/sign.stl","quantity":2}]})).unwrap();
+        let plate = save_composition(
+            ImportState {
+                store,
+                source: Some(source),
+            },
+            None,
+            edit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(plate.models[0].name, "old name.stl");
+        assert_eq!(
+            plate.models[0].roles,
+            vec![
+                crate::model_import::Role::Primary,
+                crate::model_import::Role::Secondary
+            ]
+        );
+        assert_eq!(plate.models[0].quantity, 2);
     }
 
     #[tokio::test]

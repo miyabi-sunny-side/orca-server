@@ -25,7 +25,7 @@ struct Record {
     attempt_id: Option<String>,
 }
 fn identity(plate: &Plate, settings: &Resolved) -> Value {
-    json!({"plate":plate,"settings":settings,"slicer":"2.4.2"})
+    json!({"plate":plate,"settings":settings,"slicer":"2.4.2","server":env!("CARGO_PKG_VERSION")})
 }
 fn presentation(record: Option<&Record>, input: &Value, preparing: bool) -> Value {
     if preparing {
@@ -37,15 +37,27 @@ fn presentation(record: Option<&Record>, input: &Value, preparing: bool) -> Valu
     }
 }
 fn same_inputs(a: &Path, b: &Path, count: usize) -> bool {
-    if a.join(format!("{count}.stl")).exists() || b.join(format!("{count}.stl")).exists() {
+    if ["stl", "3mf"].iter().any(|ext| {
+        a.join(format!("{count}.{ext}")).exists() || b.join(format!("{count}.{ext}")).exists()
+    }) {
         return false;
     }
     let names = (0..count)
-        .map(|i| format!("{i}.stl"))
+        .map(|i| {
+            let ext = if a.join(format!("{i}.3mf")).exists() || b.join(format!("{i}.3mf")).exists()
+            {
+                "3mf"
+            } else {
+                "stl"
+            };
+            format!("{i}.{ext}")
+        })
         .chain(["printer.json", "process.json", "filament.json"].map(str::to_owned))
         .chain(
-            (a.join("interface.json").exists() || b.join("interface.json").exists())
-                .then(|| "interface.json".to_owned()),
+            ["interface.json", "secondary.json", "assemblies.json"]
+                .iter()
+                .filter(|name| a.join(name).exists() || b.join(name).exists())
+                .map(|s| (*s).to_owned()),
         );
     names.into_iter().all(|name| {
         match (
@@ -382,6 +394,32 @@ pub(crate) fn actual(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_input_cache_compares_original_geometry_and_material_order() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for name in [
+            "0.3mf",
+            "printer.json",
+            "process.json",
+            "filament.json",
+            "secondary.json",
+            "assemblies.json",
+        ] {
+            for dir in [a.path(), b.path()] {
+                std::fs::write(dir.join(name), b"same").unwrap();
+            }
+        }
+        assert!(same_inputs(a.path(), b.path(), 1));
+        for name in ["0.3mf", "secondary.json", "assemblies.json"] {
+            std::fs::write(b.path().join(name), b"changed").unwrap();
+            assert!(!same_inputs(a.path(), b.path(), 1));
+            std::fs::write(b.path().join(name), b"same").unwrap();
+        }
+        std::fs::write(b.path().join("1.3mf"), b"extra").unwrap();
+        assert!(!same_inputs(a.path(), b.path(), 1));
+    }
     #[test]
     fn input_changes_and_preparation_hide_the_previous_duration() {
         let input = json!({"quantity":2,"temperature":215,"version":"2.4.2"});

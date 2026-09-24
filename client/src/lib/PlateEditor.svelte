@@ -6,6 +6,7 @@
     emptyConditions,
     initialConditions,
     chooseModels,
+    materialRoles,
     type EditModel,
   } from "./plate";
   import { onMount, tick } from "svelte";
@@ -14,6 +15,7 @@
     type Plate,
     type PlateConditions as Conditions,
     type DefaultSettings,
+    type MaterialRole,
   } from "./api";
   let {
     initial,
@@ -108,6 +110,48 @@
     selected.reduce((sum, m) => sum + (m.quantity || 0), 0),
   );
   const controller = new AbortController();
+  const sourceKeys = $derived(
+    JSON.stringify([
+      ...new Set(selected.flatMap((m) => (m.source ? [m.source] : []))),
+    ]),
+  );
+  let sourceRoles = $state<Record<string, MaterialRole[]>>({});
+  let rolesReading = $state(false),
+    rolesError = $state(""),
+    rolesRetry = $state(0);
+  const roles = $derived(
+    materialRoles(
+      selected.map((m) => ({
+        roles: m.source ? (sourceRoles[m.source] ?? m.roles) : m.roles,
+      })),
+    ),
+  );
+  $effect(() => {
+    const sources: string[] = JSON.parse(sourceKeys);
+    rolesRetry;
+    const read = new AbortController();
+    rolesError = "";
+    rolesReading = sources.length > 0;
+    void Promise.all(
+      sources.map(async (source) => {
+        const info = await request<{ roles: MaterialRole[] }>(
+          `/api/scad/model-info?path=${encodeURIComponent(source)}`,
+          { signal: read.signal },
+        );
+        return [source, info.roles] as const;
+      }),
+    )
+      .then((entries) => {
+        if (!read.signal.aborted) sourceRoles = Object.fromEntries(entries);
+      })
+      .catch((e) => {
+        if (!read.signal.aborted) rolesError = (e as Error).message;
+      })
+      .finally(() => {
+        if (!read.signal.aborted) rolesReading = false;
+      });
+    return () => read.abort();
+  });
   onMount(() => {
     if (initial) {
       conditions = { ...emptyConditions, ...initial.conditions };
@@ -125,6 +169,7 @@
               source: null,
               quantity: 1,
               fileIndex: 0,
+              roles: upload.selection.roles,
             },
           ]
         : upload.files.map((f, fileIndex) => ({
@@ -209,7 +254,7 @@
             body: JSON.stringify({
               name: name.trim(),
               ...(initial ? { version: initial.version } : {}),
-              models: selected,
+              models: selected.map(({ roles: _, ...model }) => model),
               conditions,
             }),
           },
@@ -234,7 +279,7 @@
             ? "モデルを差し替え"
             : catalogMode === "add"
               ? "モデルを追加"
-              : "STLを選択"}
+              : "モデルを選択"}
         </h2>
         <div class="catalog-actions">
           {#if catalogMode === "choose"}<button
@@ -411,7 +456,17 @@
           : "個"}。
         {#if selected.some((m) => m.source)}SCADモデルは試算時と印刷開始時に最新データを取得します。{/if}
       </p>
+      {#if rolesReading}<p class="caption" role="status">
+          モデルの材料を確認しています…
+        </p>{/if}
+      {#if rolesError}<p class="notice" role="alert">
+          {rolesError}
+          <button type="button" class="btn" onclick={() => rolesRetry++}
+            >材料を読み直す</button
+          >
+        </p>{/if}
       <PlateConditions
+        roles={rolesReading || rolesError ? [] : roles}
         legacy={!!initial}
         bind:value={conditions}
         {defaults}
@@ -431,8 +486,12 @@
       <button
         class="btn primary"
         type="submit"
-        disabled={busy || defaultsReading || !selected.length || total > 64}
-        >保存</button
+        disabled={busy ||
+          defaultsReading ||
+          rolesReading ||
+          !!rolesError ||
+          !selected.length ||
+          total > 64}>保存</button
       >{#if !upload && !initial}<button
           class="btn"
           type="button"

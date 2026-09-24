@@ -67,7 +67,11 @@ fn relative_path(path: &str) -> bool {
 }
 
 pub(crate) fn valid_model_name(name: &str) -> bool {
-    relative_path(name) && name.len() <= 1024 && name.to_ascii_lowercase().ends_with(".stl")
+    relative_path(name)
+        && name.len() <= 1024
+        && [".stl", ".3mf"]
+            .iter()
+            .any(|ext| name.to_ascii_lowercase().ends_with(ext))
 }
 
 pub(crate) fn validate_stl(data: &[u8]) -> Result<()> {
@@ -108,12 +112,22 @@ pub struct Model {
     pub name: String,
     pub source: Option<String>,
     pub quantity: u16,
+    #[serde(default = "primary_role", skip_serializing_if = "is_primary")]
+    pub roles: Vec<crate::model_import::Role>,
+}
+fn primary_role() -> Vec<crate::model_import::Role> {
+    vec![crate::model_import::Role::Primary]
+}
+fn is_primary(roles: &[crate::model_import::Role]) -> bool {
+    roles == [crate::model_import::Role::Primary]
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Conditions {
     pub required_machine_profile_key: Option<String>,
     pub filament_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_filament_id: Option<String>,
     pub process_profile_key: Option<String>,
     pub bed_type: Option<String>,
     pub brim_enabled: bool,
@@ -123,6 +137,19 @@ pub struct Conditions {
     pub strength: crate::strength::Strength,
 }
 impl Conditions {
+    pub(crate) fn role_id(&self, role: crate::model_import::Role) -> Result<&str> {
+        use crate::model_import::Role;
+        match role {
+            Role::Primary => self
+                .filament_id
+                .as_deref()
+                .ok_or(Error::Conflict("primaryの材料を設定してください。")),
+            Role::Secondary => self
+                .secondary_filament_id
+                .as_deref()
+                .ok_or(Error::Conflict("secondaryの材料を設定してください。")),
+        }
+    }
     pub(crate) fn interface_id(&self) -> Option<&str> {
         self.support_enabled
             .then(|| {
@@ -132,10 +159,9 @@ impl Conditions {
             })
             .flatten()
     }
-    fn normalize(&mut self) {
+    fn normalize(&mut self, first: crate::model_import::Role) {
         if self.support_enabled && self.support_interface_filament_id.is_none() {
-            self.support_interface_filament_id
-                .clone_from(&self.filament_id);
+            self.support_interface_filament_id = self.role_id(first).ok().map(str::to_owned);
         }
     }
     pub(crate) fn apply(
@@ -184,9 +210,13 @@ impl Conditions {
         {
             return Err(Error::Invalid("Unknown bed type"));
         }
-        for id in [&self.filament_id, &self.support_interface_filament_id]
-            .into_iter()
-            .flatten()
+        for id in [
+            &self.filament_id,
+            &self.secondary_filament_id,
+            &self.support_interface_filament_id,
+        ]
+        .into_iter()
+        .flatten()
         {
             crate::products::product_id(c, id)?;
         }
@@ -244,6 +274,12 @@ pub struct Imported {
     pub selection: crate::model_import::Selection,
 }
 impl Plate {
+    pub(crate) fn roles(&self) -> std::collections::BTreeSet<crate::model_import::Role> {
+        self.models
+            .iter()
+            .flat_map(|m| m.roles.iter().copied())
+            .collect()
+    }
     pub(crate) fn ensure_printable(&self) -> Result<()> {
         if self.imported.as_ref().is_some_and(|source| {
             source.selection.print_reason.is_some()
@@ -292,7 +328,7 @@ pub(crate) fn validate_metadata(name: &str) -> Result<()> {
     }
     Ok(())
 }
-fn validate_items(models: &[ItemEdit]) -> Result<()> {
+pub(crate) fn validate_items(models: &[ItemEdit]) -> Result<()> {
     let count: usize = models.iter().map(|m| usize::from(m.quantity)).sum();
     if models.is_empty()
         || models.len() > 64
@@ -370,27 +406,33 @@ impl Store {
         }
         let mut models = Vec::new();
         for (m, quantity) in input.models.into_iter().zip(quantities) {
-            validate_stl(&m.data)?;
+            let roles = crate::model_import::roles(&m.data)?;
             let item = ItemEdit {
                 id: Some(uuid::Uuid::new_v4().to_string()),
                 name: m.name,
                 source: m.source,
                 quantity: *quantity,
             };
-            models.push((item, m.data));
+            models.push((item, m.data, roles));
         }
-        validate_items(&models.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>())?;
+        validate_items(&models.iter().map(|(m, _, _)| m.clone()).collect::<Vec<_>>())?;
         let id = uuid::Uuid::new_v4().to_string();
         let mut c = self.db.connection()?;
         let tx = c.transaction()?;
-        input.conditions.normalize();
+        input.conditions.normalize(
+            models
+                .iter()
+                .flat_map(|m| m.2.iter().copied())
+                .min()
+                .expect("validated roles"),
+        );
         input.conditions.validate(&tx, self.profiles.as_deref())?;
         tx.execute(
             "INSERT INTO plates(id,name) VALUES (?1,?2)",
             rusqlite::params![id, input.name.trim()],
         )?;
         save_conditions(&tx, &id, &input.conditions)?;
-        for (position, (m, data)) in models.iter().enumerate() {
+        for (position, (m, data, roles)) in models.iter().enumerate() {
             insert_item(
                 &tx,
                 &id,
@@ -402,6 +444,7 @@ impl Store {
                     None
                 },
             )?;
+            save_roles(&tx, &id, position, roles)?;
         }
         if let Some(original) = original {
             let metadata = Imported {
@@ -423,6 +466,14 @@ impl Store {
     /// # Errors
     /// Rejects unknown items, invalid quantities and concurrent edits.
     pub fn edit(&self, id: Option<&str>, edit: Edit) -> Result<Plate> {
+        self.edit_with_roles(id, edit, &std::collections::BTreeMap::new())
+    }
+    pub(crate) fn edit_with_roles(
+        &self,
+        id: Option<&str>,
+        edit: Edit,
+        fetched: &std::collections::BTreeMap<String, Vec<crate::model_import::Role>>,
+    ) -> Result<Plate> {
         let Edit {
             mut conditions,
             name,
@@ -433,7 +484,6 @@ impl Store {
         validate_items(&models)?;
         let mut c = self.db.connection()?;
         let tx = c.transaction()?;
-        conditions.normalize();
         conditions.validate(&tx, self.profiles.as_deref())?;
         let id = if let Some(id) = id {
             valid_id(id)?;
@@ -456,31 +506,47 @@ impl Store {
             )?;
             id
         };
-        save_conditions(&tx, &id, &conditions)?;
         // Invalidate queue command fences when a waiting plate changes. Active snapshots stay intact.
         tx.execute("UPDATE printers SET queue_generation=queue_generation+1,queue_request=NULL WHERE id IN (SELECT printer_id FROM print_jobs WHERE plate_id=?1 AND state='queued')", [&id])?;
         let mut inputs = Vec::new();
         for m in &models {
-            let original =
-                if let Some(item_id) = &m.id {
-                    let stored: Option<(Option<String>,Option<Vec<u8>>)> = tx.query_row(
-                    "SELECT model_key,original FROM plate_items WHERE id=?1 AND plate_id=?2",
-                    rusqlite::params![item_id,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-                    let (source, original) =
-                        stored.ok_or(Error::Invalid("Item does not belong to this plate"))?;
-                    if source != m.source {
-                        return Err(Error::Invalid("Replace the reference as a new item"));
-                    }
-                    original
-                } else {
-                    None
-                };
+            let original = if let Some(item_id) = &m.id {
+                let stored: Option<(Option<String>,Option<Vec<u8>>,String)> = tx.query_row(
+                    "SELECT model_key,original,roles_json FROM plate_items WHERE id=?1 AND plate_id=?2",
+                    rusqlite::params![item_id,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+                let (source, original, roles) =
+                    stored.ok_or(Error::Invalid("Item does not belong to this plate"))?;
+                if source != m.source {
+                    return Err(Error::Invalid("Replace the reference as a new item"));
+                }
+                (
+                    original,
+                    serde_json::from_str::<Vec<crate::model_import::Role>>(&roles)
+                        .map_err(std::io::Error::other)?,
+                )
+            } else {
+                (None, primary_role())
+            };
             inputs.push(original);
         }
         tx.execute("DELETE FROM plate_items WHERE plate_id=?1", [&id])?;
-        for (position, (m, original)) in models.iter().zip(inputs).enumerate() {
+        let mut used_roles = std::collections::BTreeSet::new();
+        for (position, (m, (original, previous_roles))) in models.iter().zip(inputs).enumerate() {
             insert_item(&tx, &id, position, m, original.as_deref())?;
+            let roles = m
+                .source
+                .as_ref()
+                .and_then(|s| fetched.get(s))
+                .unwrap_or(&previous_roles);
+            used_roles.extend(roles.iter().copied());
+            save_roles(&tx, &id, position, roles)?;
         }
+        conditions.normalize(
+            *used_roles
+                .first()
+                .ok_or(Error::Invalid("モデルの材料役割がありません。"))?,
+        );
+        save_conditions(&tx, &id, &conditions)?;
         let plate = load(&tx, &id)?;
         tx.commit()?;
         Ok(plate)
@@ -512,7 +578,7 @@ impl Store {
         }
         for model in plate.models {
             let item = uuid::Uuid::new_v4().to_string();
-            tx.execute("INSERT INTO plate_items(id,plate_id,position,name,source_kind,model_key,original,quantity) SELECT ?1,?2,position,name,source_kind,model_key,original,quantity FROM plate_items WHERE id=?3 AND plate_id=?4", rusqlite::params![item,id,model.id,source])?;
+            tx.execute("INSERT INTO plate_items(id,plate_id,position,name,source_kind,model_key,original,quantity,roles_json) SELECT ?1,?2,position,name,source_kind,model_key,original,quantity,roles_json FROM plate_items WHERE id=?3 AND plate_id=?4", rusqlite::params![item,id,model.id,source])?;
             if imported_source.as_deref() == Some(&model.id)
                 && let Some(metadata) = &mut imported
             {
@@ -600,13 +666,14 @@ pub(crate) fn is_deleted(c: &rusqlite::Connection, id: &str) -> Result<bool> {
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
     let (name, version, conditions) = c
-        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled,support_enabled,support_interface_filament_id FROM plates WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)?,support_enabled:r.get(10)?,support_interface_filament_id:r.get(11)? }))
+        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled,support_enabled,support_interface_filament_id,secondary_filament_id FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)?,support_enabled:r.get(10)?,support_interface_filament_id:r.get(11)?,secondary_filament_id:r.get(12)? }))
         })
         .optional()?
         .ok_or(Error::NotFound)?;
-    let models=c.prepare("SELECT id,name,model_key,quantity FROM plate_items WHERE plate_id=?1 ORDER BY position")?
-        .query_map([id],|r|Ok(Model{id:r.get(0)?,name:r.get(1)?,source:r.get(2)?,quantity:r.get(3)?}))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    let models=c.prepare("SELECT id,name,model_key,quantity,roles_json FROM plate_items WHERE plate_id=?1 ORDER BY position")?
+        .query_map([id],|r|Ok((Model{id:r.get(0)?,name:r.get(1)?,source:r.get(2)?,quantity:r.get(3)?,roles: Vec::new()},r.get::<_,String>(4)?)))?
+        .map(|row| { let (mut model, roles) = row?; model.roles = serde_json::from_str(&roles).map_err(std::io::Error::other)?; Ok(model) }).collect::<Result<Vec<_>>>()?;
     Ok(Plate {
         id: id.into(),
         name,
@@ -636,7 +703,23 @@ pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 fn save_conditions(c: &rusqlite::Connection, id: &str, v: &Conditions) -> Result<()> {
-    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9,support_enabled=?10,support_interface_filament_id=?11 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled,v.support_enabled,v.support_interface_filament_id])?;
+    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9,support_enabled=?10,support_interface_filament_id=?11,secondary_filament_id=?12 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled,v.support_enabled,v.support_interface_filament_id,v.secondary_filament_id])?;
+    Ok(())
+}
+fn save_roles(
+    c: &rusqlite::Connection,
+    id: &str,
+    position: usize,
+    roles: &[crate::model_import::Role],
+) -> Result<()> {
+    c.execute(
+        "UPDATE plate_items SET roles_json=?1 WHERE plate_id=?2 AND position=?3",
+        rusqlite::params![
+            serde_json::to_string(roles).map_err(std::io::Error::other)?,
+            id,
+            i64::try_from(position).expect("64 items")
+        ],
+    )?;
     Ok(())
 }
 fn insert_item(
@@ -803,6 +886,7 @@ mod tests {
                     instance_id: 3,
                 }],
                 print_reason: Some("painted model".into()),
+                roles: Vec::new(),
             };
             let original = b"source 3mf including untouched color and object metadata".to_vec();
             let source = store
@@ -850,6 +934,58 @@ mod tests {
                 assert_eq!(restored.read_import(&copy.id).unwrap(), original);
             }
         }
+    }
+
+    #[test]
+    fn material_roles_and_nullable_secondary_survive_edit_duplicate_and_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let edit: Edit = serde_json::from_value(serde_json::json!({
+            "name":"Two roles", "models":[{"name":"sign.3mf","source":"sign.3mf","quantity":2}],
+            "conditions":{"filament_id":null,"secondary_filament_id":null}
+        }))
+        .unwrap();
+        let roles = std::collections::BTreeMap::from([(
+            "sign.3mf".to_owned(),
+            vec![
+                crate::model_import::Role::Primary,
+                crate::model_import::Role::Secondary,
+            ],
+        )]);
+        let plate = store.edit_with_roles(None, edit, &roles).unwrap();
+        assert_eq!(plate.models[0].roles, roles["sign.3mf"]);
+        assert!(plate.conditions.secondary_filament_id.is_none());
+        let copy = store.duplicate(&plate.id, "copy").unwrap();
+        assert_eq!(copy.models[0].roles, plate.models[0].roles);
+        assert_eq!(copy.models[0].quantity, 2);
+        drop(store);
+        let reopened = Store::open(root.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(reopened.get(&copy.id).unwrap()).unwrap(),
+            serde_json::to_value(copy).unwrap()
+        );
+        let mut value = serde_json::to_value(&plate).unwrap();
+        value.as_object_mut().unwrap().remove("id");
+        value["models"][0].as_object_mut().unwrap().remove("roles");
+        let mut edit: Edit = serde_json::from_value(value).unwrap();
+        edit.conditions.secondary_filament_id = Some("missing".into());
+        assert!(
+            reopened
+                .edit_with_roles(Some(&plate.id), edit, &roles)
+                .is_err()
+        );
+        assert_eq!(reopened.get(&plate.id).unwrap().version, plate.version);
+    }
+
+    #[test]
+    fn interface_default_follows_first_used_role_without_changing_explicit_assignment() {
+        use crate::model_import::Role;
+        let mut conditions: Conditions = serde_json::from_value(serde_json::json!({"filament_id":"unused-primary","secondary_filament_id":"body","support_enabled":true})).unwrap();
+        conditions.normalize(Role::Secondary);
+        assert_eq!(conditions.interface_id(), Some("body"));
+        conditions.support_interface_filament_id = Some("explicit".into());
+        conditions.normalize(Role::Secondary);
+        assert_eq!(conditions.interface_id(), Some("explicit"));
     }
 
     #[test]

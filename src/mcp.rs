@@ -244,7 +244,7 @@ impl Tools {
 #[tool_router]
 impl Tools {
     #[tool(
-        description = "List/search currently published SCAD STL references. q is optional fuzzy search. Save a returned path; this does not publish SCAD or download STL.",
+        description = "List/search published SCAD 3MF or legacy STL references. q is optional fuzzy search. Save a returned path; model roles are resolved when the plate is saved. This does not publish SCAD.",
         annotations(read_only_hint = true)
     )]
     async fn scad_models(&self, Parameters(a): Parameters<Search>) -> CallToolResult {

@@ -4,7 +4,19 @@ import {
   destinations,
   choosePrinter,
   chooseModels,
+  materialRoles,
 } from "./plate";
+test("only roles actually used by the composition appear, preserving monochrome compatibility", () => {
+  expect(materialRoles([{}])).toEqual(["primary"]);
+  expect(materialRoles([{ roles: ["secondary"] }])).toEqual(["secondary"]);
+  expect(
+    materialRoles([
+      { roles: ["secondary", "primary"] },
+      { roles: ["primary"] },
+    ]),
+  ).toEqual(["primary", "secondary"]);
+  expect(materialRoles([])).toEqual([]);
+});
 test("catalog additions deduplicate and replacement preserves quantity and position without the old ID", () => {
   const models = [
     { id: "upload", name: "original.stl", source: null, quantity: 10 },

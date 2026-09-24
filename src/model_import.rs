@@ -10,6 +10,52 @@ const CORE: &str = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";
 const PRODUCTION: &str = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06";
 const MAX_FACES: usize = 1_000_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Primary,
+    Secondary,
+}
+
+impl Role {
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "primary" => Some(Self::Primary),
+            "secondary" => Some(Self::Secondary),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn roles(bytes: &[u8]) -> Result<Vec<Role>> {
+    if bytes.starts_with(b"PK") {
+        let package = Package::read(bytes)?;
+        if package.plates.len() != 1 || package.plates[0].roles.is_empty() {
+            return Err(Error::Invalid(
+                "primary/secondaryの役割が指定された3MFが必要です。",
+            ));
+        }
+        Ok(package.plates[0].roles.clone())
+    } else {
+        crate::plates::validate_stl(bytes)?;
+        Ok(vec![Role::Primary])
+    }
+}
+
+pub(crate) fn preview(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.starts_with(b"PK") {
+        Package::read(&bytes)?.mesh(0)
+    } else {
+        Ok(bytes)
+    }
+}
+
+struct Property {
+    count: usize,
+    opaque: bool,
+    roles: Vec<Option<Role>>,
+}
+
 fn invalid() -> Error {
     Error::Invalid(
         "3MFの形状または部品参照が不正です。モデルを含むファイルを書き出し直してください。",
@@ -28,6 +74,8 @@ struct Mesh {
     faces: Vec<[usize; 3]>,
     materials: BTreeSet<String>,
     painted: bool,
+    role: Option<Role>,
+    role_override: bool,
 }
 struct Object {
     mesh: Option<Mesh>,
@@ -54,6 +102,8 @@ pub struct Selection {
     pub plate_id: Option<String>,
     pub items: Vec<SourceItem>,
     pub print_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<Role>,
 }
 
 pub(crate) struct Package {
@@ -63,6 +113,7 @@ pub(crate) struct Package {
 }
 
 impl Package {
+    #[allow(clippy::float_cmp)] // Unit factors come from the fixed unit-name table, not measured coordinates.
     pub fn read(bytes: &[u8]) -> Result<Self> {
         let entries = archive_entries(bytes)?;
         let relations = xml(entries.get("_rels/.rels").ok_or_else(invalid)?)?;
@@ -120,6 +171,24 @@ impl Package {
         };
         for index in 0..package.plates.len() {
             let parts = package.parts(index)?;
+            let roles: BTreeSet<_> = parts.iter().filter_map(|p| p.mesh.role).collect();
+            if !roles.is_empty() {
+                let root = &package.files[&package.root];
+                if package.files.len() != 1
+                    || root.unit != 1.0
+                    || root.build.len() != 1
+                    || root.objects[&root.build[0].id].components.is_empty()
+                    || parts
+                        .iter()
+                        .any(|p| p.mesh.role.is_none() || p.mesh.painted || p.mesh.role_override)
+                {
+                    return Err(Error::Invalid(
+                        "primary/secondaryの3MFは役割別メッシュを一つの組立にまとめ、三角形ごとの材料指定を除いてください。",
+                    ));
+                }
+                package.plates[index].roles = roles.into_iter().collect();
+                continue;
+            }
             let mut materials = BTreeSet::new();
             let mut painted = false;
             for part in parts {
@@ -164,8 +233,33 @@ impl Package {
     }
     #[allow(clippy::cast_possible_truncation)] // Binary STL stores f32; range and finiteness are checked before conversion.
     pub fn mesh(&self, plate: usize) -> Result<Vec<u8>> {
+        Self::encode_mesh(self.parts(plate)?)
+    }
+    pub fn role_meshes(&self, plate: usize) -> Result<Vec<(Role, Vec<u8>)>> {
+        let roles = &self.plates.get(plate).ok_or_else(invalid)?.roles;
+        if roles.is_empty() {
+            return Err(Error::Invalid(
+                "primary/secondaryの役割が指定された3MFが必要です。",
+            ));
+        }
+        roles
+            .iter()
+            .map(|role| {
+                Ok((
+                    *role,
+                    Self::encode_mesh(
+                        self.parts(plate)?
+                            .into_iter()
+                            .filter(|p| p.mesh.role == Some(*role)),
+                    )?,
+                ))
+            })
+            .collect()
+    }
+    #[allow(clippy::cast_possible_truncation)] // Coordinates are checked against the STL f32 range.
+    fn encode_mesh<'a>(parts: impl IntoIterator<Item = PlacedMesh<'a>>) -> Result<Vec<u8>> {
         let mut triangles = Vec::new();
-        for part in self.parts(plate)? {
+        for part in parts {
             for face in &part.mesh.faces {
                 let mut points = face.map(|i| part.transform.apply(part.mesh.vertices[i]));
                 if points
@@ -377,14 +471,22 @@ fn model_file(path: &str, bytes: &[u8]) -> Result<ModelFile> {
             n.attribute("id").map(|id| {
                 (
                     id,
-                    (
-                        n.children().filter(Node::is_element).count(),
-                        !n.has_tag_name((CORE, "basematerials"))
+                    Property {
+                        count: n.children().filter(Node::is_element).count(),
+                        opaque: !n.has_tag_name((CORE, "basematerials"))
                             && !n.has_tag_name((
                                 "http://schemas.microsoft.com/3dmanufacturing/material/2015/02",
                                 "colorgroup",
                             )),
-                    ),
+                        roles: if n.has_tag_name((CORE, "basematerials")) {
+                            n.children()
+                                .filter(Node::is_element)
+                                .map(|n| n.attribute("name").and_then(Role::named))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        },
+                    },
                 )
             })
         })
@@ -428,7 +530,7 @@ fn model_file(path: &str, bytes: &[u8]) -> Result<ModelFile> {
 fn read_object(
     path: &str,
     node: Node<'_, '_>,
-    properties: &BTreeMap<&str, (usize, bool)>,
+    properties: &BTreeMap<&str, Property>,
 ) -> Result<Object> {
     if node.children().filter(Node::is_element).any(|n| {
         !["mesh", "components", "metadata"]
@@ -452,7 +554,13 @@ fn read_object(
     let components = node
         .children()
         .find(|n| n.has_tag_name((CORE, "components")));
-    if meshes.len() > 1 || meshes.is_empty() == components.is_none() {
+    if meshes.len() > 1
+        || meshes.is_empty() == components.is_none()
+        || (components.is_some()
+            && ["pid", "pindex"]
+                .iter()
+                .any(|a| node.attribute(*a).is_some()))
+    {
         return Err(invalid());
     }
     let mesh = meshes
@@ -478,7 +586,7 @@ fn read_mesh(
     node: Node<'_, '_>,
     object: Node<'_, '_>,
     path: &str,
-    properties: &BTreeMap<&str, (usize, bool)>,
+    properties: &BTreeMap<&str, Property>,
 ) -> Result<Mesh> {
     if node
         .children()
@@ -505,6 +613,18 @@ fn read_mesh(
     }
     let mut materials = BTreeSet::new();
     let mut painted = false;
+    let role = object
+        .attribute("pid")
+        .zip(object.attribute("pindex"))
+        .and_then(|(pid, index)| {
+            properties
+                .get(pid)?
+                .roles
+                .get(index.parse::<usize>().ok()?)
+                .copied()
+                .flatten()
+        });
+    let mut role_override = false;
     let faces = node
         .children()
         .find(|n| n.has_tag_name((CORE, "triangles")))
@@ -512,6 +632,9 @@ fn read_mesh(
         .children()
         .filter(|n| n.has_tag_name((CORE, "triangle")))
         .map(|n| {
+            role_override |= ["pid", "p1", "p2", "p3"]
+                .iter()
+                .any(|key| n.attribute(*key).is_some());
             painted |= n.attributes().any(|a| {
                 (a.name().contains("paint") || a.name() == "mmu_segmentation")
                     && !a.value().is_empty()
@@ -522,7 +645,7 @@ fn read_mesh(
                     .iter()
                     .any(|key| n.attribute(*key).is_some());
             if let Some(pid) = n.attribute("pid").or_else(|| object.attribute("pid")) {
-                let &(count, opaque) = properties.get(pid).ok_or_else(invalid)?;
+                let property = properties.get(pid).ok_or_else(invalid)?;
                 let first = n
                     .attribute("p1")
                     .or_else(|| object.attribute("pindex"))
@@ -532,10 +655,10 @@ fn read_mesh(
                     .flatten()
                 {
                     let index: usize = index.parse().map_err(|_| invalid())?;
-                    if index >= count {
+                    if index >= property.count {
                         return Err(invalid());
                     }
-                    painted |= opaque;
+                    painted |= property.opaque;
                     // Printing needs only the single/multiple distinction; full assignments remain in the original.
                     if materials.len() < 2 {
                         materials.insert(format!("{path}:{pid}:{index}"));
@@ -556,6 +679,8 @@ fn read_mesh(
         faces,
         materials,
         painted,
+        role,
+        role_override,
     })
 }
 fn apply_settings(files: &mut BTreeMap<String, ModelFile>, root: &str, bytes: &[u8]) -> Result<()> {
@@ -667,6 +792,7 @@ fn selections(root: &str, items: &[SourceItem], settings: Option<&[u8]>) -> Resu
                 plate_id: metadata(node, "plater_id").map(str::to_owned),
                 items: selected,
                 print_reason: None,
+                roles: Vec::new(),
             });
         }
         if has_plates && plates.is_empty() {
@@ -680,6 +806,7 @@ fn selections(root: &str, items: &[SourceItem], settings: Option<&[u8]>) -> Resu
             plate_id: None,
             items: items.to_vec(),
             print_reason: None,
+            roles: Vec::new(),
         });
     }
     Ok(plates)
@@ -889,6 +1016,87 @@ mod tests {
                     .fold(f32::INFINITY, f32::min)
         });
         (size, mesh.faces.len())
+    }
+
+    fn role_model() -> String {
+        let source = model();
+        let doc = Document::parse(&source).unwrap();
+        let mesh = doc
+            .descendants()
+            .find(|n| n.has_tag_name((CORE, "mesh")))
+            .unwrap();
+        let mesh = &source[mesh.range()];
+        format!(
+            r##"<model unit="millimeter" xmlns="{CORE}"><resources>
+          <basematerials id="70"><base name="secondary" displaycolor="#888888FF"/><base name="primary" displaycolor="#888888FF"/></basematerials>
+          <object id="9" pid="70" pindex="1">{mesh}</object>
+          <object id="3" pid="70" pindex="0">{mesh}</object>
+          <object id="40"><components><component objectid="9"/><component objectid="3" transform="1 0 0 0 1 0 0 0 1 1 0 0"/></components></object>
+          </resources><build><item objectid="40"/></build></model>"##
+        )
+    }
+
+    #[test]
+    fn named_roles_keep_parts_and_coordinates_independent_of_colors_and_ids() {
+        let source = role_model();
+        let package = Package::read(&archive(&source, None)).unwrap();
+        assert_eq!(
+            package.plates[0].roles,
+            vec![Role::Primary, Role::Secondary]
+        );
+        assert!(package.plates[0].print_reason.is_none());
+        assert_eq!(bounds(package.mesh(0).unwrap()), ([2., 1., 1.], 24));
+        let parts = package.role_meshes(0).unwrap();
+        assert_eq!(parts.len(), 2);
+        for (role, bytes) in parts {
+            let mesh = stl_io::read_stl(&mut Cursor::new(bytes)).unwrap();
+            let min_x = mesh
+                .vertices
+                .iter()
+                .map(|p| p[0])
+                .fold(f32::INFINITY, f32::min);
+            assert_eq!(min_x, if role == Role::Primary { 0. } else { 1. });
+        }
+        let reordered = source
+            .replace("70", "17")
+            .replace("secondary\" display", "swap\" display")
+            .replace("primary\" display", "secondary\" display")
+            .replace("swap\" display", "primary\" display")
+            .replace("pindex=\"1\"", "pindex=\"x\"")
+            .replace("pindex=\"0\"", "pindex=\"1\"")
+            .replace("pindex=\"x\"", "pindex=\"0\"");
+        assert_eq!(
+            package.role_meshes(0).unwrap(),
+            Package::read(&archive(&reordered, None))
+                .unwrap()
+                .role_meshes(0)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn role_contract_rejects_mixed_unknown_overrides_and_unassembled_builds() {
+        let source = role_model();
+        for invalid in [
+            source.replace("secondary\"", "tertiary\""),
+            source.replace("id=\"40\"", "id=\"40\" pid=\"70\" pindex=\"0\""),
+            source.replace("pid=\"70\" pindex=\"0\"", ""),
+            source.replace("<triangle ", "<triangle p1=\"0\" "),
+            source.replace("objectid=\"40\"", "objectid=\"9\""),
+            source.replace(
+                "<item objectid=\"40\"/>",
+                "<item objectid=\"40\"/><item objectid=\"40\"/>",
+            ),
+        ] {
+            assert!(Package::read(&archive(&invalid, None)).is_err());
+        }
+        let external = source
+            .replace("primary\"", "red\"")
+            .replace("secondary\"", "blue\"");
+        let package = Package::read(&archive(&external, None)).unwrap();
+        assert!(package.plates[0].roles.is_empty());
+        assert!(package.plates[0].print_reason.is_some());
+        assert!(package.role_meshes(0).is_err());
     }
 
     #[test]
