@@ -583,12 +583,14 @@ fn stopped_queue_retry_shares_rest_guards_and_replay_detection() {
     rig.launch();
     rig.seed();
     let job = rig.add(3);
+    let next = rig.add(3);
     rig.next(&job, 200);
     common::until(|| rig.broker.prints().len() == 1, 12);
     rig.report("RUNNING");
     rig.phase("printing");
     rig.report("FAILED");
     rig.phase("needs_attention");
+    rig.edit_conditions(&json!({"sparse_infill_density":25}));
     let controller = rig.control();
     let base = rig.base.clone();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -615,8 +617,28 @@ fn stopped_queue_retry_shares_rest_guards_and_replay_detection() {
         let busy = json!({"printer_id":"p1", "epoch":current["epoch"], "generation":current["generation"], "request_id":current["request_id"], "expected_job":current["current"]["id"]});
         assert_eq!(call(&client, "queue_retry", busy, true).await["status"], 409);
         assert_eq!(read(&controller.base, "").await["count"], 2);
+        control(&controller.base, json!({"state":"FAILED"})).await;
+        wait_value(&base, "/api/queue", "/current/state", json!("needs_attention")).await;
+        let stopped = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+        let mut discard = continuation(&stopped);
+        discard["next_job"] = Value::Null;
+        call(&client, "queue_continue", discard.clone(), false).await;
+        call(&client, "queue_continue", discard, false).await;
+        let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+        assert!(q["current"].is_null());
+        assert_eq!(q["allowed"]["next"], true);
+        let args = continuation(&q);
+        call(&client, "queue_continue", args.clone(), false).await;
+        wait_value(&controller.base, "", "/count", json!(3)).await;
+        call(&client, "queue_continue", args, false).await;
+        assert_eq!(read(&controller.base, "").await["count"], 3);
+        assert_eq!(read(&base, "/api/queue").await["current"]["id"], next["id"]);
         client.cancel().await.unwrap();
     });
+    assert_eq!(
+        rig.traces().last().unwrap()["profiles"]["process"]["sparse_infill_density"],
+        "25%"
+    );
 }
 #[test]
 #[allow(clippy::too_many_lines)] // Observe one complete two-print cycle and its rejected/replayed requests.

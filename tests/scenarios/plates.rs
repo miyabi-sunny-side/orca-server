@@ -401,7 +401,7 @@ pub fn creation_defaults(browser: bool) {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        17
+        18
     );
     let db = rig.db();
     let columns: Vec<String> = db

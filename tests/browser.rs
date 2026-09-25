@@ -244,3 +244,25 @@ fn print_history() {
     assert_eq!(rig.broker.prints().len(), 1);
     assert_eq!(rig.ftp.uploads().len(), 1);
 }
+
+#[test]
+#[ignore = "requires Chromium and official Orca 2.4.2"]
+fn stopped_recovery() {
+    let mut rig = Rig::with_options("browser-recovery", "v3", Some(&appdir()));
+    rig.launch();
+    rig.seed();
+    let first = rig.add(3);
+    let next = rig.add(3);
+    let control = rig.control();
+    rig.browser(
+        "E2E_RECOVERY_CONTEXT",
+        &json!({"next_job":next["id"]}),
+        Some(&control),
+    );
+    assert_eq!(rig.broker.prints().len(), 3);
+    assert_eq!(rig.ftp.contents().len(), 3);
+    let artifact = zip_json(&rig.ftp.contents()[1], "Metadata/project_settings.config");
+    assert_eq!(artifact["sparse_infill_density"], "25%");
+    assert_eq!(rig.queue()["current"]["id"], next["id"]);
+    assert!(!rig.store.join("jobs").join(id(&first)).exists());
+}

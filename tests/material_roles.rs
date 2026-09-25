@@ -117,6 +117,12 @@ fn role_updates_and_ams_changes_cannot_replace_frozen_inputs_or_start_wrong_mate
     rig.ftp.release();
     rig.start_phase("not_sent");
     assert!(rig.broker.prints().is_empty());
+    // Restore the current two-role plate for the transfer-time AMS guards.
+    rig.files
+        .lock()
+        .unwrap()
+        .insert("role.3mf".into(), raw.clone());
+    rig.edit_conditions(&json!({"secondary_filament_id":rig.materials[1]["id"]}));
     for absent in [true, false] {
         rig.idle();
         rig.map_material(3, 1);
@@ -158,6 +164,11 @@ fn role_updates_and_ams_changes_cannot_replace_frozen_inputs_or_start_wrong_mate
     rig.finish();
     rig.discard();
     // A new execution sees the new role set. A subsequent shape change invalidates its estimate.
+    rig.files
+        .lock()
+        .unwrap()
+        .insert("role.3mf".into(), variant(true, true));
+    rig.edit_conditions(&json!({"secondary_filament_id":null}));
     rig.plate = rig.get(&format!("/api/plates/{}", id(&rig.plate)));
     let next = rig.send(
         json!({"type":"add","plate_id":rig.plate["id"],"plate_version":rig.plate["version"]}),

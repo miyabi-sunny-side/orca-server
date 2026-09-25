@@ -39,7 +39,7 @@ fn stopped_print_retries_from_the_beginning_and_can_be_discarded() {
     rig.phase("needs_attention");
     let path = format!("/api/plates/{}", id(&rig.plate));
     let mut edited = edit(&rig.get(&path));
-    edited["models"][0]["quantity"] = json!(4);
+    edited["conditions"]["sparse_infill_density"] = json!(25);
     rig.put(&path, &edited, 200);
     let stopped = rig.queue();
     assert_eq!(stopped["printer"]["ready_to_print"], false);
@@ -59,13 +59,16 @@ fn stopped_print_retries_from_the_beginning_and_can_be_discarded() {
     assert_eq!(current["current"]["state"], "preparing");
     let before: Value = serde_json::from_str(&inputs).unwrap();
     let after: Value = serde_json::from_str(&rig.stored(&job, "execution_json")).unwrap();
-    for key in ["plate", "selection", "profiles", "filament", "ams_slot"] {
-        assert_eq!(
-            after.get(key).unwrap(),
-            before.get(key).unwrap(),
-            "frozen {key}"
-        );
-    }
+    assert_eq!(
+        before["profiles"]["process.json"]["sparse_infill_density"],
+        "15%"
+    );
+    assert_eq!(
+        after["profiles"]["process.json"]["sparse_infill_density"],
+        "25%"
+    );
+    assert_ne!(after["plate"]["version"], before["plate"]["version"]);
+    assert_eq!(rig.ftp.contents()[1], rig.cached_artifact(&job, "gcode"));
     let sent = rig.broker.prints()[1].clone();
     assert_ne!(sent["file"], rig.broker.prints()[0]["file"]);
     assert_eq!(sent["ams_mapping"], json!([3]));
@@ -87,73 +90,83 @@ fn stopped_print_retries_from_the_beginning_and_can_be_discarded() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn stopped_retry_rechecks_changes_after_transfer() {
-    for change in [
-        "RUNNING",
-        "PREPARE",
-        "PAUSE",
-        "other-job",
-        "error",
-        "disconnect",
-        "material",
-        "nozzle",
-    ] {
-        let mut rig = Rig::new(&format!("stopped-transfer-{change}"));
-        rig.launch();
-        rig.seed();
-        let job = rig.add(3);
-        rig.next(&job, 200);
-        until(|| rig.broker.prints().len() == 1, 12);
-        rig.report("RUNNING");
-        rig.phase("printing");
-        rig.report("FAILED");
-        rig.phase("needs_attention");
-        rig.ftp.action(Action::Wait);
-        post_queue(&rig, &retry(&rig, &job), 200);
-        until(|| rig.ftp.received.load(Ordering::SeqCst), 10);
-        match change {
-            "disconnect" => {
-                rig.broker.action(Action::Disconnect);
-                until(|| rig.queue()["printer"]["synchronized"] == false, 10);
+    for continue_next in [false, true] {
+        for change in [
+            "RUNNING",
+            "PREPARE",
+            "PAUSE",
+            "other-job",
+            "error",
+            "disconnect",
+            "material",
+            "nozzle",
+        ] {
+            let mut rig = Rig::new(&format!("stopped-transfer-{change}"));
+            rig.launch();
+            rig.seed();
+            let job = rig.add(3);
+            rig.next(&job, 200);
+            until(|| rig.broker.prints().len() == 1, 12);
+            rig.report("RUNNING");
+            rig.phase("printing");
+            rig.report("FAILED");
+            rig.phase("needs_attention");
+            let request = if continue_next {
+                rig.discard();
+                let next = rig.add(3);
+                rig.command(json!({"type":"next","expected_job":next["id"],"removed_job":null,"cleared":true}), None)
+            } else {
+                retry(&rig, &job)
+            };
+            rig.ftp.action(Action::Wait);
+            post_queue(&rig, &request, 200);
+            until(|| rig.ftp.received.load(Ordering::SeqCst), 10);
+            match change {
+                "disconnect" => {
+                    rig.broker.action(Action::Disconnect);
+                    until(|| rig.queue()["printer"]["synchronized"] == false, 10);
+                }
+                "material" => {
+                    let slot = rig.slot(3);
+                    rig.put(
+                        &format!("/api/printers/p1/ams/{}", id(&slot)),
+                        &json!({"revision":slot["revision"],"filament_id":null}),
+                        204,
+                    );
+                }
+                _ => {
+                    let mut report = rig.full.clone();
+                    report["print"]["gcode_state"] = json!("FAILED");
+                    report["print"]["subtask_name"] =
+                        rig.broker.prints()[0]["subtask_name"].clone();
+                    report["print"]["gcode_file"] = rig.broker.prints()[0]["file"].clone();
+                    let (field, value) = match change {
+                        "other-job" => ("subtask_name", json!("other-job")),
+                        "error" => ("print_error", json!(12)),
+                        "nozzle" => ("nozzle_diameter", json!("0.6")),
+                        state => ("gcode_state", json!(state)),
+                    };
+                    report["print"][field] = value.clone();
+                    rig.broker.send(&report);
+                    until(
+                        || {
+                            let status = rig.queue()["printer"].clone();
+                            match change {
+                                "other-job" => status["print"]["name"] == value,
+                                "error" => status["print"]["error"] == value,
+                                "nozzle" => status["nozzle_diameter"] == value,
+                                _ => status["print"]["state"] == value,
+                            }
+                        },
+                        10,
+                    );
+                }
             }
-            "material" => {
-                let slot = rig.slot(3);
-                rig.put(
-                    &format!("/api/printers/p1/ams/{}", id(&slot)),
-                    &json!({"revision":slot["revision"],"filament_id":null}),
-                    204,
-                );
-            }
-            _ => {
-                let mut report = rig.full.clone();
-                report["print"]["gcode_state"] = json!("FAILED");
-                report["print"]["subtask_name"] = rig.broker.prints()[0]["subtask_name"].clone();
-                report["print"]["gcode_file"] = rig.broker.prints()[0]["file"].clone();
-                let (field, value) = match change {
-                    "other-job" => ("subtask_name", json!("other-job")),
-                    "error" => ("print_error", json!(12)),
-                    "nozzle" => ("nozzle_diameter", json!("0.6")),
-                    state => ("gcode_state", json!(state)),
-                };
-                report["print"][field] = value.clone();
-                rig.broker.send(&report);
-                until(
-                    || {
-                        let status = rig.queue()["printer"].clone();
-                        match change {
-                            "other-job" => status["print"]["name"] == value,
-                            "error" => status["print"]["error"] == value,
-                            "nozzle" => status["nozzle_diameter"] == value,
-                            _ => status["print"]["state"] == value,
-                        }
-                    },
-                    10,
-                );
-            }
+            rig.ftp.release();
+            rig.start_phase("not_sent");
+            assert_eq!(rig.broker.prints().len(), 1, "{change}");
+            rig.phase("needs_attention");
         }
-        rig.ftp.release();
-        rig.start_phase("not_sent");
-        assert_eq!(rig.broker.prints().len(), 1, "{change}");
-        rig.phase("needs_attention");
     }
 }
 
@@ -286,6 +299,8 @@ fn queue_survives_crashes_without_replaying_prints() {
     rig.phase("needs_attention");
     assert_eq!(rig.broker.prints().len(), 1);
     post_queue(&rig, &request, 409);
+    rig.report("FINISH");
+    until(|| rig.queue()["allowed"]["discard"] == true, 12);
     rig.discard();
     assert!(rig.queue()["current"].is_null());
     assert_eq!(array(&rig.queue()["waiting"]).len(), 1);
@@ -387,4 +402,185 @@ fn queue_survives_crashes_without_replaying_prints() {
         0
     );
     rig.check();
+}
+
+#[test]
+fn stopped_discard_preserves_recovery_across_empty_queue_and_restart() {
+    for initially_empty in [false, true] {
+        let mut rig = Rig::new("discard-next-recovery");
+        rig.launch();
+        rig.seed();
+        let first = rig.add(3);
+        let next = (!initially_empty).then(|| rig.add(3));
+        rig.next(&first, 200);
+        until(|| rig.broker.prints().len() == 1, 12);
+        rig.report("RUNNING");
+        rig.phase("printing");
+        rig.report("FAILED");
+        rig.phase("needs_attention");
+        if !initially_empty {
+            rig.stop(false);
+            rig.db()
+                .execute_batch(
+                    "ALTER TABLE printers DROP COLUMN recovery_attempt; PRAGMA user_version=17;",
+                )
+                .unwrap();
+            rig.launch();
+            rig.report("FAILED");
+            until(|| rig.queue()["allowed"]["discard"] == true, 12);
+        }
+        rig.discard();
+        assert!(rig.queue()["current"].is_null());
+        assert!(!rig.store.join("jobs").join(id(&first)).exists());
+        rig.stop(false);
+        rig.launch();
+        rig.report("FAILED");
+        until(|| rig.queue()["printer"]["synchronized"] == true, 12);
+        let next = next.unwrap_or_else(|| rig.add(3));
+        let q = rig.queue();
+        assert_eq!(q["printer"]["ready_to_print"], false);
+        assert_eq!(q["allowed"]["next"], true);
+        assert_eq!(rig.broker.prints().len(), 1);
+        let request = rig.command(
+            json!({"type":"next","expected_job":next["id"],"removed_job":null,"cleared":true}),
+            Some(&q),
+        );
+        post_queue(&rig, &request, 200);
+        until(|| rig.broker.prints().len() == 2, 12);
+        post_queue(&rig, &request, 200);
+        assert_eq!(rig.broker.prints().len(), 2);
+        assert_eq!(rig.queue()["current"]["id"], next["id"]);
+        assert_ne!(
+            rig.broker.prints()[0]["subtask_name"],
+            rig.broker.prints()[1]["subtask_name"]
+        );
+        rig.check();
+    }
+}
+
+#[test]
+fn unknown_sent_attempt_requires_matching_terminal_report_before_reprint() {
+    let mut rig = Rig::new("unknown-reprint");
+    rig.launch();
+    rig.seed();
+    let job = rig.add(3);
+    rig.next(&job, 200);
+    until(|| rig.broker.prints().len() == 1, 12);
+    rig.stop(true);
+    rig.launch();
+    rig.start_phase("unknown");
+    rig.idle();
+    assert_eq!(rig.queue()["allowed"]["retry"], false);
+    post_queue(&rig, &retry(&rig, &job), 409);
+    assert_eq!(rig.broker.prints().len(), 1);
+    rig.report("FAILED");
+    until(|| rig.queue()["allowed"]["retry"] == true, 12);
+    post_queue(&rig, &retry(&rig, &job), 200);
+    until(|| rig.broker.prints().len() == 2, 12);
+}
+
+#[test]
+fn explicit_reprint_refreshes_inputs_and_reuses_only_matching_cache() {
+    for change in ["unchanged", "source", "material"] {
+        let mut rig = Rig::new(&format!("latest-retry-{change}"));
+        rig.launch();
+        rig.seed();
+        let job = rig.add(3);
+        rig.next(&job, 200);
+        until(|| rig.broker.prints().len() == 1, 12);
+        rig.report("RUNNING");
+        rig.phase("printing");
+        rig.report("FAILED");
+        rig.phase("needs_attention");
+        let before = rig.traces();
+        match change {
+            "source" => {
+                rig.files.lock().unwrap().get_mut("parts/cube.stl").unwrap()[0] = b'X';
+            }
+            "material" => {
+                fs::write(rig.root.path().join("cli-hold"), "1").unwrap();
+                rig.temperature(1, 225);
+            }
+            _ => {}
+        }
+        let request = retry(&rig, &job);
+        post_queue(&rig, &request, 200);
+        if change == "material" {
+            until(|| rig.traces().len() > before.len(), 12);
+            assert_eq!(rig.broker.prints().len(), 1);
+            fs::remove_file(rig.root.path().join("cli-hold")).unwrap();
+        }
+        until(|| rig.broker.prints().len() == 2, 12);
+        let after = rig.traces();
+        if change == "unchanged" {
+            assert_eq!(after.len(), before.len());
+            assert_eq!(rig.ftp.contents()[0], rig.ftp.contents()[1]);
+        } else {
+            assert!(after.len() > before.len());
+            if change == "source" {
+                assert_ne!(
+                    before.last().unwrap()["inputs"],
+                    after.last().unwrap()["inputs"]
+                );
+            } else {
+                let execution: Value =
+                    serde_json::from_str(&rig.stored(&job, "execution_json")).unwrap();
+                assert_eq!(
+                    execution["profiles"]["filament.json"]["nozzle_temperature"],
+                    json!(["225"])
+                );
+            }
+        }
+        let frozen = rig.stored(&job, "execution_json");
+        rig.edit_conditions(&json!({"sparse_infill_density":35}));
+        post_queue(&rig, &request, 200);
+        assert_eq!(rig.stored(&job, "execution_json"), frozen);
+        assert_eq!(rig.broker.prints().len(), 2);
+    }
+}
+
+#[test]
+fn reprint_blocks_deleted_invalid_and_unavailable_latest_inputs() {
+    for change in ["deleted", "invalid", "source", "slicer"] {
+        let mut rig = Rig::new(&format!("invalid-retry-{change}"));
+        rig.launch();
+        rig.seed();
+        let job = rig.add(3);
+        rig.next(&job, 200);
+        until(|| rig.broker.prints().len() == 1, 12);
+        rig.report("RUNNING");
+        rig.phase("printing");
+        rig.report("FAILED");
+        rig.phase("needs_attention");
+        match change {
+            "deleted" => {
+                rig.request(
+                    "DELETE",
+                    &format!("/api/plates/{}", id(&rig.plate)),
+                    None,
+                    204,
+                );
+            }
+            "invalid" => {
+                rig.edit_conditions(&json!({"filament_id":null}));
+            }
+            "source" => rig.files.lock().unwrap().clear(),
+            "slicer" => {
+                fs::write(rig.root.path().join("cli-fail"), "1").unwrap();
+                rig.edit_conditions(&json!({"sparse_infill_density":25}));
+            }
+            _ => unreachable!(),
+        }
+        if matches!(change, "deleted" | "invalid") {
+            let q = rig.queue();
+            assert_eq!(q["allowed"]["retry"], false);
+            assert!(q["recovery"]["retry_reason"].is_string());
+            post_queue(&rig, &retry(&rig, &job), 409);
+        } else {
+            post_queue(&rig, &retry(&rig, &job), 200);
+            rig.phase("needs_attention");
+        }
+        assert_eq!(rig.broker.prints().len(), 1);
+        assert_eq!(rig.ftp.contents().len(), 1);
+    }
 }

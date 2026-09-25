@@ -113,13 +113,7 @@ impl Resolved {
             .filter_map(|key| self.profiles.get(key).cloned())
             .collect()
     }
-    fn check_bindings(
-        &mut self,
-        c: &Connection,
-        device: &Device,
-        status: &Status,
-        refresh: bool,
-    ) -> Result<()> {
+    fn check_bindings(&self, c: &Connection, device: &Device, status: &Status) -> Result<()> {
         let machine: String = c.query_row(
             "SELECT machine_profile_key FROM printers WHERE id=?1",
             [&device.id],
@@ -138,9 +132,9 @@ impl Resolved {
             .ok_or(Error::Invalid("Invalid nozzle profile"))?;
         crate::print_start::check_nozzle(status, diameter, &device.settings.nozzle_material)?;
         let filaments = crate::database::load_filaments(c)?;
-        for binding in std::iter::once(&mut self.main)
-            .chain(self.secondary.iter_mut())
-            .chain(self.interface.iter_mut())
+        for binding in std::iter::once(&self.main)
+            .chain(self.secondary.iter())
+            .chain(self.interface.iter())
         {
             let slot = crate::ams::resolve(c, &device.id, &binding.filament.id, &machine)?
                 .into_iter()
@@ -150,7 +144,7 @@ impl Resolved {
                 ))?;
             let number = slot.ams_id * 4 + slot.slot_index;
             if number != binding.ams_slot
-                || (!refresh && slot.revision != binding.slot_revision)
+                || slot.revision != binding.slot_revision
                 || filaments.iter().find(|f| f.id == binding.filament.id) != Some(&binding.filament)
                 || binding.setting.as_ref().is_some_and(|setting| {
                     crate::products::load_setting(c, &binding.filament.id, &machine)
@@ -172,9 +166,6 @@ impl Resolved {
                 return Err(Error::Conflict(
                     "Selected AMS slot is not confirmed present",
                 ));
-            }
-            if refresh {
-                binding.slot_revision = slot.revision;
             }
         }
         Ok(())
@@ -207,6 +198,24 @@ fn binding(
     })
 }
 fn recovery_state(c: &Connection, job: &Job, status: &Status) -> Result<Option<String>> {
+    let raw: Option<String> = c.query_row(
+        "SELECT attempt_json FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)",
+        [&job.id], |r| r.get(0),
+    )?;
+    let attempt: Option<Attempt> = raw
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(std::io::Error::other)?;
+    if attempt.as_ref().is_some_and(|a| {
+        a.was_sent() && !matches!(a.phase, Phase::Rejected | Phase::Finished | Phase::Resolved)
+    }) && !(status.matches_attempt(job.attempt_id.as_deref().unwrap_or(""))
+        && matches!(status.print.state.as_deref(), Some("FAILED" | "FINISH")))
+    {
+        return Err(Error::Conflict(
+            "Wait for a matching terminal report for the previous start",
+        ));
+    }
     let has_identity = [&status.print.name, &status.print.file]
         .into_iter()
         .any(|s| s.as_ref().is_some_and(|v| !v.is_empty()));
@@ -216,16 +225,11 @@ fn recovery_state(c: &Connection, job: &Job, status: &Status) -> Result<Option<S
     let id = job.attempt_id.as_deref().unwrap_or("");
     let mut target = id.to_owned();
     if !status.matches_attempt(id) {
-        let (execution, attempt): (Option<String>, Option<String>) = c.query_row(
-            "SELECT execution_json,attempt_json FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)",
+        let execution: Option<String> = c.query_row(
+            "SELECT execution_json FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)",
             [&job.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )?;
-        let attempt: Option<Attempt> = attempt
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(std::io::Error::other)?;
         let execution: Option<Execution> = execution
             .as_deref()
             .map(serde_json::from_str)
@@ -256,30 +260,39 @@ fn recovery_state(c: &Connection, job: &Job, status: &Status) -> Result<Option<S
     Ok(Some(target))
 }
 
+fn next_recovery(c: &Connection, pid: &str, status: &Status) -> Result<Option<String>> {
+    if status.ready_to_print {
+        return Ok(None);
+    }
+    let target: Option<String> = c.query_row(
+        "SELECT recovery_attempt FROM printers WHERE id=?1",
+        [pid],
+        |r| r.get(0),
+    )?;
+    let target = target.ok_or(Error::Conflict("Wait for a current, ready printer report"))?;
+    status.check_stopped(&target)?;
+    Ok(Some(target))
+}
+
 fn retry_execution(
     c: &Connection,
     device: &Device,
     job: &Job,
     status: &Status,
+    profiles: &Profiles,
 ) -> Result<Execution> {
     let stopped_attempt = recovery_state(c, job, status)?;
-    let raw: String = c.query_row(
-        "SELECT execution_json FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)",
-        [&job.id],
-        |r| r.get(0),
-    )?;
-    let mut execution: Execution = serde_json::from_str(&raw).map_err(std::io::Error::other)?;
-    execution.stopped_attempt = stopped_attempt;
-    if execution.settings.main.ams_slot_id.is_empty() {
-        execution
-            .settings
-            .main
-            .ams_slot_id
-            .clone_from(&job.specification.ams_slot_id);
+    if crate::plates::is_deleted(c, &job.plate_id)? {
+        return Err(Error::Conflict("Plate has been deleted"));
     }
-    // Explicit retry refreshes revisions of the same slots; material IDs and slice inputs remain frozen.
-    execution.settings.check_bindings(c, device, status, true)?;
-    Ok(execution)
+    let plate = crate::plates::load(c, &job.plate_id)?;
+    let specification = planned(c, &device.id, &plate)?;
+    let settings = available(c, device, &specification, &plate, status, profiles)?;
+    Ok(Execution {
+        plate,
+        stopped_attempt,
+        settings,
+    })
 }
 struct Preparation {
     job: Job,
@@ -505,22 +518,9 @@ fn available(
     status: &Status,
     profiles: &Profiles,
 ) -> Result<Resolved> {
-    let mut resolved = resolve(c, &device.id, s, profiles, plate)?;
-    resolved.check_bindings(c, device, status, false)?;
+    let resolved = resolve(c, &device.id, s, profiles, plate)?;
+    resolved.check_bindings(c, device, status)?;
     Ok(resolved)
-}
-fn ready(
-    c: &Connection,
-    device: &Device,
-    s: &Specification,
-    plate: &crate::plates::Plate,
-    status: &Status,
-    profiles: &Profiles,
-) -> Result<Resolved> {
-    if !status.ready_to_print {
-        return Err(Error::Conflict("Wait for a current, ready printer report"));
-    }
-    available(c, device, s, plate, status, profiles)
 }
 pub(crate) fn planned(
     c: &Connection,
@@ -591,30 +591,14 @@ fn directory(store: &Store, job: &str, attempt: &str) -> Result<PathBuf> {
 pub(crate) fn originals(
     c: &Connection,
     plate: &crate::plates::Plate,
-    cached: Option<&std::path::Path>,
 ) -> Result<Vec<Option<Vec<u8>>>> {
-    let mut originals = Vec::new();
-    let mut index = 0;
-    for model in &plate.models {
-        // Once all inputs were written, retry must not substitute a newer model.
-        // A failure before fetching inputs may still retry the initial fetch.
-        let frozen = cached.is_some_and(|path| path.join("process.json").is_file());
-        let cached = cached
-            .and_then(|path| {
-                ["3mf", "stl"]
-                    .iter()
-                    .map(|ext| path.join(format!("{index}.{ext}")))
-                    .find(|p| p.is_file())
-            })
-            .map(std::fs::read)
-            .transpose()?;
-        let original = if cached.is_some() {
-            cached
-        } else if frozen {
-            return Err(Error::Conflict(
-                "Original model for this attempt is unavailable",
-            ));
-        } else if model.source.is_none() {
+    plate
+        .models
+        .iter()
+        .map(|model| {
+            if model.source.is_some() {
+                return Ok(None);
+            }
             c.query_row(
                 "SELECT original FROM plate_items WHERE plate_id=?1 AND id=?2",
                 params![plate.id, model.id],
@@ -622,17 +606,12 @@ pub(crate) fn originals(
             )
             .optional()?
             .flatten()
+            .map(Some)
             .ok_or(Error::Conflict(
                 "Original model for this attempt is unavailable",
-            ))?
-            .into()
-        } else {
-            None
-        };
-        originals.push(original);
-        index += usize::from(model.quantity);
-    }
-    Ok(originals)
+            ))
+        })
+        .collect()
 }
 
 pub(crate) async fn write_inputs(
@@ -809,17 +788,23 @@ impl Service {
             value["hold_reason"] = hold.err().map_or(Value::Null, |e| json!(message(&e)));
             waiting.push(value);
         }
-        let idle = status.ready_to_print;
-        let next = idle
+        let next_recovery = next_recovery(&c, &self.device.id, &status);
+        let next = next_recovery.is_ok()
             && current.is_none_or(|j| j.state == "awaiting_removal")
             && waiting.first().is_some_and(|j| j["hold_reason"].is_null());
-        let retry = current
-            .filter(|j| j.state == "needs_attention")
-            .map(|j| retry_execution(&c, &self.device, j, &status));
+        let retry = current.filter(|j| j.state == "needs_attention").map(|j| {
+            let profiles = &self
+                .slicer
+                .as_ref()
+                .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
+                .profiles;
+            retry_execution(&c, &self.device, j, &status, profiles)
+        });
         let discard = current
             .filter(|j| matches!(j.state.as_str(), "needs_attention" | "awaiting_removal"))
             .map(|j| recovery_state(&c, j, &status));
         let recovery = json!({
+            "next_reason": next_recovery.as_ref().err().map(message),
             "retry_reason": retry.as_ref().and_then(|r| r.as_ref().err()).map(message),
             "discard_reason": discard.as_ref().and_then(|r| r.as_ref().err()).map(message),
         });
@@ -937,7 +922,6 @@ impl Service {
                 cleared,
             } => {
                 if !cleared
-                    || !status.ready_to_print
                     || current.is_some_and(|j| j.state != "awaiting_removal")
                     || current.map(|j| &j.id) != removed_job.as_ref()
                     || waiting.first().map(|j| &j.id) != Some(expected_job)
@@ -980,7 +964,11 @@ impl Service {
                         "Inspect the printer and empty plate before clearing this job",
                     ));
                 }
-                recovery_state(&tx, job, status)?;
+                let stopped = recovery_state(&tx, job, status)?;
+                tx.execute(
+                    "UPDATE printers SET recovery_attempt=?1 WHERE id=?2",
+                    params![stopped, self.device.id],
+                )?;
                 tx.execute(
                     "UPDATE print_jobs SET state=?1 WHERE id=?2",
                     params![
@@ -1113,7 +1101,8 @@ impl Service {
         let execution = if job.state == "queued" {
             let plate = crate::plates::load(c, &job.plate_id)?;
             job.specification = planned(c, &self.device.id, &plate)?;
-            let settings = ready(
+            let stopped_attempt = next_recovery(c, &self.device.id, status)?;
+            let settings = available(
                 c,
                 &self.device,
                 &job.specification,
@@ -1123,18 +1112,18 @@ impl Service {
             )?;
             Execution {
                 plate,
+                stopped_attempt,
                 settings,
-                stopped_attempt: None,
             }
         } else {
-            retry_execution(c, &self.device, &job, status)?
+            retry_execution(c, &self.device, &job, status, &slicer.profiles)?
         };
-        let cached = job
-            .attempt_id
-            .as_ref()
-            .map(|id| directory(&self.store, &job.id, id))
-            .transpose()?;
-        let originals = originals(c, &execution.plate, cached.as_deref())?;
+        job.specification = planned(c, &self.device.id, &execution.plate)?;
+        let originals = originals(c, &execution.plate)?;
+        c.execute(
+            "UPDATE printers SET recovery_attempt=NULL WHERE id=?1",
+            [&self.device.id],
+        )?;
         job.state = "preparing".into();
         job.name.clone_from(&execution.plate.name);
         let attempt = uuid::Uuid::new_v4().to_string();
@@ -1353,9 +1342,7 @@ impl Database {
                 "Print material order or AMS mapping differs from the frozen execution",
             ));
         }
-        execution
-            .settings
-            .check_bindings(&c, device, status, false)?;
+        execution.settings.check_bindings(&c, device, status)?;
         Ok(())
     }
     pub(crate) fn persist_attempt(&self, pid: &str, attempt: &Attempt) -> Result<()> {
@@ -1718,12 +1705,6 @@ mod tests {
             .unwrap();
         }
         assert_eq!(std::fs::read(path.join("0.3mf")).unwrap(), bytes);
-        assert_eq!(
-            originals(&s.store.db.connection().unwrap(), &plate, Some(&path)).unwrap(),
-            vec![Some(bytes.clone())]
-        );
-        std::fs::remove_file(path.join("0.3mf")).unwrap();
-        assert!(originals(&s.store.db.connection().unwrap(), &plate, Some(&path)).is_err());
         plate.models[0].roles.pop();
         assert!(
             write_inputs(&path, &plate, &settings, vec![Some(bytes)], None)

@@ -130,6 +130,7 @@ fn mqtt_v3() {
     mqtt("v3");
 }
 
+#[allow(clippy::too_many_lines)] // One start lifecycle checks protocol failures without changing its fixture.
 fn printer_start(version: &str) {
     let mut rig = Rig::with_options("printer-start", version, None);
     rig.env.insert("P1_START_TIMEOUT_SECS".into(), "3".into());
@@ -215,7 +216,10 @@ fn printer_start(version: &str) {
         json!({"type":"retry","expected_job":job["id"],"cleared":false}),
         409,
     );
+    rig.report("FAILED");
+    until(|| rig.queue()["allowed"]["discard"] == true, 12);
     rig.discard();
+    rig.idle();
     let mut settings = printer_settings(&rig.get("/api/printers/p1"));
     settings["ftps_port"] = json!(wrong.port);
     let requests = rig.broker.requests().len();

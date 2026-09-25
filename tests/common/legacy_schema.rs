@@ -2,6 +2,7 @@
 pub fn queue_v16(c: &rusqlite::Connection) {
     c.execute_batch(
         "PRAGMA foreign_keys=OFF;
+        ALTER TABLE printers DROP COLUMN recovery_attempt;
         DROP TRIGGER referenced_material_setting_delete;
         DROP TRIGGER referenced_material_setting_update;
         DROP INDEX one_active_job;

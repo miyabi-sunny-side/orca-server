@@ -204,6 +204,14 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
         until(|| status(&rig, pid)["ready_to_print"] == true, 12);
         let job = queue(&rig, pid)["current"].clone();
         assert_eq!(job["state"], "needs_attention");
+        assert_eq!(queue(&rig, pid)["allowed"]["discard"], false);
+        let printed = peer.prints()[0].clone();
+        let mut finished = full.clone();
+        finished["print"]["gcode_state"] = json!("FINISH");
+        finished["print"]["subtask_name"] = printed["subtask_name"].clone();
+        finished["print"]["gcode_file"] = printed["file"].clone();
+        peer.send(&finished);
+        until(|| queue(&rig, pid)["allowed"]["discard"] == true, 12);
         command(
             &rig,
             pid,
@@ -487,7 +495,7 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        17
+        18
     );
     assert!(
         peers

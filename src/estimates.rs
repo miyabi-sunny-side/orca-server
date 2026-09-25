@@ -88,7 +88,7 @@ fn load(c: &Connection, plate: &str) -> Result<Option<(Value, Record)>> {
 }
 fn saved_plan(c: &Connection, plate: &Plate, profiles: &Profiles) -> Result<Value> {
     let settings = queue::slice_settings(c, profiles, plate)?;
-    Ok(plan(plate, &settings, &queue::originals(c, plate, None)?))
+    Ok(plan(plate, &settings, &queue::originals(c, plate)?))
 }
 pub(crate) fn plate_view(
     c: &Connection,
@@ -281,7 +281,7 @@ async fn compute(
     }
     if generated && plate.models.iter().any(|m| m.source.is_some()) {
         let scratch = tempfile::tempdir_in(store.root.join("slices-work"))?;
-        let originals = queue::originals(&*store.db.connection()?, plate, None)?;
+        let originals = queue::originals(&*store.db.connection()?, plate)?;
         let verification = queue::write_inputs(scratch.path(), plate, settings, originals, source)
             .await
             .and_then(|_| input_key(scratch.path()));
@@ -393,7 +393,7 @@ pub(crate) fn start(store: Store, slicer: Option<Slicer>, source: Option<Source>
                         }
                         let plate = crate::plates::load(&c, &id)?;
                         let settings = queue::slice_settings(&c, &slicer.profiles, &plate)?;
-                        let originals = queue::originals(&c, &plate, None)?;
+                        let originals = queue::originals(&c, &plate)?;
                         Ok((
                             Execution {
                                 plate,

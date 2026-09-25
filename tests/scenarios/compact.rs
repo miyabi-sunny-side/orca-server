@@ -63,7 +63,7 @@ pub fn compact_queue(browser: bool) {
     ready(&rig);
     assert_eq!(
         rig.rows("PRAGMA user_version", &[]),
-        vec![vec![rusqlite::types::Value::Integer(17)]]
+        vec![vec![rusqlite::types::Value::Integer(18)]]
     );
     assert_eq!(
         rig.rows("SELECT * FROM plate_items ORDER BY id", &[]),

@@ -465,7 +465,11 @@
       </div>
       {#if queue.recovery?.retry_reason}
         <p class="failure" role="status">
-          {failureMessage(queue.recovery.retry_reason)}
+          <span>{failureMessage(queue.recovery.retry_reason)}</span>
+          {#if !queue.current.plate_deleted}<a
+              href={`/plates/${queue.current.plate_id}?edit=1`}
+              >プレートの条件を編集</a
+            >{/if}
         </p>
       {/if}
       {#if queue.recovery?.discard_reason && queue.recovery.discard_reason !== queue.recovery.retry_reason}
@@ -491,6 +495,12 @@
               : "空のプレートで印刷を開始"}</button
           >
         </div>
+        {#if !queue.allowed.next && queue.recovery?.next_reason}<p
+            class="failure"
+            role="status"
+          >
+            {failureMessage(queue.recovery.next_reason)}
+          </p>{/if}
       {:else if queue.current}<div class="actions">
           <button
             class="btn primary"

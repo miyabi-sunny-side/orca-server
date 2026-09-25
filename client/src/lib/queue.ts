@@ -51,7 +51,11 @@ export type QueueState = {
   generation: number;
   request_id: string;
   allowed: { next: boolean; retry: boolean; discard: boolean };
-  recovery?: { retry_reason: string | null; discard_reason: string | null };
+  recovery?: {
+    retry_reason: string | null;
+    discard_reason: string | null;
+    next_reason?: string | null;
+  };
   waiting: Job[];
   current: Job | null;
   printer: Printer;
@@ -137,6 +141,8 @@ export const phaseText = {
   needs_attention: "確認が必要です",
 };
 export const failureText: Record<string, string> = {
+  "Wait for a matching terminal report for the previous start":
+    "前の開始結果が不明です。本体から対象の停止・終了報告を受け取るまでお待ちください。",
   "Wait for a fresh synchronized printer report":
     "本体の最新状態を取得するまでお待ちください。",
   "Clear the printer error before recovery":

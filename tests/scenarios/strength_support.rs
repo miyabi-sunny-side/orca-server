@@ -256,8 +256,10 @@ pub fn legacy_support() {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        17
+        18
     );
+    rig.report("FAILED");
+    until(|| rig.queue()["allowed"]["retry"] == true, 12);
     rig.send(
         json!({"type":"retry","expected_job":job["id"],"cleared":true}),
         200,
@@ -379,6 +381,11 @@ pub fn support_interface(browser: bool) {
     rig.ftp.release();
     rig.start_phase("not_sent");
     assert!(rig.broker.prints().is_empty());
+    rig.send(
+        json!({"type":"retry","expected_job":job["id"],"cleared":true}),
+        409,
+    );
+    rig.edit_conditions(&json!({"support_interface_filament_id":blue}));
     let retry = |rig: &Rig| {
         rig.send(
             json!({"type":"retry","expected_job":job["id"],"cleared":true}),

@@ -85,7 +85,8 @@ fn completed_history_survives_repeated_reports_cleanup_restart_and_deleted_refer
         rig.report(outcome);
         rig.phase("needs_attention");
         assert_eq!(rig.get("/api/history"), repeated);
-        rig.idle();
+        rig.report("FAILED");
+        until(|| rig.queue()["allowed"]["discard"] == true, 12);
         rig.send(
             json!({"type":"discard","expected_job":job["id"],"cleared":true}),
             200,
