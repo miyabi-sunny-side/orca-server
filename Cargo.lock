@@ -1109,6 +1109,7 @@ dependencies = [
  "include_dir",
  "mime_guess",
  "reqwest",
+ "ring",
  "rmcp",
  "roxmltree",
  "rumqttc",

@@ -217,7 +217,7 @@ fn recovery_state(c: &Connection, job: &Job, status: &Status) -> Result<Option<S
     let mut target = id.to_owned();
     if !status.matches_attempt(id) {
         let (execution, attempt): (Option<String>, Option<String>) = c.query_row(
-            "SELECT execution_json,attempt_json FROM print_jobs WHERE id=?1",
+            "SELECT execution_json,attempt_json FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)",
             [&job.id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -264,7 +264,7 @@ fn retry_execution(
 ) -> Result<Execution> {
     let stopped_attempt = recovery_state(c, job, status)?;
     let raw: String = c.query_row(
-        "SELECT execution_json FROM print_jobs WHERE id=?1",
+        "SELECT execution_json FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)",
         [&job.id],
         |r| r.get(0),
     )?;
@@ -288,7 +288,7 @@ struct Preparation {
 }
 
 fn jobs(c: &Connection, pid: &str) -> Result<Vec<Job>> {
-    Ok(c.prepare("SELECT id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,state,attempt_id,artifact_path,last_error FROM print_jobs WHERE printer_id=?1 AND state NOT IN ('completed','cancelled') ORDER BY position,id")?
+    Ok(c.prepare("SELECT j.id,j.plate_id,coalesce(e.name,p.name),coalesce(e.ams_slot_id,''),coalesce(e.filament_id,p.filament_id,''),coalesce(e.required_machine_profile_key,p.required_machine_profile_key,''),coalesce(e.process_profile_key,p.process_profile_key,''),coalesce(e.bed_type,p.bed_type,''),j.state,j.attempt_id,e.artifact_path,j.last_error FROM print_jobs j JOIN plates p ON p.id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('completed','cancelled') ORDER BY j.position,j.id")?
         .query_map([pid],|r|Ok(Job{id:r.get(0)?,plate_id:r.get(1)?,name:r.get(2)?,specification:Specification{ams_slot_id:r.get(3)?,filament_id:r.get(4)?,required_machine_profile_key:r.get(5)?,process_profile_key:r.get(6)?,bed_type:r.get(7)?},state:r.get(8)?,attempt_id:r.get(9)?,artifact_path:r.get(10)?,last_error:r.get(11)?}))?
         .collect::<std::result::Result<_,_>>()?)
 }
@@ -346,20 +346,76 @@ pub(crate) fn resolve(
     profiles: &Profiles,
     plate: &crate::plates::Plate,
 ) -> Result<Resolved> {
-    plate.ensure_printable()?;
-    let main = binding(
+    let mut settings = slice_settings(c, profiles, plate)?;
+    settings.main = binding(
         c,
         pid,
         &s.filament_id,
         &s.required_machine_profile_key,
         Some(&s.ams_slot_id),
     )?;
+    if let Some(material) = &mut settings.secondary {
+        *material = binding(
+            c,
+            pid,
+            &material.filament.id,
+            &s.required_machine_profile_key,
+            None,
+        )?;
+    }
+    if let Some(material) = settings.interface.as_mut() {
+        *material = binding(
+            c,
+            pid,
+            &material.filament.id,
+            &s.required_machine_profile_key,
+            None,
+        )
+        .map_err(|error| match error {
+            Error::Conflict(_) => {
+                Error::Conflict("No confirmed AMS slot contains the support interface material")
+            }
+            other => other,
+        })?;
+    }
+    Ok(settings)
+}
+
+#[allow(clippy::too_many_lines)] // Resolve all material roles and their shared process together.
+pub(crate) fn slice_settings(
+    c: &Connection,
+    profiles: &Profiles,
+    plate: &crate::plates::Plate,
+) -> Result<Resolved> {
+    plate.ensure_printable()?;
+    let conditions = &plate.conditions;
+    let missing =
+        || Error::Conflict("Complete the plate machine, material, process and bed conditions");
+    let machine = conditions
+        .required_machine_profile_key
+        .as_deref()
+        .ok_or_else(missing)?;
+    let material = plate.roles().first().copied().ok_or_else(missing)?;
+    let filament_id = conditions.role_id(material)?;
+    let slice_binding = |id: &str| -> Result<Binding> {
+        Ok(Binding {
+            filament: crate::database::load_filaments(c)?
+                .into_iter()
+                .find(|f| f.id == id)
+                .ok_or(Error::NotFound)?,
+            setting: Some(crate::products::load_setting(c, id, machine)?),
+            ams_slot_id: String::new(),
+            slot_revision: 0,
+            ams_slot: 0,
+        })
+    };
+    let main = slice_binding(filament_id)?;
     let setting = main.setting.as_ref().expect("resolved setting");
     let selection = Selection {
-        machine: s.required_machine_profile_key.clone(),
-        process: s.process_profile_key.clone(),
+        machine: machine.to_owned(),
+        process: conditions.process_profile_key.clone().ok_or_else(missing)?,
         filament: setting.base_profile_key.clone(),
-        bed: s.bed_type.clone(),
+        bed: conditions.bed_type.clone().ok_or_else(missing)?,
     };
     let mut resolved = profiles.resolved(&selection)?;
     let primary = crate::support::material_profile(
@@ -369,7 +425,7 @@ pub(crate) fn resolve(
     )?;
     crate::profiles::validate_bed(&primary, &selection.bed)?;
     let additional = |id| -> Result<_> {
-        let material = binding(c, pid, id, &selection.machine, None)?;
+        let material = slice_binding(id)?;
         let profile = profiles.resolve_filament(
             material.setting.as_ref().expect("resolved setting"),
             &material.filament.data.material,
@@ -403,12 +459,7 @@ pub(crate) fn resolve(
         .filter(|id| *id != main.filament.id)
         .filter(|id| secondary.as_ref().is_none_or(|b| b.filament.id != *id))
     {
-        let (material, profile) = additional(id).map_err(|error| match error {
-            Error::Conflict(_) => {
-                Error::Conflict("No confirmed AMS slot contains the support interface material")
-            }
-            other => other,
-        })?;
+        let (material, profile) = additional(id)?;
         resolved.insert("interface.json".into(), profile);
         Some(material)
     } else {
@@ -971,8 +1022,8 @@ impl Service {
                 if plate.version != *plate_version {
                     return Err(Error::Conflict("Plate changed; reload before adding"));
                 }
-                let s = self.admission(tx, &plate, status)?;
-                tx.execute("INSERT INTO print_jobs(id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,state,position) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',coalesce((SELECT max(position)+1 FROM print_jobs WHERE printer_id=?2),0))",params![uuid::Uuid::new_v4().to_string(),self.device.id,plate_id,plate.name,s.ams_slot_id,s.filament_id,s.required_machine_profile_key,s.process_profile_key,s.bed_type])?;
+                self.admission(tx, &plate, status)?;
+                tx.execute("INSERT INTO print_jobs(id,printer_id,plate_id,state,position) VALUES (?1,?2,?3,'queued',coalesce((SELECT max(position)+1 FROM print_jobs WHERE printer_id=?2),0))",params![uuid::Uuid::new_v4().to_string(),self.device.id,plate_id])?;
             }
             Action::Reestimate { job_id } => {
                 selected(job_id)?;
@@ -1093,7 +1144,11 @@ impl Service {
         if let Some(id) = completed {
             c.execute("UPDATE print_jobs SET state='completed' WHERE id=?1", [id])?;
         }
-        c.execute("UPDATE print_jobs SET name=?1,state='preparing',attempt_id=?2,artifact_path=?3,execution_json=?4,attempt_json=NULL,last_error=NULL,ams_slot_id=?6,filament_id=?7,required_machine_profile_key=?8,process_profile_key=?9,bed_type=?10 WHERE id=?5",params![job.name,attempt,job.artifact_path,serde_json::to_string(&execution).map_err(std::io::Error::other)?,job.id,job.specification.ams_slot_id,job.specification.filament_id,job.specification.required_machine_profile_key,job.specification.process_profile_key,job.specification.bed_type])?;
+        c.execute("INSERT INTO print_executions(id,job_id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,artifact_path,execution_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![attempt,job.id,self.device.id,job.plate_id,job.name,job.specification.ams_slot_id,job.specification.filament_id,job.specification.required_machine_profile_key,job.specification.process_profile_key,job.specification.bed_type,job.artifact_path,serde_json::to_string(&execution).map_err(std::io::Error::other)?])?;
+        c.execute(
+            "UPDATE print_jobs SET state='preparing',attempt_id=?1,last_error=NULL WHERE id=?2",
+            params![attempt, job.id],
+        )?;
         Ok(Preparation {
             job,
             execution,
@@ -1109,34 +1164,17 @@ impl Service {
         let attempt_id = job.attempt_id.as_deref().expect("reserved attempt");
         let path = directory(&self.store, &job.id, attempt_id)?;
         std::fs::create_dir_all(&path)?;
-        let count = write_inputs(
-            &path,
-            &execution.plate,
-            &execution.settings,
-            originals,
-            self.source.as_ref(),
-        )
-        .await?;
-        if !crate::estimates::reuse_for(
+        crate::estimates::prepare(
             &self.store,
-            &job.id,
-            &execution.plate,
-            &execution.settings,
-            &path,
-            count,
-        ) {
             self.slicer
                 .as_ref()
-                .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
-                .slice(
-                    path.clone(),
-                    count,
-                    execution.settings.selection.clone(),
-                    execution.settings.filament_profiles(),
-                    &job.id,
-                )
-                .await?;
-        }
+                .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?,
+            self.source.as_ref(),
+            &execution,
+            originals,
+            &path,
+        )
+        .await?;
         crate::estimates::actual(
             &self.store,
             &job,
@@ -1195,8 +1233,20 @@ impl Service {
             }
             c.execute(
                 "DELETE FROM print_jobs WHERE id=?1 AND state IN ('completed','cancelled')",
-                [id],
+                [&id],
             )?;
+            c.execute("DELETE FROM print_executions WHERE job_id=?1", [id])?;
+        }
+        let retired = c.prepare("SELECT e.id,e.job_id FROM print_executions e JOIN print_jobs j ON j.id=e.job_id WHERE j.printer_id=?1 AND e.id!=j.attempt_id")?
+            .query_map([&self.device.id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>,_>>()?;
+        for (attempt, job) in retired {
+            match std::fs::remove_dir_all(directory(&self.store, &job, &attempt)?) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => continue,
+            }
+            c.execute("DELETE FROM print_executions WHERE id=?1", [attempt])?;
         }
         Ok(())
     }
@@ -1214,7 +1264,7 @@ impl Database {
     pub(crate) fn restore_attempt(&self, pid: &str) -> Result<Option<Attempt>> {
         let mut c = self.connection()?;
         let tx = c.transaction()?;
-        let row:Option<(String,String,Option<String>)>=tx.query_row("SELECT id,state,attempt_json FROM print_jobs WHERE printer_id=?1 AND state NOT IN ('queued','completed','cancelled')",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let row:Option<(String,String,Option<String>)>=tx.query_row("SELECT j.id,j.state,e.attempt_json FROM print_jobs j LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('queued','completed','cancelled')",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let mut restored = None;
         if let Some((id, state, raw)) = row {
             restored = raw
@@ -1245,7 +1295,7 @@ impl Database {
         status: &Status,
     ) -> Result<()> {
         let c = self.connection()?;
-        let (raw,slot_id,filament_id,machine):(String,String,String,String)=c.query_row("SELECT execution_json,ams_slot_id,filament_id,required_machine_profile_key FROM print_jobs WHERE printer_id=?1 AND id=?2 AND attempt_id=?3 AND state IN ('preparing','printing','needs_attention')",params![device.id,attempt.job_id,attempt.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(Error::Conflict("Execution is no longer active"))?;
+        let (raw,slot_id,filament_id,machine):(String,String,String,String)=c.query_row("SELECT e.execution_json,e.ams_slot_id,e.filament_id,e.required_machine_profile_key FROM print_jobs j JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.id=?2 AND j.attempt_id=?3 AND j.state IN ('preparing','printing','needs_attention')",params![device.id,attempt.job_id,attempt.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?.ok_or(Error::Conflict("Execution is no longer active"))?;
         let mut execution: Execution = serde_json::from_str(&raw).map_err(std::io::Error::other)?;
         if let Some(stopped) = &execution.stopped_attempt {
             status.check_stopped(stopped)?;
@@ -1318,7 +1368,7 @@ impl Database {
         let raw = serde_json::to_string(attempt).map_err(std::io::Error::other)?;
         let mut c = self.connection()?;
         let tx = c.transaction()?;
-        let old:Option<(String,Option<String>,Option<String>)>=tx.query_row("SELECT state,last_error,attempt_json FROM print_jobs WHERE printer_id=?1 AND id=?2 AND attempt_id=?3 AND state NOT IN ('completed','cancelled')",params![pid,attempt.job_id,attempt.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        let old:Option<(String,Option<String>,Option<String>)>=tx.query_row("SELECT j.state,j.last_error,e.attempt_json FROM print_jobs j JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.id=?2 AND j.attempt_id=?3 AND j.state NOT IN ('completed','cancelled')",params![pid,attempt.job_id,attempt.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let (previous, error, previous_attempt) =
             old.ok_or(Error::Conflict("Execution is no longer active"))?;
         if previous_attempt.as_deref() == Some(&raw) {
@@ -1330,14 +1380,21 @@ impl Database {
                 [pid],
             )?;
         }
-        tx.execute("UPDATE print_jobs SET state=?1,attempt_json=?2,last_error=?3 WHERE id=?4 AND attempt_id=?5",params![state,raw,attempt.message,attempt.job_id,attempt.id])?;
+        tx.execute(
+            "UPDATE print_jobs SET state=?1,last_error=?2 WHERE id=?3 AND attempt_id=?4",
+            params![state, attempt.message, attempt.job_id, attempt.id],
+        )?;
+        tx.execute(
+            "UPDATE print_executions SET attempt_json=?1 WHERE id=?2",
+            params![raw, attempt.id],
+        )?;
         if state == "awaiting_removal"
             && previous != state
             && let Some(completed_at) = attempt.completed_at
         {
             let completed_at = i64::try_from(completed_at)
                 .map_err(|_| Error::Invalid("Invalid completion time"))?;
-            tx.execute("INSERT INTO print_history(attempt_id,job_id,plate_id,printer_id,name,completed_at) SELECT ?1,id,plate_id,printer_id,name,?3 FROM print_jobs WHERE id=?2 AND attempt_id=?1 ON CONFLICT(attempt_id) DO NOTHING", params![attempt.id,attempt.job_id,completed_at])?;
+            tx.execute("INSERT INTO print_history(attempt_id,job_id,plate_id,printer_id,name,completed_at) SELECT ?1,j.id,j.plate_id,j.printer_id,e.name,?3 FROM print_jobs j JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?2 AND j.attempt_id=?1 ON CONFLICT(attempt_id) DO NOTHING", params![attempt.id,attempt.job_id,completed_at])?;
         }
         if state == "awaiting_removal"
             && previous != state
@@ -1345,7 +1402,7 @@ impl Database {
                 .notifications_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
         {
-            tx.execute("INSERT INTO print_notifications(attempt_id,job_id,printer_id,printer_name,plate_name) SELECT ?1,j.id,j.printer_id,p.name,j.name FROM print_jobs j JOIN printers p ON p.id=j.printer_id WHERE j.id=?2 AND j.attempt_id=?1 ON CONFLICT(attempt_id) DO NOTHING",params![attempt.id,attempt.job_id])?;
+            tx.execute("INSERT INTO print_notifications(attempt_id,job_id,printer_id,printer_name,plate_name) SELECT ?1,j.id,j.printer_id,p.name,e.name FROM print_jobs j JOIN printers p ON p.id=j.printer_id JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?2 AND j.attempt_id=?1 ON CONFLICT(attempt_id) DO NOTHING",params![attempt.id,attempt.job_id])?;
         }
         tx.commit()?;
         Ok(())
@@ -1441,6 +1498,32 @@ mod tests {
             None,
         )
     }
+    #[tokio::test]
+    async fn saved_slice_settings_do_not_require_an_ams_assignment() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = service(dir.path(), "p1").await;
+        let id = add(&s);
+        let c = s.store.db.connection().unwrap();
+        let job = jobs(&c, "p1").unwrap().remove(0);
+        assert_eq!(job.id, id);
+        let plate = crate::plates::load(&c, &job.plate_id).unwrap();
+        let profiles = &s.slicer.as_ref().unwrap().profiles;
+        let original = resolve(
+            &c,
+            "p1",
+            &planned(&c, "p1", &plate).unwrap(),
+            profiles,
+            &plate,
+        )
+        .unwrap();
+        c.execute("UPDATE ams_slots SET filament_id=NULL", [])
+            .unwrap();
+        let offline = slice_settings(&c, profiles, &plate).unwrap();
+        assert_eq!(offline.profiles, original.profiles);
+        assert_eq!(offline.roles, original.roles);
+        assert!(planned(&c, "p1", &plate).is_err());
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // One isolated two-material preparation and compatibility scenario.
     async fn support_resolves_two_materials_and_freezes_both_slots_and_settings() {
@@ -1788,7 +1871,7 @@ mod tests {
                 .connection()
                 .unwrap()
                 .query_row(
-                    "SELECT execution_json FROM print_jobs WHERE id=?1",
+                    "SELECT execution_json FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)",
                     [&old[0].id],
                     |r| r.get::<_, String>(0),
                 )
@@ -2473,6 +2556,7 @@ mod tests {
         s.store.db.persist_attempt("one", &a).unwrap();
         // A real v15 finished attempt has no completion timestamp. Migration must
         // not turn notification scheduling or migration time into print history.
+        crate::legacy_schema::queue_v16(&s.store.db.connection().unwrap());
         s.store
             .db
             .connection()

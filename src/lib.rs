@@ -5,6 +5,10 @@ mod estimates;
 mod filament;
 mod file_import;
 mod history;
+#[cfg(test)]
+#[allow(clippy::duplicate_mod)] // The isolated notification scenario also compiles shared fixtures.
+#[path = "../tests/common/legacy_schema.rs"]
+mod legacy_schema;
 mod mcp;
 mod model_import;
 pub mod notifications;

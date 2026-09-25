@@ -279,7 +279,26 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Create or replace a saved plate. Omit id for create; for update read first and supply current plate.version and ALL models. Preserve uploaded model IDs. SCAD source must exist. On create, omitted/null conditions use the saved printer defaults and first usable material in its synchronized AMS; explicit values win. On update, omitted/null fields clear conditions; send values to preserve them. Never invent conditions. Does not enqueue or start printing. On an uncertain response, use plate_list/get before any new create."
+        description = "Read the saved plate's shared calculation state, estimated seconds and safe failure reason. Saving starts calculation in the background; a ready result does not start printing.",
+        annotations(read_only_hint = true)
+    )]
+    async fn plate_slice_get(&self, Parameters(a): Parameters<Id>) -> CallToolResult {
+        answer(
+            self.api(Method::GET, &["api", "plates", &a.id, "slice"], &[], None)
+                .await,
+        )
+    }
+    #[tool(
+        description = "Recheck and retry a saved plate's calculation after correcting its model or material conditions. Valid G-code is shared across queue entries and survives queue deletion and restart. Does not enqueue or start printing."
+    )]
+    async fn plate_slice_retry(&self, Parameters(a): Parameters<Id>) -> CallToolResult {
+        answer(
+            self.api(Method::POST, &["api", "plates", &a.id, "slice"], &[], None)
+                .await,
+        )
+    }
+    #[tool(
+        description = "Create or replace a saved plate. Omit id for create; for update read first and supply current plate.version and ALL models. Preserve uploaded model IDs. SCAD source must exist. On create, omitted/null conditions use the saved printer defaults and first usable material in its synchronized AMS; explicit values win. On update, omitted/null fields clear conditions; send values to preserve them. Never invent conditions. Saving starts background slicing; G-code is stored in SQLite and reused across queues. Check plate_slice_get for calculation results; saving success does not mean slicing success. Does not enqueue or start printing. On an uncertain response, use plate_list/get before any new create."
     )]
     async fn plate_save(&self, Parameters(a): Parameters<PlateSave>) -> CallToolResult {
         let result = if let Some(id) = a.id {
@@ -566,6 +585,7 @@ impl Tools {
         )
     }
 }
+#[allow(unknown_lints, clippy::unused_async_trait_impl)] // rmcp generates async trait methods.
 #[tool_handler(router=self.tool_router)]
 impl ServerHandler for Tools {
     fn get_info(&self) -> ServerConfig {

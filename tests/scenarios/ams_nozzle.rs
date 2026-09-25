@@ -240,7 +240,8 @@ pub fn nozzle_material() {
     assert_eq!(rig.broker.prints().len(), 1);
     assert_eq!(rig.ftp.uploads().len(), 1);
     assert_eq!(rig.broker.prints()[0]["ams_mapping"], json!([0]));
-    let resolved = rig.traces()[0]["profiles"]["filament"].clone();
+    let execution: Value = serde_json::from_str(&rig.stored(&job, "execution_json")).unwrap();
+    let resolved = &execution["profiles"]["filament.json"];
     assert_eq!(resolved["nozzle_temperature"], json!(["240"]));
     assert_eq!(resolved["nozzle_temperature_initial_layer"], json!(["250"]));
     assert_eq!(resolved["required_nozzle_HRC"], json!(["60"]));

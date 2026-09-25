@@ -6,10 +6,14 @@ fn ready(rig: &Rig) {
             let q = rig.queue();
             let jobs = array(&q["waiting"]);
             assert!(
-                jobs.iter().all(|j| j["estimate"]["state"] != "failed"),
+                jobs.iter()
+                    .filter(|j| j["plate_deleted"] != true)
+                    .all(|j| j["estimate"]["state"] != "failed"),
                 "{jobs:?}"
             );
-            jobs.iter().all(|j| j["estimate"]["state"] == "ready")
+            jobs.iter()
+                .filter(|j| j["plate_deleted"] != true)
+                .all(|j| j["estimate"]["state"] == "ready")
         },
         30,
     );
@@ -52,13 +56,14 @@ pub fn compact_queue(browser: bool) {
         .map(|j| j["id"].clone())
         .collect();
     rig.stop(false);
+    legacy_schema::queue_v16(&rig.db());
     rig.db().execute_batch("DROP TABLE print_history; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;").unwrap();
     rig.launch();
     rig.idle();
     ready(&rig);
     assert_eq!(
         rig.rows("PRAGMA user_version", &[]),
-        vec![vec![rusqlite::types::Value::Integer(16)]]
+        vec![vec![rusqlite::types::Value::Integer(17)]]
     );
     assert_eq!(
         rig.rows("SELECT * FROM plate_items ORDER BY id", &[]),
@@ -75,7 +80,7 @@ pub fn compact_queue(browser: bool) {
     until(|| rig.broker.prints().len() == 1, 12);
     rig.report("RUNNING");
     rig.phase("printing");
-    let sql = "SELECT execution_json,attempt_json,artifact_path FROM print_jobs WHERE id=?1";
+    let sql = "SELECT execution_json,attempt_json,artifact_path FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)";
     let frozen = rig.rows(sql, &[id(&active)]);
     let before = (rig.broker.prints().len(), rig.ftp.uploads().len());
     data["overrides_json"]["bed_temperature_initial_layer"] = json!(0);

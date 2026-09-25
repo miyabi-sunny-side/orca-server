@@ -117,12 +117,21 @@ pub fn estimate(rig: &Rig, job: &Value) -> (Value, PathBuf, Vec<u8>) {
         120,
     );
     let snapshot: Value = serde_json::from_str(&rig.stored(job, "estimate_json")).unwrap();
-    let path = rig
-        .store
-        .join("jobs")
-        .join(id(job))
-        .join(format!("estimate-{}", id(&snapshot)));
-    let bytes = fs::read(path.join("print.gcode.3mf")).unwrap();
+    let path = rig.output.join(format!("slice-{}", id(&snapshot)));
+    fs::create_dir_all(&path).unwrap();
+    let bytes = rig.cached_artifact(job, "gcode");
+    fs::write(path.join("print.gcode.3mf"), &bytes).unwrap();
+    fs::write(
+        path.join("project.3mf"),
+        rig.cached_artifact(job, "project"),
+    )
+    .unwrap();
+    for (name, profile) in snapshot["input"]["settings"]["profiles"]
+        .as_object()
+        .unwrap()
+    {
+        write_json(&path.join(name), profile);
+    }
     (snapshot, path, bytes)
 }
 pub fn parameter(command: &str, key: char) -> Option<f64> {

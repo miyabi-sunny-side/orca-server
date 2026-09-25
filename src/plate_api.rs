@@ -48,6 +48,10 @@ pub fn router(store: Store) -> Router {
     Router::new()
         .route("/api/plates", get(list).post(create))
         .route("/api/plates/{id}", get(read).delete(remove))
+        .route(
+            "/api/plates/{id}/slice",
+            get(slice_status).post(retry_slice),
+        )
         .route("/api/plates/{id}/duplicate", post(duplicate))
         .route("/api/plates/{id}/files/{*path}", get(file))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
@@ -101,6 +105,27 @@ async fn list(State(store): State<Store>, Query(query): Query<Search>) -> Result
 
 async fn read(State(store): State<Store>, Path(id): Path<String>) -> Result<Json<Plate>> {
     blocking(move || store.get(&id)).await.map(Json)
+}
+
+async fn slice_status(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    blocking(move || {
+        let plate = store.get(&id)?;
+        crate::estimates::plate_view(&*store.db.connection()?, &plate, store.profiles.as_deref())
+    })
+    .await
+    .map(Json)
+}
+
+async fn retry_slice(State(store): State<Store>, Path(id): Path<String>) -> Result<StatusCode> {
+    blocking(move || {
+        store.get(&id)?;
+        crate::estimates::retry_plate(&*store.db.connection()?, &id)
+    })
+    .await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn remove(State(store): State<Store>, Path(id): Path<String>) -> Result<StatusCode> {

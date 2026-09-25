@@ -1,6 +1,7 @@
 //! App-owned test environment: one temporary store, process group and loopback peers per test.
 #![allow(dead_code)] // Each integration target uses a different subset of these shared fixtures.
 pub mod container;
+pub mod legacy_schema;
 pub mod peers;
 pub mod wire;
 use axum::{
@@ -795,11 +796,19 @@ impl Rig {
         );
         self.db()
             .query_row(
-                &format!("SELECT {column} FROM print_jobs WHERE id=?1"),
+                &if column == "estimate_json" {
+                    "SELECT CASE WHEN j.state='queued' THEN s.record_json ELSE e.estimate_json END FROM print_jobs j LEFT JOIN plate_slices s ON s.plate_id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?1".to_owned()
+                } else {
+                    format!("SELECT {column} FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)")
+                },
                 [id(job)],
                 |r| r.get(0),
             )
             .unwrap()
+    }
+    pub fn cached_artifact(&self, job: &Value, column: &str) -> Vec<u8> {
+        assert!(["project", "gcode"].contains(&column));
+        self.db().query_row(&format!("SELECT {column} FROM plate_slices WHERE plate_id=(SELECT plate_id FROM print_jobs WHERE id=?1)"), [id(job)], |r|r.get(0)).unwrap()
     }
     pub fn estimated(&self, job: &Value) -> Value {
         until(

@@ -248,14 +248,7 @@ pub fn model_import(appdir: Option<&Path>, browser: bool) {
     assert_eq!(process["brim_type"], "no_brim");
     assert!(!saved.to_string().contains("UNTRUSTED SOURCE GCODE"));
     if appdir.is_some() {
-        let bundle = fs::read(
-            rig.store
-                .join("jobs")
-                .join(id(&job))
-                .join(format!("estimate-{}", id(&saved)))
-                .join("print.gcode.3mf"),
-        )
-        .unwrap();
+        let bundle = rig.cached_artifact(&job, "gcode");
         fs::write(rig.output.join("resliced.gcode.3mf"), &bundle).unwrap();
         assert!(
             !String::from_utf8(zip_read(&bundle, "Metadata/plate_1.gcode"))

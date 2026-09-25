@@ -77,7 +77,8 @@ fn estimates() {
         &json!({"plate_id":rig.plate["id"]}),
         Some(&control),
     );
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert_eq!(rig.broker.prints().len(), 1);
+    assert_eq!(rig.ftp.uploads().len(), 1);
 }
 fn queue(appdir: Option<&std::path::Path>) {
     let mut rig = Rig::with_options("browser-queue", "v3", appdir);

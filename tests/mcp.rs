@@ -111,6 +111,11 @@ async fn client_saves_references_and_shares_the_rest_validation() {
             .len(),
         1
     );
+    assert_eq!(
+        call(&client, "plate_slice_get", json!({"id":id}), false).await["data"]["state"],
+        "failed"
+    );
+    call(&client, "plate_slice_retry", json!({"id":id}), false).await;
     edit["version"] = rest["version"].clone();
     edit["models"] = rest["models"].clone();
     edit["name"] = json!("Ten saved bins");
@@ -881,5 +886,61 @@ fn named_role_plate_conditions_round_trip_and_reject_unknown_assignments() {
         assert_eq!(read(&base,&format!("/api/plates/{id}")).await,plate);
         client.cancel().await.unwrap();
     });
+    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+}
+
+#[test]
+fn mcp_save_and_retry_share_the_persistent_plate_result() {
+    let mut rig = common::Rig::new("mcp-plate-slice");
+    rig.launch();
+    rig.seed();
+    rig.configure(None, None);
+    let base = rig.base.clone();
+    let plate_id = common::id(&rig.plate).to_owned();
+    let mut edited = common::edit(&rig.plate);
+    edited["conditions"]["sparse_infill_density"] = json!(25);
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = ()
+            .serve(StreamableHttpClientTransport::from_uri(format!(
+                "{base}/mcp"
+            )))
+            .await
+            .unwrap();
+        let saved = call(
+            &client,
+            "plate_save",
+            json!({"id":plate_id,"plate":edited}),
+            false,
+        )
+        .await;
+        assert_eq!(
+            saved["data"]["conditions"]["sparse_infill_density"].as_f64(),
+            Some(25.0)
+        );
+        call(&client, "plate_slice_retry", json!({"id":plate_id}), false).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            loop {
+                let result = call(&client, "plate_slice_get", json!({"id":plate_id}), false).await
+                    ["data"]
+                    .clone();
+                if result["state"] == "ready" {
+                    break result;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["seconds"], 1140);
+        assert_eq!(
+            read(&base, &format!("/api/plates/{plate_id}/slice")).await,
+            result
+        );
+        client.cancel().await.unwrap();
+    });
+    let calls = rig.traces().len();
+    let job = rig.add(3);
+    rig.ready(&job);
+    assert_eq!(rig.traces().len(), calls);
     assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
 }

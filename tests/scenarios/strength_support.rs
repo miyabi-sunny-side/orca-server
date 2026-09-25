@@ -104,15 +104,9 @@ pub fn strength_settings(browser: bool) {
         first["input"]["settings"]["profiles"]["process.json"]["sparse_infill_pattern"],
         "adaptivecubic"
     );
-    let old = rig
-        .store
-        .join("jobs")
-        .join(id(&job))
-        .join(format!("estimate-{}", id(&first)));
     rig.edit_conditions(&changed);
     let second = rig.estimated(&job);
     assert_ne!(first["id"], second["id"]);
-    assert!(!old.exists());
     let process = &second["input"]["settings"]["profiles"]["process.json"];
     assert_eq!(
         (
@@ -129,15 +123,9 @@ pub fn strength_settings(browser: bool) {
     assert_eq!(rig.plate["conditions"]["brim_enabled"], false);
     let mut previous = second;
     for enabled in [true, false] {
-        let old = rig
-            .store
-            .join("jobs")
-            .join(id(&job))
-            .join(format!("estimate-{}", id(&previous)));
         rig.edit_conditions(&json!({"brim_enabled":enabled}));
         let current = rig.estimated(&job);
         assert_ne!(current["id"], previous["id"]);
-        assert!(!old.exists());
         let process = &current["input"]["settings"]["profiles"]["process.json"];
         assert_eq!(
             process["brim_type"],
@@ -175,6 +163,7 @@ pub fn strength_settings(browser: bool) {
     rig.estimated(&queued);
     rig.stop(false);
     let db = rig.db();
+    legacy_schema::queue_v16(&db);
     for table in ["plates", "default_settings"] {
         for key in KEYS {
             db.execute(&format!("ALTER TABLE {table} DROP COLUMN {key}"), [])
@@ -238,6 +227,7 @@ pub fn legacy_support() {
         .unwrap()
         .remove("filament_colour");
     let db = rig.db();
+    legacy_schema::queue_v16(&db);
     for key in ["support_enabled", "support_interface_filament_id"] {
         execution["plate"]["conditions"]
             .as_object_mut()
@@ -266,7 +256,7 @@ pub fn legacy_support() {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        17
     );
     rig.send(
         json!({"type":"retry","expected_job":job["id"],"cleared":true}),
@@ -316,7 +306,7 @@ pub fn support_interface(browser: bool) {
     assert_ne!(second["id"], first["id"]);
     let settings = &second["input"]["settings"];
     assert_eq!(settings["ams_slot"], 0);
-    assert_eq!(settings["interface"]["ams_slot"], 3);
+    assert_eq!(settings["interface"]["ams_slot_id"], "");
     assert_eq!(
         settings["profiles"]["process.json"]["support_interface_filament"],
         "2"
@@ -336,7 +326,11 @@ pub fn support_interface(browser: bool) {
             _ => rig.temperature(0, 216),
         }
         let current = rig.estimated(&job);
-        assert_ne!(current["id"], second["id"]);
+        if change == 1 {
+            assert_eq!(current["id"], second["id"]);
+        } else {
+            assert_ne!(current["id"], second["id"]);
+        }
         second = current;
     }
     rig.edit_conditions(&json!({"support_enabled":false}));
@@ -362,7 +356,7 @@ pub fn support_interface(browser: bool) {
             .unwrap()
             .contains("support interface")
     );
-    assert_eq!(q["waiting"][0]["estimate"]["state"], "failed");
+    assert_eq!(q["waiting"][0]["estimate"]["state"], "ready");
     assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
     rig.map_material(3, 1);
     rig.estimated(&job);

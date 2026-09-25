@@ -265,7 +265,7 @@ impl Database {
                 "Product metadata and every machine setting must match before combining colors",
             ));
         }
-        if tx.query_row("SELECT EXISTS(SELECT 1 FROM print_jobs WHERE filament_id=?1 AND state IN ('preparing','printing','awaiting_removal','needs_attention'))",[fid],|r|r.get::<_,bool>(0))? {
+        if tx.query_row("SELECT EXISTS(SELECT 1 FROM print_executions e JOIN print_jobs j ON j.attempt_id=e.id WHERE e.filament_id=?1 AND j.state IN ('preparing','printing','awaiting_removal','needs_attention'))",[fid],|r|r.get::<_,bool>(0))? {
             return Err(Error::Conflict("Wait until this color's active print has been removed"));
         }
         tx.execute(

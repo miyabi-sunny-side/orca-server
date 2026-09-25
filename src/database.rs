@@ -140,7 +140,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=16 => {}
+            1..=17 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -265,6 +265,9 @@ impl Database {
             CREATE INDEX print_history_completion ON print_history(completed_at DESC,id DESC);
             PRAGMA user_version=16;",
             )?;
+        }
+        if version < 17 {
+            tx.execute_batch(include_str!("../migrations/017-plate-slices.sql"))?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -528,6 +531,7 @@ mod tests {
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        crate::legacy_schema::queue_v16(&db.connection().unwrap());
         db.connection().unwrap().execute_batch("DROP TABLE print_history; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -562,6 +566,7 @@ mod tests {
         assert_eq!(db.default_printer().unwrap(), None);
         db.save(&device()).unwrap();
         db.save(&second).unwrap();
+        crate::legacy_schema::queue_v16(&db.connection().unwrap());
         db.connection()
             .unwrap()
             .execute_batch("DROP TABLE print_history; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
@@ -603,7 +608,7 @@ mod tests {
                     |r| r.get::<_, i64>(0)
                 )
                 .unwrap(),
-                13
+                15
             );
             assert_eq!(
                 c.query_row("SELECT name FROM plates WHERE id=?1", [&id], |r| r
@@ -640,6 +645,70 @@ mod tests {
             2
         );
     }
+    #[test]
+    fn schema_sixteen_keeps_uncertain_execution_inputs_and_history_outside_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        c.execute_batch(include_str!("../tests/fixtures/schema-v16.sql"))
+            .unwrap();
+        save(&c, &device()).unwrap();
+        c.execute_batch(r#"INSERT INTO filament_products VALUES ('product','PLA','Fixture','PLA',NULL);
+            INSERT INTO filaments VALUES ('color','product','White','FFFFFFFF');
+            INSERT INTO filament_settings VALUES ('setting','product','machine','base','{}');
+            INSERT INTO ams_slots(id,printer_id,ams_id,slot_index,filament_id,mapping_source) VALUES ('slot','stable-id',0,0,'color','manual');
+            INSERT INTO plates(id,name) VALUES ('plate','Retained plate');
+            INSERT INTO plate_items(id,plate_id,position,name,source_kind,original,quantity) VALUES ('model','plate',0,'model.stl','upload',x'010203',1);
+            INSERT INTO print_jobs(id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,state,position,attempt_id,artifact_path,execution_json,attempt_json)
+                VALUES ('job','stable-id','plate','Printed name','slot','color','machine','process','bed','needs_attention',0,'attempt','jobs/job/attempt','{"frozen":"input"}','{"phase":"unknown","sent":true}');
+            INSERT INTO print_jobs(id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,state,position)
+                VALUES ('waiting','stable-id','plate','Old copy','slot','color','machine','process','bed','queued',1);
+            INSERT INTO print_history(attempt_id,job_id,plate_id,printer_id,name,completed_at) VALUES ('previous','previous','plate','stable-id','Previous name',123);"#).unwrap();
+        drop(c);
+        let db = Database::open(dir.path(), || panic!("no import or print")).unwrap();
+        let c = db.connection().unwrap();
+        let state: (String, String) = c
+            .query_row(
+                "SELECT state,attempt_id FROM print_jobs WHERE id='job'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("needs_attention".into(), "attempt".into()));
+        let original: Vec<u8> = c
+            .query_row(
+                "SELECT original FROM plate_items WHERE id='model'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(original, [1, 2, 3]);
+        let waiting: String = c
+            .query_row(
+                "SELECT plate_id FROM print_jobs WHERE id='waiting'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(waiting, "plate");
+        c.execute("DELETE FROM print_jobs WHERE id='job'", [])
+            .unwrap();
+        let saved: (String,String,String) = c.query_row("SELECT execution_json,attempt_json,artifact_path FROM print_executions WHERE id='attempt'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(
+            saved,
+            (
+                r#"{"frozen":"input"}"#.into(),
+                r#"{"phase":"unknown","sent":true}"#.into(),
+                "jobs/job/attempt".into()
+            )
+        );
+        assert_eq!(
+            c.query_row("SELECT name FROM print_history", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "Previous name"
+        );
+    }
+
     #[test]
     fn schema_three_product_migration_preserves_colors_settings_and_active_jobs() {
         let dir = tempfile::tempdir().unwrap();
@@ -698,7 +767,7 @@ mod tests {
             .unwrap(),
             "attempt"
         );
-        let job:(String,String,String,String)=c.query_row("SELECT filament_id,state,execution_json,attempt_json FROM print_jobs WHERE id='job'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        let job:(String,String,String,String)=c.query_row("SELECT e.filament_id,j.state,e.execution_json,e.attempt_json FROM print_jobs j JOIN print_executions e ON e.id=j.attempt_id WHERE j.id='job'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
         assert_eq!(
             job,
             (
@@ -867,7 +936,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            16
+            17
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

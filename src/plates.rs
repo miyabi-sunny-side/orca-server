@@ -105,6 +105,7 @@ pub struct Store {
     pub(crate) root: PathBuf,
     pub(crate) db: crate::database::Database,
     pub(crate) profiles: Option<std::sync::Arc<crate::profiles::Profiles>>,
+    pub(crate) slice_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Model {
@@ -378,6 +379,7 @@ impl Store {
             root: fs::canonicalize(root)?,
             db,
             profiles: None,
+            slice_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
     /// Save uploaded STL originals or model references in `SQLite`.
@@ -609,14 +611,13 @@ impl Store {
     /// Rejects invalid or missing IDs and unavailable storage.
     pub fn delete(&self, id: &str) -> Result<()> {
         valid_id(id)?;
-        if self
-            .db
-            .connection()?
-            .execute("UPDATE plates SET deleted=1 WHERE id=?1", [id])?
-            == 0
-        {
+        let mut c = self.db.connection()?;
+        let tx = c.transaction()?;
+        if tx.execute("UPDATE plates SET deleted=1 WHERE id=?1", [id])? == 0 {
             return Err(Error::NotFound);
         }
+        tx.execute("DELETE FROM plate_slices WHERE plate_id=?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
     /// Search saved names and model names, ordered by fuzzy relevance.

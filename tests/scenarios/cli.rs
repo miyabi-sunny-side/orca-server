@@ -147,15 +147,7 @@ pub fn estimates(appdir: &Path) {
             process
         );
         assert_eq!(
-            fs::read_dir(&directory)
-                .unwrap()
-                .filter(|p| p
-                    .as_ref()
-                    .unwrap()
-                    .path()
-                    .extension()
-                    .is_some_and(|e| e == "stl"))
-                .count(),
+            boxes(&fs::read(directory.join("project.3mf")).unwrap()).len(),
             quantity
         );
         assert!(

@@ -4,6 +4,7 @@
   import StlPreview from "../lib/StlPreview.svelte";
   import PlateEditor from "../lib/PlateEditor.svelte";
   import PlateQueueAdd from "../lib/PlateQueueAdd.svelte";
+  import PlateSlice from "../lib/PlateSlice.svelte";
   import { emptyConditions, materialRoles, roleFields } from "../lib/plate";
   let { id }: { id: string } = $props();
   let plate = $state<Plate>(),
@@ -54,6 +55,15 @@
     <div class="detail-layout" class:editing>
       <div class="controls">
         <div class="page-heading"><h1>{plate.name}</h1></div>
+        {#if !editing}
+          {#key plate.version}<PlateSlice
+              {plate}
+              {filaments}
+              edit={() => {
+                editing = true;
+              }}
+            />{/key}
+        {/if}
         {#if plate.imported}
           <p>
             <a
@@ -137,7 +147,7 @@
               </li>{/each}
           </ul>
           <p class="caption">
-            SCADモデルは試算時と印刷開始時に最新データを取得します。条件の編集は未準備の待機分へ反映されます。印刷はキューで手動開始します。
+            保存すると最新モデルから試算します。条件の編集は未準備の待機分へ反映されます。印刷はキューで手動開始します。
           </p>
         {/if}
       </div>
