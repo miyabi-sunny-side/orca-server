@@ -106,7 +106,7 @@ ORCA_TEST_IMAGE=orca-server-check cargo test --locked --test container -- --igno
 
 Rustの結合テストはHTTP・MCP・SQLiteの保存と移行、同時操作、再起動、失敗後の保全を確認します。
 MQTT/FTPSではv1/v3証明書、TLSセッション再利用、転送内容、AMS指定と重複命令を観測します。
-通知は完了時の送信、重複防止、429・5xx・timeout・恒久エラー・中断を隔離したHTTPS相手で確認します。
+通知は完了・失敗時の送信、重複防止、429・5xx・timeout・恒久エラー・中断を隔離したHTTPS相手で確認します。
 Chromiumの操作と期待値はTypeScriptが所有し、実APIの起動・環境準備・通信制御をRustが担います。
 
 `tests/common/slicer.rs`は状態遷移と設定受渡し用のCLI代替で、既知の印刷データを使います。

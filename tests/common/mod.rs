@@ -708,6 +708,9 @@ impl Rig {
                             &report["print"],
                             &json!({"gcode_state":state,"subtask_name":command["subtask_name"],"gcode_file":command["file"]}),
                         );
+                        if let Some(error) = value["print_error"].as_u64() {
+                            report["print"]["print_error"] = json!(error);
+                        }
                     }
                     actions
                         .send(peers::Action::Report(

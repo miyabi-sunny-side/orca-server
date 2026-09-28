@@ -34,6 +34,8 @@ pub(crate) struct Job {
     pub attempt_id: Option<String>,
     pub artifact_path: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub failure: Option<crate::print_start::Failure>,
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -301,8 +303,8 @@ struct Preparation {
 }
 
 fn jobs(c: &Connection, pid: &str) -> Result<Vec<Job>> {
-    Ok(c.prepare("SELECT j.id,j.plate_id,coalesce(e.name,p.name),coalesce(e.ams_slot_id,''),coalesce(e.filament_id,p.filament_id,''),coalesce(e.required_machine_profile_key,p.required_machine_profile_key,''),coalesce(e.process_profile_key,p.process_profile_key,''),coalesce(e.bed_type,p.bed_type,''),j.state,j.attempt_id,e.artifact_path,j.last_error FROM print_jobs j JOIN plates p ON p.id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('completed','cancelled') ORDER BY j.position,j.id")?
-        .query_map([pid],|r|Ok(Job{id:r.get(0)?,plate_id:r.get(1)?,name:r.get(2)?,specification:Specification{ams_slot_id:r.get(3)?,filament_id:r.get(4)?,required_machine_profile_key:r.get(5)?,process_profile_key:r.get(6)?,bed_type:r.get(7)?},state:r.get(8)?,attempt_id:r.get(9)?,artifact_path:r.get(10)?,last_error:r.get(11)?}))?
+    Ok(c.prepare("SELECT j.id,j.plate_id,coalesce(e.name,p.name),coalesce(e.ams_slot_id,''),coalesce(e.filament_id,p.filament_id,''),coalesce(e.required_machine_profile_key,p.required_machine_profile_key,''),coalesce(e.process_profile_key,p.process_profile_key,''),coalesce(e.bed_type,p.bed_type,''),j.state,j.attempt_id,e.artifact_path,j.last_error,json_extract(e.attempt_json,'$.failure') FROM print_jobs j JOIN plates p ON p.id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('completed','cancelled') ORDER BY j.position,j.id")?
+        .query_map([pid],|r|Ok(Job{id:r.get(0)?,plate_id:r.get(1)?,name:r.get(2)?,specification:Specification{ams_slot_id:r.get(3)?,filament_id:r.get(4)?,required_machine_profile_key:r.get(5)?,process_profile_key:r.get(6)?,bed_type:r.get(7)?},state:r.get(8)?,attempt_id:r.get(9)?,artifact_path:r.get(10)?,last_error:r.get(11)?,failure:r.get::<_,Option<String>>(12)?.and_then(|s|serde_json::from_str(&s).ok())}))?
         .collect::<std::result::Result<_,_>>()?)
 }
 fn generation(c: &Connection, pid: &str) -> Result<i64> {
@@ -1375,6 +1377,19 @@ impl Database {
             "UPDATE print_executions SET attempt_json=?1 WHERE id=?2",
             params![raw, attempt.id],
         )?;
+        let reported = previous_attempt
+            .and_then(|raw| serde_json::from_str::<Attempt>(&raw).ok())
+            .and_then(|previous| previous.notification());
+        if let Some(event) = attempt
+            .notification()
+            .filter(|event| Some(event) != reported.as_ref())
+            && self
+                .notifications_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let detail = serde_json::to_string(&attempt.failure).map_err(std::io::Error::other)?;
+            tx.execute("INSERT INTO print_notifications(attempt_id,event,detail_json,job_id,printer_id,printer_name,plate_name) SELECT ?1,?3,?4,j.id,j.printer_id,p.name,e.name FROM print_jobs j JOIN printers p ON p.id=j.printer_id JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?2 AND j.attempt_id=?1 ON CONFLICT(attempt_id,event) DO NOTHING",params![attempt.id,attempt.job_id,event,detail])?;
+        }
         if state == "awaiting_removal"
             && previous != state
             && let Some(completed_at) = attempt.completed_at
@@ -1389,7 +1404,7 @@ impl Database {
                 .notifications_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
         {
-            tx.execute("INSERT INTO print_notifications(attempt_id,job_id,printer_id,printer_name,plate_name) SELECT ?1,j.id,j.printer_id,p.name,e.name FROM print_jobs j JOIN printers p ON p.id=j.printer_id JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?2 AND j.attempt_id=?1 ON CONFLICT(attempt_id) DO NOTHING",params![attempt.id,attempt.job_id])?;
+            tx.execute("INSERT INTO print_notifications(attempt_id,job_id,printer_id,printer_name,plate_name) SELECT ?1,j.id,j.printer_id,p.name,e.name FROM print_jobs j JOIN printers p ON p.id=j.printer_id JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?2 AND j.attempt_id=?1 ON CONFLICT(attempt_id,event) DO NOTHING",params![attempt.id,attempt.job_id])?;
         }
         tx.commit()?;
         Ok(())
@@ -2510,6 +2525,103 @@ mod tests {
                 .get::<_, i64>(0))
                 .unwrap(),
             1
+        );
+    }
+    #[tokio::test]
+    async fn failure_intent_is_saved_once_per_code_and_keeps_later_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(root.path(), "one").await;
+        let id = add(&s);
+        let prep = s
+            .mutate(
+                &command(
+                    &s,
+                    Action::Next {
+                        expected_job: id,
+                        removed_job: None,
+                        cleared: true,
+                    },
+                ),
+                &status(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut a = Attempt::new(prep.job.plate_id, prep.job.id, 0, "PLA".into());
+        a.id = prep.job.attempt_id.unwrap();
+        a.phase = Phase::Printing;
+        s.store.db.persist_attempt("one", &a).unwrap();
+        let failure = |code: &str| crate::print_start::Failure {
+            kind: crate::print_start::FailureKind::DeviceError,
+            field: Some("print_error".into()),
+            code: Some(code.into()),
+            reason: None,
+            state: Some("PAUSE".into()),
+        };
+        a.phase = Phase::Unknown;
+        a.message = Some("Printer reported an error; inspect the printer".into());
+        a.failure = Some(failure("0300-4001"));
+        // Disabled notifications never enqueue, and enabling later does not replay it.
+        s.store.db.persist_attempt("one", &a).unwrap();
+        s.store
+            .db
+            .notifications_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        a.message = Some("Server restarted; inspect the printer before another start".into());
+        s.store.db.persist_attempt("one", &a).unwrap();
+        let rows = |s: &Service| -> Vec<(String, String, Option<String>)> {
+            s.store
+                .db
+                .connection()
+                .unwrap()
+                .prepare(
+                    "SELECT attempt_id,event,detail_json FROM print_notifications ORDER BY rowid",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        assert!(rows(&s).is_empty());
+        a.failure = Some(failure("0300-4002"));
+        s.store.db.persist_attempt("one", &a).unwrap();
+        a.message = Some("again".into());
+        s.store.db.persist_attempt("one", &a).unwrap();
+        let saved = rows(&s);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].1, "failure:device_error:0300-4002");
+        let detail: Value = serde_json::from_str(saved[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(detail, json!(a.failure));
+        let job = &jobs(&s.store.db.connection().unwrap(), "one").unwrap()[0];
+        assert_eq!(json!(job)["failure"], json!(a.failure));
+        a.phase = Phase::Printing;
+        a.failure = None;
+        a.message = None;
+        s.store.db.persist_attempt("one", &a).unwrap();
+        assert!(
+            json!(jobs(&s.store.db.connection().unwrap(), "one").unwrap()[0])["failure"].is_null()
+        );
+        a.phase = Phase::Unknown;
+        a.failure = Some(failure("0300-4002"));
+        s.store.db.persist_attempt("one", &a).unwrap();
+        assert_eq!(
+            rows(&s).len(),
+            1,
+            "the same code after resuming is not repeated"
+        );
+        a.phase = Phase::Finished;
+        a.failure = None;
+        a.completed_at = Some(99);
+        s.store.db.persist_attempt("one", &a).unwrap();
+        let saved = rows(&s);
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            (
+                saved[1].0.as_str(),
+                saved[1].1.as_str(),
+                saved[1].2.as_deref()
+            ),
+            (a.id.as_str(), "completed", None)
         );
     }
     #[tokio::test]

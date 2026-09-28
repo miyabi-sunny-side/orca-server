@@ -25,6 +25,49 @@ pub struct MaterialSlot {
     pub ams_slot: u8,
     pub material: String,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    /// `project_file` answered `result: fail`.
+    Rejected,
+    /// A matching report carried a non-zero `print_error`.
+    DeviceError,
+    /// A matching report said FAILED with `print_error` 0 (a manual stop looks the same).
+    Stopped,
+}
+
+/// What the printer itself reported for one attempt. Codes are raw; no meaning is invented.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Failure {
+    pub kind: FailureKind,
+    /// Report field the code came from: `print_error` or `err_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// `MachineObject::get_error_code_str` in `BambuStudio`: `%08X` with a dash after four digits.
+pub fn error_code(value: u64) -> String {
+    let hex = format!("{value:08X}");
+    format!("{}-{}", &hex[..4], &hex[4..])
+}
+
+fn reason(value: &Value) -> Option<String> {
+    let text: String = value
+        .as_str()?
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(200)
+        .collect();
+    let text = text.trim();
+    (!text.is_empty() && !text.eq_ignore_ascii_case("fail")).then(|| text.to_owned())
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: String,
@@ -41,6 +84,9 @@ pub struct Attempt {
     /// UTC seconds at the first matching FINISH observation, absent on old attempts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<u64>,
+    /// Printer-reported failure of this attempt; kept across later uncertainty and restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<Failure>,
     sequence: String,
     sent_at: Option<u64>,
     observed_printing: bool,
@@ -77,6 +123,7 @@ impl Attempt {
             interface: None,
             secondary: None,
             completed_at: None,
+            failure: None,
             sequence: (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string(),
             sent_at: None,
             observed_printing: false,
@@ -155,7 +202,18 @@ impl Attempt {
         }
         self.phase = Phase::Resolved;
         self.message = None;
+        self.failure = None;
         Ok(())
+    }
+    /// Durable notification key for the current failure; one message per attempt and code.
+    pub fn notification(&self) -> Option<String> {
+        let failure = self.failure.as_ref()?;
+        let kind = serde_json::to_value(failure.kind).ok()?;
+        Some(format!(
+            "failure:{}:{}",
+            kind.as_str()?,
+            failure.code.as_deref().unwrap_or("-")
+        ))
     }
     pub fn observe(&mut self, value: &Value, status: &Status) {
         if !matches!(
@@ -175,8 +233,16 @@ impl Attempt {
                     Some("success" | "SUCCESS") if self.phase != Phase::Unknown => {
                         self.phase = Phase::Accepted;
                     }
-                    Some("fail" | "FAIL") => {
+                    Some(result) if result.eq_ignore_ascii_case("fail") => {
                         self.fail(Phase::Rejected, "Printer rejected the start request");
+                        let code = report["err_code"].as_u64();
+                        self.failure = Some(Failure {
+                            kind: FailureKind::Rejected,
+                            field: code.map(|_| "err_code".into()),
+                            code: code.map(error_code),
+                            reason: reason(&report["reason"]),
+                            state: None,
+                        });
                     }
                     _ => {}
                 }
@@ -190,11 +256,18 @@ impl Attempt {
         if !matches {
             return;
         }
-        if status.print.error != Some(0) {
+        if let Some(code) = status.print.error.filter(|&code| code != 0) {
             self.fail(
                 Phase::Unknown,
                 "Printer reported an error; inspect the printer",
             );
+            self.failure = Some(Failure {
+                kind: FailureKind::DeviceError,
+                field: Some("print_error".into()),
+                code: Some(error_code(code)),
+                reason: None,
+                state: status.print.state.clone(),
+            });
             return;
         }
         match status.print.state.as_deref() {
@@ -202,14 +275,28 @@ impl Attempt {
                 self.observed_printing = true;
                 self.phase = Phase::Printing;
                 self.message = None;
+                self.failure = None;
             }
             Some("PREPARE") if self.phase != Phase::Printing => self.phase = Phase::Accepted,
             Some("FINISH") if self.observed_printing => {
                 self.phase = Phase::Finished;
                 self.completed_at = status.updated_at;
             }
-            Some("FAILED" | "PAUSE") => {
+            Some("FAILED") => {
                 self.fail(Phase::Unknown, "Print stopped; inspect the printer");
+                self.failure = Some(Failure {
+                    kind: FailureKind::Stopped,
+                    field: None,
+                    code: None,
+                    reason: None,
+                    state: Some("FAILED".into()),
+                });
+            }
+            Some("PAUSE") => {
+                self.fail(
+                    Phase::Unknown,
+                    "Print paused; resume or stop it on the printer",
+                );
             }
             Some("IDLE") if self.observed_printing => self.fail(
                 Phase::Unknown,
@@ -370,6 +457,117 @@ mod tests {
         state.connected();
         state.apply(include_bytes!("../tests/fixtures/p1_status.json"), 10);
         state.status(10)
+    }
+
+    #[test]
+    fn device_codes_use_the_bambu_studio_hex_format() {
+        assert_eq!(error_code(0x0300_4001), "0300-4001");
+        assert_eq!(error_code(0x0500_400C), "0500-400C");
+        assert_eq!(error_code(12), "0000-000C");
+    }
+
+    fn printing(a: &mut Attempt) -> Status {
+        let mut status = ready();
+        a.sent(10);
+        status.print.name = Some(a.name());
+        status.print.state = Some("RUNNING".into());
+        a.observe(&json!({"print":{"command":"push_status"}}), &status);
+        status
+    }
+
+    #[test]
+    fn a_rejected_start_keeps_the_reported_code_and_reason() {
+        let mut a = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        a.sent(10);
+        a.observe(&json!({"print":{"command":"project_file","sequence_id":a.sequence,"result":"FAIL","err_code":0x0500_4003_u32,"reason":"sd card\nfull"}}), &ready());
+        let failure = a.failure.clone().unwrap();
+        assert_eq!(a.phase, Phase::Rejected);
+        assert_eq!(failure.kind, FailureKind::Rejected);
+        assert_eq!(failure.field.as_deref(), Some("err_code"));
+        assert_eq!(failure.code.as_deref(), Some("0500-4003"));
+        assert_eq!(failure.reason.as_deref(), Some("sd card full"));
+        let mut bare = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        bare.sent(10);
+        bare.observe(&json!({"print":{"command":"project_file","sequence_id":bare.sequence,"result":"fail","reason":"fail"}}), &ready());
+        let failure = bare.failure.unwrap();
+        assert_eq!((failure.field, failure.code), (None, None));
+        assert_eq!(failure.reason, None, "a bare result echo is not a reason");
+    }
+
+    #[test]
+    fn matching_device_errors_and_stops_are_recorded_but_pause_is_not_a_failure() {
+        let mut a = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        let mut status = printing(&mut a);
+        let report = json!({"print":{"command":"push_status"}});
+        let mut other = ready();
+        other.print.state = Some("RUNNING".into());
+        other.print.name = Some("orca-other".into());
+        other.print.error = Some(0x0300_4001);
+        let mut untouched = a.clone();
+        untouched.observe(&report, &other);
+        assert!(untouched.failure.is_none() && untouched.phase == Phase::Printing);
+
+        let mut errored = a.clone();
+        status.print.error = Some(0x0300_4001);
+        status.print.state = Some("PAUSE".into());
+        errored.observe(&report, &status);
+        let failure = errored.failure.clone().unwrap();
+        assert_eq!(failure.kind, FailureKind::DeviceError);
+        assert_eq!(failure.field.as_deref(), Some("print_error"));
+        assert_eq!(failure.code.as_deref(), Some("0300-4001"));
+        assert_eq!(failure.state.as_deref(), Some("PAUSE"));
+        assert_eq!(
+            errored.notification(),
+            Some("failure:device_error:0300-4001".into())
+        );
+
+        status.print.error = Some(0);
+        status.print.state = Some("FAILED".into());
+        let mut stopped = a.clone();
+        stopped.observe(&report, &status);
+        let failure = stopped.failure.clone().unwrap();
+        assert_eq!(failure.kind, FailureKind::Stopped);
+        assert_eq!((failure.field, failure.code), (None, None));
+        assert_eq!(failure.state.as_deref(), Some("FAILED"));
+        assert_eq!(stopped.notification(), Some("failure:stopped:-".into()));
+
+        status.print.state = Some("PAUSE".into());
+        let mut paused = a.clone();
+        paused.observe(&report, &status);
+        assert_eq!(paused.phase, Phase::Unknown);
+        assert!(paused.failure.is_none() && paused.notification().is_none());
+        assert_eq!(
+            paused.message.as_deref(),
+            Some("Print paused; resume or stop it on the printer")
+        );
+
+        status.print.state = Some("RUNNING".into());
+        errored.observe(&report, &status);
+        assert_eq!(errored.phase, Phase::Printing);
+        assert!(
+            errored.failure.is_none(),
+            "a resumed print has no active failure"
+        );
+    }
+
+    #[test]
+    fn later_uncertainty_keeps_the_observed_failure() {
+        let mut a = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        let mut status = printing(&mut a);
+        status.print.error = Some(0x0300_4001);
+        a.observe(&json!({"print":{"command":"push_status"}}), &status);
+        a.fail(
+            Phase::Unknown,
+            "Server restarted; inspect the printer before another start",
+        );
+        let restored: Attempt = serde_json::from_value(json!(a)).unwrap();
+        assert_eq!(restored.failure.unwrap().code.as_deref(), Some("0300-4001"));
+        let legacy = {
+            let mut raw = json!(Attempt::new("p".into(), "j".into(), 0, "PLA".into()));
+            raw.as_object_mut().unwrap().remove("failure");
+            serde_json::from_value::<Attempt>(raw).unwrap()
+        };
+        assert!(legacy.failure.is_none());
     }
 
     #[test]

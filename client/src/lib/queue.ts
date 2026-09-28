@@ -5,6 +5,14 @@ export type Specification = {
   process_profile_key: string;
   bed_type: string;
 };
+/** Printer-reported failure saved with the attempt; the same data feeds Discord. */
+export type Failure = {
+  kind: "rejected" | "device_error" | "stopped";
+  field?: string;
+  code?: string;
+  reason?: string;
+  state?: string;
+};
 export type Job = {
   ams_slot_id: string | null;
   filament_id: string | null;
@@ -27,6 +35,7 @@ export type Job = {
   last_error: string | null;
   hold_reason?: string | null;
   estimate?: Estimate;
+  failure?: Failure | null;
 };
 type Ams = {
   units: {
@@ -128,10 +137,44 @@ export function printerText(printer: Printer) {
   if (printer.connection !== "connected") return "プリンター未接続";
   if (!printer.synchronized) return "プリンターの状態を確認中";
   if (printer.print.error)
-    return `プリンターエラー ${printer.print.error} · 本体を確認してください`;
+    return `プリンターエラー ${errorCode(printer.print.error)} · 本体を確認してください`;
   return printer.ready_to_print
     ? "印刷できます"
     : "プリンターの終了・復帰を待っています";
+}
+/** BambuStudio's `%08X` code with a dash after four digits, as used for the saved failures. */
+export function errorCode(value: number): string {
+  const hex = value.toString(16).toUpperCase().padStart(8, "0");
+  return `${hex.slice(0, 4)}-${hex.slice(4)}`;
+}
+const failureKinds: Record<
+  Failure["kind"],
+  { title: string; missing: string }
+> = {
+  rejected: {
+    title: "印刷開始の拒否",
+    missing: "開始要求の応答にerr_codeなし",
+  },
+  device_error: { title: "印刷エラー", missing: "print_errorなし" },
+  stopped: {
+    title: "印刷停止",
+    missing: "エラーコード0のFAILED。本体での手動停止も同じ報告です",
+  },
+};
+function failureCode(failure: Failure): string | null {
+  return failure.field && failure.code
+    ? `${failure.field} ${failure.code}`
+    : null;
+}
+/** The same title and lines as the Discord failure message. */
+export function failureLines(failure: Failure) {
+  const kind = failureKinds[failure.kind];
+  const lines = [
+    `コード: ${failureCode(failure) ?? `コード未取得（${kind.missing}）`}`,
+  ];
+  if (failure.state) lines.push(`本体の状態: ${failure.state}`);
+  if (failure.reason) lines.push(`理由: ${failure.reason}`);
+  return { title: kind.title, lines };
 }
 export const phaseText = {
   queued: "待機中",
@@ -210,7 +253,9 @@ export const failureText: Record<string, string> = {
   "Printer reported an error; inspect the printer":
     "プリンターがエラーを報告しました。本体を確認してください。",
   "Print stopped; inspect the printer":
-    "印刷が停止・一時停止しました。本体を確認してください。",
+    "印刷が停止しました。本体を確認してください。",
+  "Print paused; resume or stop it on the printer":
+    "印刷が一時停止しています。本体で再開するか停止してください。",
   "Print ended without a completion report; inspect the printer":
     "完了報告なしに印刷が終了しました。本体を確認してください。",
 };
@@ -252,6 +297,8 @@ export function jobStatus(job: Job, printer?: Printer): string {
       parts.push(`残り約${printer.print.remaining_minutes}分`);
     return parts.join(" · ");
   }
+  if (job.state === "needs_attention" && job.failure)
+    return `${failureKinds[job.failure.kind].title} · ${failureCode(job.failure) ?? "コード未取得"}`;
   return phaseText[job.state];
 }
 export function failureMessage(

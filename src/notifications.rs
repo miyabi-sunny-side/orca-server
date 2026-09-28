@@ -1,7 +1,8 @@
-//! Durable, bounded delivery of print-completion messages.
+//! Durable, bounded delivery of print completion and failure messages.
 use crate::{
     database::Database,
     plates::{Error, Result, Store},
+    print_start::{Failure, FailureKind},
 };
 use reqwest::{Client, Url};
 use rusqlite::{OptionalExtension, params};
@@ -73,12 +74,14 @@ fn public_url(value: &str) -> Result<Url> {
     Ok(url)
 }
 struct Event {
+    rowid: i64,
     attempt_id: String,
     job_id: String,
     printer_id: String,
     printer: String,
     plate: String,
     tries: u8,
+    failure: Option<Failure>,
 }
 fn payload(event: &Event, base: Option<&Url>) -> Value {
     fn name(value: &str) -> String {
@@ -97,12 +100,45 @@ fn payload(event: &Event, base: Option<&Url>) -> Value {
         }
         result
     }
-    let mut content = format!(
-        "印刷完了 · 取り外し待ち\nプリンター: {}\nプレート: {}\nジョブ: {}",
-        name(&event.printer),
-        name(&event.plate),
-        event.job_id
-    );
+    let mut content = match &event.failure {
+        None => format!(
+            "印刷完了 · 取り外し待ち\nプリンター: {}\nプレート: {}\nジョブ: {}",
+            name(&event.printer),
+            name(&event.plate),
+            event.job_id
+        ),
+        Some(failure) => {
+            let (title, missing) = match failure.kind {
+                FailureKind::Rejected => ("印刷開始の拒否", "開始要求の応答にerr_codeなし"),
+                FailureKind::DeviceError => ("印刷エラー", "print_errorなし"),
+                FailureKind::Stopped => (
+                    "印刷停止",
+                    "エラーコード0のFAILED。本体での手動停止も同じ報告です",
+                ),
+            };
+            let code = match (&failure.field, &failure.code) {
+                (Some(field), Some(code)) => format!("{field} {code}"),
+                _ => format!("コード未取得（{missing}）"),
+            };
+            let mut text = format!(
+                "{title} · 確認が必要\nプリンター: {}\nプレート: {}\nジョブ: {}\n試行: {}\nコード: {}",
+                name(&event.printer),
+                name(&event.plate),
+                event.job_id,
+                event.attempt_id,
+                code
+            );
+            if let Some(state) = &failure.state {
+                text.push_str("\n本体の状態: ");
+                text.push_str(&name(state));
+            }
+            if let Some(reason) = &failure.reason {
+                text.push_str("\n理由: ");
+                text.push_str(&name(reason));
+            }
+            text
+        }
+    };
     if let Some(base) = base {
         let mut link = base.join("queue").expect("validated public URL");
         link.query_pairs_mut()
@@ -158,6 +194,24 @@ pub(crate) fn migrate(tx: &rusqlite::Transaction<'_>) -> Result<()> {
         tries INTEGER NOT NULL DEFAULT 0 CHECK(tries BETWEEN 0 AND 3), next_at INTEGER NOT NULL DEFAULT 0,
         result TEXT, message_id TEXT
     ); PRAGMA user_version=8;")?;
+    Ok(())
+}
+/// Key notifications by attempt and event so a failure never blocks the later completion.
+pub(crate) fn migrate_events(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch("CREATE TABLE print_notifications_v19 (
+        attempt_id TEXT NOT NULL, event TEXT NOT NULL DEFAULT 'completed',
+        detail_json TEXT CHECK(detail_json IS NULL OR json_valid(detail_json)),
+        job_id TEXT NOT NULL, printer_id TEXT NOT NULL,
+        printer_name TEXT NOT NULL, plate_name TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','sending','unknown','sent','failed')),
+        tries INTEGER NOT NULL DEFAULT 0 CHECK(tries BETWEEN 0 AND 3), next_at INTEGER NOT NULL DEFAULT 0,
+        result TEXT, message_id TEXT, PRIMARY KEY(attempt_id,event)
+    );
+    INSERT INTO print_notifications_v19(rowid,attempt_id,job_id,printer_id,printer_name,plate_name,state,tries,next_at,result,message_id)
+        SELECT rowid,attempt_id,job_id,printer_id,printer_name,plate_name,state,tries,next_at,result,message_id FROM print_notifications;
+    DROP TABLE print_notifications;
+    ALTER TABLE print_notifications_v19 RENAME TO print_notifications;
+    PRAGMA user_version=19;")?;
     Ok(())
 }
 fn env(name: &str) -> Result<Option<String>> {
@@ -221,7 +275,7 @@ fn reserve(db: &Database) -> Result<(Option<Event>, Duration)> {
         [],
         |r| r.get(0),
     )?;
-    let row=tx.query_row("SELECT attempt_id,job_id,printer_id,printer_name,plate_name,tries,next_at FROM print_notifications WHERE state IN ('pending','unknown') AND tries<3 ORDER BY rowid LIMIT 1",[],|r|Ok((Event{attempt_id:r.get(0)?,job_id:r.get(1)?,printer_id:r.get(2)?,printer:r.get(3)?,plate:r.get(4)?,tries:r.get(5)?},r.get::<_,i64>(6)?))).optional()?;
+    let row=tx.query_row("SELECT rowid,attempt_id,job_id,printer_id,printer_name,plate_name,tries,next_at,detail_json FROM print_notifications WHERE state IN ('pending','unknown') AND tries<3 ORDER BY rowid LIMIT 1",[],|r|Ok((Event{rowid:r.get(0)?,attempt_id:r.get(1)?,job_id:r.get(2)?,printer_id:r.get(3)?,printer:r.get(4)?,plate:r.get(5)?,tries:r.get(6)?,failure:r.get::<_,Option<String>>(8)?.and_then(|s|serde_json::from_str(&s).ok())},r.get::<_,i64>(7)?))).optional()?;
     let Some((mut event, due)) = row else {
         return Ok((None, Duration::from_secs(1)));
     };
@@ -231,8 +285,8 @@ fn reserve(db: &Database) -> Result<(Option<Event>, Duration)> {
     }
     event.tries += 1;
     tx.execute(
-        "UPDATE print_notifications SET state='sending',tries=?1 WHERE attempt_id=?2",
-        params![event.tries, event.attempt_id],
+        "UPDATE print_notifications SET state='sending',tries=?1 WHERE rowid=?2",
+        params![event.tries, event.rowid],
     )?;
     tx.commit()?;
     Ok((Some(event), Duration::ZERO))
@@ -299,7 +353,7 @@ async fn deliver(
     let next = now_ms().saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX));
     loop {
         let saved = db.connection().and_then(|c| {
-            c.execute("UPDATE print_notifications SET state=?1,result=?2,message_id=?3,next_at=?4 WHERE attempt_id=?5 AND state='sending'",params![state,result,message,next,event.attempt_id]).map_err(Error::from)
+            c.execute("UPDATE print_notifications SET state=?1,result=?2,message_id=?3,next_at=?4 WHERE rowid=?5 AND state='sending'",params![state,result,message,next,event.rowid]).map_err(Error::from)
         });
         if saved.is_ok() {
             break;
@@ -308,7 +362,7 @@ async fn deliver(
         tracing::warn!("Notification result storage unavailable; saving will retry");
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    tracing::info!(attempt=%event.attempt_id,state,tries=event.tries,"Discord completion notification delivery recorded");
+    tracing::info!(attempt=%event.attempt_id,failure=event.failure.is_some(),state,tries=event.tries,"Discord completion notification delivery recorded");
     Ok(Duration::from_secs(1))
 }
 
@@ -400,6 +454,8 @@ mod tests {
             printer: "@everyone **desk**".into(),
             plate: "<@123>\n[click](https://evil.test) `x`".into(),
             tries: 0,
+            failure: None,
+            rowid: 1,
         };
         let base = public_url("https://printer.example/tools/").unwrap();
         let value = payload(&event, Some(&base));
@@ -433,6 +489,111 @@ mod tests {
         ] {
             assert!(public_url(bad).is_err());
         }
+    }
+    #[test]
+    fn failure_content_names_the_attempt_and_raw_code_without_inventing_meaning() {
+        use crate::print_start::{Failure, FailureKind};
+        let event = Event {
+            attempt_id: "attempt-1".into(),
+            job_id: "job-1".into(),
+            printer_id: "p1".into(),
+            printer: "desk".into(),
+            plate: "parts".into(),
+            tries: 0,
+            failure: Some(Failure {
+                kind: FailureKind::DeviceError,
+                field: Some("print_error".into()),
+                code: Some("0300-4001".into()),
+                reason: None,
+                state: Some("PAUSE".into()),
+            }),
+            rowid: 1,
+        };
+        let content = payload(&event, None)["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(content.starts_with("印刷エラー · 確認が必要\n"));
+        assert!(content.contains("試行: attempt-1") && content.contains("ジョブ: job-1"));
+        assert!(content.contains("コード: print_error 0300-4001"));
+        assert!(content.contains("本体の状態: PAUSE"));
+        assert!(!content.contains("取り外し待ち"));
+        let stopped = Event {
+            failure: Some(Failure {
+                kind: FailureKind::Stopped,
+                field: None,
+                code: None,
+                reason: None,
+                state: Some("FAILED".into()),
+            }),
+            ..event
+        };
+        let content = payload(&stopped, None)["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(content.starts_with("印刷停止 · 確認が必要\n"));
+        assert!(content.contains(
+            "コード: コード未取得（エラーコード0のFAILED。本体での手動停止も同じ報告です）"
+        ));
+        let rejected = Event {
+            failure: Some(Failure {
+                kind: FailureKind::Rejected,
+                field: None,
+                code: None,
+                reason: Some("@everyone *sd*".into()),
+                state: None,
+            }),
+            ..stopped
+        };
+        let content = payload(&rejected, None)["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(content.starts_with("印刷開始の拒否 · 確認が必要\n"));
+        assert!(content.contains("コード: コード未取得（開始要求の応答にerr_codeなし）"));
+        assert!(content.contains("理由: ＠everyone \\*sd\\*"));
+    }
+    #[test]
+    fn event_migration_keeps_completion_rows_and_allows_a_failure_for_the_same_attempt() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        let tx = c.transaction().unwrap();
+        migrate(&tx).unwrap();
+        tx.execute_batch("INSERT INTO print_notifications(attempt_id,job_id,printer_id,printer_name,plate_name,state,tries,message_id) VALUES ('b','j2','p','P','B','sent',1,'9'),('a','j1','p','P','A','pending',0,NULL);").unwrap();
+        migrate_events(&tx).unwrap();
+        tx.execute("INSERT INTO print_notifications(attempt_id,event,detail_json,job_id,printer_id,printer_name,plate_name) VALUES ('b','failure:stopped:-','{}','j2','p','P','B')",[]).unwrap();
+        let rows: Vec<(String, String, String, Option<String>)> = tx
+            .prepare(
+                "SELECT attempt_id,event,state,message_id FROM print_notifications ORDER BY rowid",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "b".into(),
+                    "completed".into(),
+                    "sent".into(),
+                    Some("9".into())
+                ),
+                ("a".into(), "completed".into(), "pending".into(), None),
+                (
+                    "b".into(),
+                    "failure:stopped:-".into(),
+                    "pending".into(),
+                    None
+                ),
+            ]
+        );
+        assert_eq!(
+            tx.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            19
+        );
     }
     #[test]
     fn acknowledgement_and_retry_classification_keep_uncertainty_visible() {

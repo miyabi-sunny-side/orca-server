@@ -11,6 +11,7 @@
   import {
     estimateText,
     failureMessage,
+    failureLines,
     jobStatus,
     moveIndex,
     menuReasons,
@@ -383,6 +384,13 @@
     {#if reason}<p class="failure" role="alert">
         {failureMessage(reason, job, material)}
       </p>{/if}
+    {#if job.failure}
+      {@const failure = failureLines(job.failure)}
+      <div class="failure device-failure" aria-label="本体が報告した失敗">
+        <p><strong>{failure.title}</strong></p>
+        {#each failure.lines as line (line)}<p>{line}</p>{/each}
+      </div>
+    {/if}
     {#if job.plate_deleted}<p>
         一覧から削除済み · このジョブは継続できます
       </p>{/if}
@@ -712,6 +720,10 @@
     color: var(--c-on-surface)
   .failure
     color: var(--c-danger)
+  .device-failure
+    margin: 0 0 var(--sp-2)
+    padding-left: var(--sp-2)
+    border-left: 2px solid var(--c-danger)
   .actions .btn
     min-height: 44px
     white-space: normal

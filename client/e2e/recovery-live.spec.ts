@@ -38,7 +38,48 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
     .click();
   await expect.poll(count).toBe(1);
   await report("RUNNING");
+  await request.post(control, {
+    data: { state: "PAUSE", print_error: 0x03004001 },
+  });
+  await expect
+    .poll(async () => (await state()).current?.failure)
+    .toEqual({
+      kind: "device_error",
+      field: "print_error",
+      code: "0300-4001",
+      state: "PAUSE",
+    });
+  for (const [width, scheme] of [
+    [900, "light"],
+    [375, "dark"],
+    [320, "light"],
+  ] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.setViewportSize({ width, height: 812 });
+    await page.reload();
+    await expect(page.locator(".current-job summary")).toContainText(
+      "印刷エラー · print_error 0300-4001",
+    );
+    await page.locator(".current-job summary").click();
+    await expect(page.locator(".device-failure")).toContainText(
+      "コード: print_error 0300-4001",
+    );
+    await expect(page.locator(".device-failure")).toContainText(
+      "本体の状態: PAUSE",
+    );
+    await expect(
+      page.getByRole("button", { name: "取り外した・最初から再印刷" }),
+    ).toBeVisible();
+    await capture(`device-error-${width}-${scheme}`);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.setViewportSize({ width: 900, height: 812 });
+  await report("RUNNING");
   await report("FAILED");
+  await page.reload();
+  await expect(page.locator(".current-job summary")).toContainText(
+    "印刷停止 · コード未取得",
+  );
   await page.locator(".current-job summary").click();
   await page
     .getByRole("link", { name: "プレートの条件を編集", exact: true })

@@ -95,7 +95,18 @@ DBをバックアップから戻した場合も同じです。
 
 ジョブは`id`、`plate_id`、`name`、`state`と、材料・要求機種・工程・ベッド・解決したAMSを持ちます。
 `plate_deleted`が`true`でも既存ジョブは継続できます。[プレートの論理削除](plates.md#一覧から削除する)は新規追加だけを止めます。
-試行の情報は`attempt_id`、`artifact_path`、`last_error`です。
+試行の情報は`attempt_id`、`artifact_path`、`last_error`、`failure`です。
+`failure`は現在の試行について本体が報告した失敗で、なければ`null`です。Discordの失敗通知と同じ保存値です。
+
+| 項目 | 内容 |
+| --- | --- |
+| `kind` | `rejected`は開始要求への`result: fail`、`device_error`は非0の`print_error`、`status: FAILED`でエラー0は`stopped`。 |
+| `field`・`code` | コードを受け取った項目（`print_error`か`err_code`）と、BambuStudioと同じ`%08X`の前後4桁を`-`で区切った生コード。なければ省略。 |
+| `state` | 報告時の`gcode_state`。 |
+| `reason` | 開始拒否の応答に含まれた理由文字列（制御文字を除き200文字まで）。 |
+
+コードの意味は付けず、未知のコードもそのまま返します。一時停止（エラー0のPAUSE）・通信断・開始確認の時間切れ・再起動は`failure`を作らず、`last_error`で区別します。
+再開してRUNNINGを受け取ると`failure`は消えます。別の試行や他ジョブの報告は反映しません。
 待機分はプレートの最新条件と`plate_version`を返し、未設定や解決できないAMSは`null`です。
 `current`は確定済み条件を返します。`actual_ams_slot`は同期した印刷中の実使用slot（0〜15）で、未確認なら`null`です。
 標準Auto Refillで使用slotが変わっても要求材料・開始時slot・job/attempt IDは変えず、新規開始もしません。

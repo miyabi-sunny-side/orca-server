@@ -87,9 +87,52 @@ it("does not present unsynchronized or failed printers as ready", () => {
     printerText({
       ...printer,
       ready_to_print: false,
-      print: { ...printer.print, error: 42 },
+      print: { ...printer.print, error: 0x03004001 },
     }),
-  ).toContain("42");
+  ).toBe("プリンターエラー 0300-4001 · 本体を確認してください");
+});
+
+it("shows the saved device failure with its raw code, or says the code is missing", async () => {
+  const { failureLines, jobStatus } = await import("./queue");
+  const failed = { state: "needs_attention" } as Job;
+  expect(
+    failureLines({
+      kind: "device_error",
+      field: "print_error",
+      code: "0300-4001",
+      state: "PAUSE",
+    }),
+  ).toEqual({
+    title: "印刷エラー",
+    lines: ["コード: print_error 0300-4001", "本体の状態: PAUSE"],
+  });
+  expect(
+    jobStatus({
+      ...failed,
+      failure: {
+        kind: "device_error",
+        field: "print_error",
+        code: "0300-4001",
+      },
+    }),
+  ).toBe("印刷エラー · print_error 0300-4001");
+  expect(failureLines({ kind: "stopped", state: "FAILED" }).lines).toEqual([
+    "コード: コード未取得（エラーコード0のFAILED。本体での手動停止も同じ報告です）",
+    "本体の状態: FAILED",
+  ]);
+  expect(jobStatus({ ...failed, failure: { kind: "stopped" } })).toBe(
+    "印刷停止 · コード未取得",
+  );
+  expect(
+    failureLines({ kind: "rejected", reason: "長い理由".repeat(40) }),
+  ).toEqual({
+    title: "印刷開始の拒否",
+    lines: [
+      "コード: コード未取得（開始要求の応答にerr_codeなし）",
+      `理由: ${"長い理由".repeat(40)}`,
+    ],
+  });
+  expect(jobStatus({ ...failed, failure: null })).toBe("確認が必要です");
 });
 
 describe("queue estimates", () => {

@@ -115,7 +115,7 @@ impl Drop for Webhook {
 }
 fn rows(rig: &Rig) -> Vec<Value> {
     let db = rig.db();
-    db.prepare("SELECT job_id,state,message_id,tries,result FROM print_notifications ORDER BY rowid").unwrap().query_map([],|r|Ok(json!({"job_id":r.get::<_,String>(0)?,"state":r.get::<_,String>(1)?,"message_id":r.get::<_,Option<String>>(2)?,"tries":r.get::<_,i64>(3)?,"result":r.get::<_,Option<String>>(4)?}))).unwrap().collect::<Result<_,_>>().unwrap()
+    db.prepare("SELECT job_id,state,message_id,tries,result,event FROM print_notifications ORDER BY rowid").unwrap().query_map([],|r|Ok(json!({"job_id":r.get::<_,String>(0)?,"state":r.get::<_,String>(1)?,"message_id":r.get::<_,Option<String>>(2)?,"tries":r.get::<_,i64>(3)?,"result":r.get::<_,Option<String>>(4)?,"event":r.get::<_,String>(5)?}))).unwrap().collect::<Result<_,_>>().unwrap()
 }
 fn last(rig: &Rig) -> Value {
     rows(rig).last().cloned().unwrap_or(Value::Null)
@@ -131,6 +131,21 @@ fn start_job(rig: &mut Rig) -> Value {
 fn remove_current(rig: &Rig) {
     rig.discard();
     assert!(rig.queue()["current"].is_null());
+}
+fn coded(rig: &Rig, state: &str, error: u64, name: Option<&str>) {
+    let command = rig.broker.prints().last().unwrap().clone();
+    let mut full = rig.full.clone();
+    full["print"] = merge(
+        &full["print"],
+        &json!({"gcode_state":state,"print_error":error,"subtask_name":name.map_or(command["subtask_name"].clone(),|n|json!(n)),"gcode_file":name.map_or(command["file"].clone(),|n|json!(format!("{n}.gcode.3mf")))}),
+    );
+    rig.broker.send(&full);
+}
+fn content(webhook: &Webhook, index: usize) -> String {
+    webhook.requests.lock().unwrap()[index].1["content"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 fn sleep(seconds: f64) {
     thread::sleep(Duration::from_secs_f64(seconds));
@@ -180,6 +195,25 @@ fn isolated_notification_delivery() {
     let stopped = rig.queue()["current"]["attempt_id"].clone();
     rig.report("FAILED");
     rig.phase("needs_attention");
+    assert_eq!(
+        rig.queue()["current"]["failure"],
+        json!({"kind":"stopped","state":"FAILED"})
+    );
+    until(|| last(&rig)["state"] == "sent", 12);
+    assert_eq!(last(&rig)["event"], "failure:stopped:-");
+    let text = content(&webhook, 0);
+    assert!(
+        text.starts_with("印刷停止 · 確認が必要")
+            && text.contains(stopped.as_str().unwrap())
+            && text.contains("コード: コード未取得（エラーコード0のFAILED")
+            && text.contains("本体の状態: FAILED")
+            && !text.contains("@everyone")
+    );
+    for _ in 0..3 {
+        rig.report("FAILED");
+    }
+    sleep(1.2);
+    assert_eq!(webhook.len(), 1);
     rig.send(
         json!({"type":"retry","expected_job":first["id"],"cleared":true}),
         200,
@@ -187,25 +221,31 @@ fn isolated_notification_delivery() {
     until(|| rig.broker.prints().len() == 2, 12);
     let restarted = rig.queue()["current"]["attempt_id"].clone();
     assert_ne!(restarted, stopped);
-    assert!(rows(&rig).is_empty());
+    assert!(rig.queue()["current"]["failure"].is_null());
+    assert_eq!(rows(&rig).len(), 1);
     rig.report("RUNNING");
     rig.phase("printing");
     rig.report("FINISH");
     rig.phase("awaiting_removal");
-    until(|| last(&rig)["state"] == "sent", 12);
-    let sent = rows(&rig)[0].clone();
+    until(
+        || rows(&rig).len() == 2 && last(&rig)["state"] == "sent",
+        12,
+    );
+    let sent = rows(&rig)[1].clone();
+    assert_eq!(sent["event"], "completed");
     assert_eq!(
         rig.db()
-            .query_row("SELECT attempt_id FROM print_notifications", [], |r| r
-                .get::<_, String>(
-                0
-            ))
+            .query_row(
+                "SELECT attempt_id FROM print_notifications WHERE event='completed'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
             .unwrap(),
         restarted.as_str().unwrap()
     );
     assert_eq!(sent["job_id"], first["id"]);
-    assert_eq!(sent["message_id"], "1001");
-    let payload = webhook.requests.lock().unwrap()[0].1.clone();
+    assert_eq!(sent["message_id"], "1002");
+    let payload = webhook.requests.lock().unwrap()[1].1.clone();
     let text = payload["content"].as_str().unwrap();
     assert!(
         text.contains("取り外し待ち")
@@ -222,14 +262,14 @@ fn isolated_notification_delivery() {
     rig.report("FINISH");
     rig.phase("awaiting_removal");
     sleep(1.2);
-    assert_eq!(webhook.len(), 1);
-    assert_eq!(rows(&rig)[0]["tries"], 1);
+    assert_eq!(webhook.len(), 2);
+    assert_eq!(rows(&rig)[1]["tries"], 1);
     remove_current(&rig);
-    assert_eq!(rows(&rig).len(), 1);
+    assert_eq!(rows(&rig).len(), 2);
     webhook.respond(200, json!({"id":"2000"}), 1.2);
     let second = start_job(&mut rig);
     rig.finish();
-    until(|| webhook.len() == 2, 12);
+    until(|| webhook.len() == 3, 12);
     let started = Instant::now();
     remove_current(&rig);
     assert!(started.elapsed() < Duration::from_millis(500));
@@ -317,10 +357,20 @@ fn isolated_notification_delivery() {
     let count = webhook.len();
     let job = start_job(&mut rig);
     let command = rig.broker.prints().last().unwrap().clone();
-    rig.broker.send(&json!({"print":{"command":"project_file","sequence_id":command["sequence_id"],"result":"fail"}}));
+    rig.broker.send(&json!({"print":{"command":"project_file","sequence_id":command["sequence_id"],"result":"fail","err_code":0x0500_4003_u32}}));
     rig.phase("needs_attention");
-    sleep(1.2);
-    assert_eq!(webhook.len(), count);
+    assert_eq!(
+        rig.queue()["current"]["failure"],
+        json!({"kind":"rejected","field":"err_code","code":"0500-4003"})
+    );
+    until(|| webhook.len() == count + 1, 12);
+    assert_eq!(last(&rig)["event"], "failure:rejected:0500-4003");
+    let text = content(&webhook, count);
+    assert!(
+        text.starts_with("印刷開始の拒否 · 確認が必要")
+            && text.contains("コード: err_code 0500-4003")
+    );
+    let count = count + 1;
     rig.idle();
     rig.send(
         json!({"type":"retry","expected_job":job["id"],"cleared":true}),
@@ -328,9 +378,77 @@ fn isolated_notification_delivery() {
     );
     until(|| rig.broker.prints().last() != Some(&command), 12);
     rig.finish();
-    until(|| last(&rig)["state"] == "sent", 12);
+    until(
+        || last(&rig)["state"] == "sent" && last(&rig)["event"] == "completed",
+        12,
+    );
     assert_eq!(webhook.len(), count + 1);
     remove_current(&rig);
+    let count = webhook.len();
+    start_job(&mut rig);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    coded(&rig, "PAUSE", 0x0300_4001, Some("orca-previous-attempt"));
+    rig.report("RUNNING");
+    sleep(1.2);
+    assert_eq!(rig.queue()["current"]["state"], "printing");
+    assert!(rig.queue()["current"]["failure"].is_null());
+    assert_eq!(
+        webhook.len(),
+        count,
+        "another attempt's error is not this failure"
+    );
+    rig.report("PAUSE");
+    rig.phase("needs_attention");
+    sleep(1.2);
+    assert_eq!(
+        webhook.len(),
+        count,
+        "a pause without a code is not a failure"
+    );
+    assert!(rig.queue()["current"]["failure"].is_null());
+    assert_eq!(
+        rig.queue()["current"]["last_error"],
+        "Print paused; resume or stop it on the printer"
+    );
+    coded(&rig, "PAUSE", 0x0300_4001, None);
+    until(|| !rig.queue()["current"]["failure"].is_null(), 12);
+    let failure =
+        json!({"kind":"device_error","field":"print_error","code":"0300-4001","state":"PAUSE"});
+    assert_eq!(rig.queue()["current"]["failure"], failure);
+    until(|| webhook.len() == count + 1, 12);
+    let text = content(&webhook, count);
+    assert!(
+        text.starts_with("印刷エラー · 確認が必要")
+            && text.contains("コード: print_error 0300-4001")
+            && text.contains("本体の状態: PAUSE")
+    );
+    for _ in 0..3 {
+        coded(&rig, "PAUSE", 0x0300_4001, None);
+    }
+    rig.stop(false);
+    rig.launch();
+    coded(&rig, "PAUSE", 0x0300_4001, None);
+    rig.phase("needs_attention");
+    assert_eq!(
+        rig.queue()["current"]["failure"],
+        failure,
+        "reload after restart keeps the saved code"
+    );
+    sleep(1.2);
+    assert_eq!(webhook.len(), count + 1);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.report("FINISH");
+    rig.phase("awaiting_removal");
+    until(
+        || webhook.len() == count + 2 && last(&rig)["state"] == "sent",
+        12,
+    );
+    assert_eq!(last(&rig)["event"], "completed");
+    assert!(content(&webhook, count + 1).starts_with("印刷完了 · 取り外し待ち"));
+    remove_current(&rig);
+    let count = webhook.len() - 1;
     let cancelled = rig.add(3);
     rig.send(json!({"type":"remove","job_id":cancelled["id"]}), 200);
     sleep(1.2);
