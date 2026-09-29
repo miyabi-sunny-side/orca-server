@@ -176,6 +176,43 @@ export function failureLines(failure: Failure) {
   if (failure.reason) lines.push(`理由: ${failure.reason}`);
   return { title: kind.title, lines };
 }
+/** A fresh device error takes precedence over an older saved attempt's failure. */
+export function queueFailure(
+  job: Job | null,
+  printer: Printer,
+): { current: boolean; failure: Failure } | null {
+  const saved = job?.failure;
+  if (
+    printer.connection === "connected" &&
+    printer.synchronized &&
+    printer.print.error
+  ) {
+    return {
+      current: true,
+      failure: {
+        kind: "device_error",
+        field: "print_error",
+        code: errorCode(printer.print.error),
+        state: printer.print.state ?? undefined,
+      },
+    };
+  }
+  return saved ? { current: false, failure: saved } : null;
+}
+
+// BambuStudio da8b44ee: resources/hms/hms_en_094.json (03008010),
+// src/slic3r/GUI/HMS.cpp get_hms_wiki_url; no device ID is sent to the help site.
+export function failureHelp(code?: string) {
+  const hex = code?.replaceAll("-", "").toUpperCase();
+  if (!hex || !/^[0-9A-F]{8}$/.test(hex)) return null;
+  return {
+    description:
+      hex === "03008010"
+        ? "ホットエンド冷却ファンの回転異常です。"
+        : "このエラーコードの意味は未確認です。公式情報を確認してください。",
+    url: `https://e.bambulab.com/index.php?${new URLSearchParams({ e: hex, s: "device_hms", lang: "ja" })}`,
+  };
+}
 export const phaseText = {
   queued: "待機中",
   preparing: "準備中",

@@ -39,14 +39,14 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
   await expect.poll(count).toBe(1);
   await report("RUNNING");
   await request.post(control, {
-    data: { state: "PAUSE", print_error: 0x03004001 },
+    data: { state: "PAUSE", print_error: 0x03008010 },
   });
   await expect
     .poll(async () => (await state()).current?.failure)
     .toEqual({
       kind: "device_error",
       field: "print_error",
-      code: "0300-4001",
+      code: "0300-8010",
       state: "PAUSE",
     });
   for (const [width, scheme] of [
@@ -58,12 +58,19 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
     await page.setViewportSize({ width, height: 812 });
     await page.reload();
     await expect(page.locator(".current-job summary")).toContainText(
-      "印刷エラー · print_error 0300-4001",
+      "印刷エラー · print_error 0300-8010",
     );
-    await page.locator(".current-job summary").click();
+    await expect(page.locator(".current-job")).not.toHaveAttribute("open");
+    await expect(page.locator(".device-failure")).toBeVisible();
     await expect(page.locator(".device-failure")).toContainText(
-      "コード: print_error 0300-4001",
+      "コード: print_error 0300-8010",
     );
+    await expect(page.locator(".device-failure")).toContainText(
+      "ホットエンド冷却ファン",
+    );
+    await expect(
+      page.locator(".device-failure").getByRole("link", { name: /公式/ }),
+    ).toHaveAttribute("href", /e=03008010/);
     await expect(page.locator(".device-failure")).toContainText(
       "本体の状態: PAUSE",
     );

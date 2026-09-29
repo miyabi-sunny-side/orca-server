@@ -105,7 +105,10 @@ DBをバックアップから戻した場合も同じです。
 | `state` | 報告時の`gcode_state`。 |
 | `reason` | 開始拒否の応答に含まれた理由文字列（制御文字を除き200文字まで）。 |
 
-コードの意味は付けず、未知のコードもそのまま返します。一時停止（エラー0のPAUSE）・通信断・開始確認の時間切れ・再起動は`failure`を作らず、`last_error`で区別します。
+APIは未知のコードもそのまま返します。画面は折り畳みの外にコード・報告状態・理由を表示し、新鮮な本体エラーと保存済みの失敗を区別します。
+`0300-8010`にはホットエンド冷却ファンの回転異常という説明を添えます。定義は[BambuStudioの公式エラー一覧](https://github.com/bambulab/BambuStudio/blob/da8b44ee34dd349f2ae0df3f1cbae366df482354/resources/hms/hms_en_094.json)に基づき、原因となる部品の故障まで推測しません。
+8桁のコードから[BambuStudioと同じ公式検索](https://github.com/bambulab/BambuStudio/blob/da8b44ee34dd349f2ae0df3f1cbae366df482354/src/slic3r/GUI/HMS.cpp#L588)へ進めます。未知コードは意味を未確認と表示し、コード未取得ではリンクを出しません。外部サイトの可用性にかかわらず、取得済みの番号と確認済みの説明は画面内に残ります。
+一時停止（エラー0のPAUSE）・通信断・開始確認の時間切れ・再起動は`failure`を作らず、`last_error`で区別します。
 再開してRUNNINGを受け取ると`failure`は消えます。別の試行や他ジョブの報告は反映しません。
 待機分はプレートの最新条件と`plate_version`を返し、未設定や解決できないAMSは`null`です。
 `current`は確定済み条件を返します。`actual_ams_slot`は同期した印刷中の実使用slot（0〜15）で、未確認なら`null`です。

@@ -135,6 +135,63 @@ it("shows the saved device failure with its raw code, or says the code is missin
   expect(jobStatus({ ...failed, failure: null })).toBe("確認が必要です");
 });
 
+it("keeps live errors distinct from saved failures and explains only verified codes", async () => {
+  const { queueFailure, failureHelp } = await import("./queue");
+  const saved = {
+    kind: "device_error",
+    field: "print_error",
+    code: "0500-4003",
+  } as const;
+  const job = { state: "needs_attention", failure: saved } as Job;
+  const paused = {
+    ...printer,
+    print: { ...printer.print, state: "PAUSE", error: 0x03008010 },
+  };
+  expect(queueFailure(job, paused)).toEqual({
+    current: true,
+    failure: {
+      kind: "device_error",
+      field: "print_error",
+      code: "0300-8010",
+      state: "PAUSE",
+    },
+  });
+  expect(queueFailure(null, paused)?.failure.code).toBe("0300-8010");
+  expect(queueFailure(job, { ...paused, synchronized: false })).toEqual({
+    current: false,
+    failure: saved,
+  });
+  expect(
+    queueFailure(null, { ...paused, connection: "disconnected" }),
+  ).toBeNull();
+  expect(queueFailure(null, printer)).toBeNull();
+  const rejected = {
+    ...saved,
+    kind: "rejected",
+    field: "err_code",
+    reason: "Storage full",
+  } as const;
+  expect(
+    queueFailure(
+      { ...job, failure: rejected },
+      { ...paused, print: { ...paused.print, error: 0x05004003 } },
+    ),
+  ).toEqual({
+    current: true,
+    failure: {
+      kind: "device_error",
+      field: "print_error",
+      code: "0500-4003",
+      state: "PAUSE",
+    },
+  });
+  expect(failureHelp("0300-8010")?.description).toContain(
+    "ホットエンド冷却ファン",
+  );
+  expect(failureHelp("FFFF-1234")?.description).toContain("未確認");
+  expect(failureHelp(undefined)).toBeNull();
+});
+
 describe("queue estimates", () => {
   it("keeps pending and failed distinct from approximate elapsed time", () => {
     expect(estimateText()).toBe("試算待ち");

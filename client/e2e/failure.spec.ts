@@ -37,11 +37,15 @@ for (const width of [320, 375, 900])
       await expect(summary).toContainText(
         "印刷開始の拒否 · err_code 0500-4003",
       );
-      await expect(
-        page.getByText("プリンターエラー 0500-4003 · 本体を確認してください"),
-      ).toBeVisible();
-      await summary.click();
       const failure = page.locator(".device-failure");
+      await expect(summary.locator("..")).not.toHaveAttribute("open");
+      await expect(failure).toBeVisible();
+      await expect(failure).toContainText("現在の本体エラー");
+      await expect(failure).toContainText("コード: print_error 0500-4003");
+      await expect(failure).not.toContainText(reason.trim());
+      q.printer.print.error = 0;
+      await page.reload();
+      await expect(failure).toContainText("保存された印刷の報告");
       await expect(failure).toContainText("印刷開始の拒否");
       await expect(failure).toContainText("コード: err_code 0500-4003");
       await expect(failure).toContainText(`理由: ${reason.trim()}`);

@@ -12,6 +12,8 @@
     estimateText,
     failureMessage,
     failureLines,
+    failureHelp,
+    queueFailure,
     jobStatus,
     moveIndex,
     menuReasons,
@@ -384,13 +386,6 @@
     {#if reason}<p class="failure" role="alert">
         {failureMessage(reason, job, material)}
       </p>{/if}
-    {#if job.failure}
-      {@const failure = failureLines(job.failure)}
-      <div class="failure device-failure" aria-label="本体が報告した失敗">
-        <p><strong>{failure.title}</strong></p>
-        {#each failure.lines as line (line)}<p>{line}</p>{/each}
-      </div>
-    {/if}
     {#if job.plate_deleted}<p>
         一覧から削除済み · このジョブは継続できます
       </p>{/if}
@@ -432,7 +427,8 @@
   {#if !menu}{@render issue()}{/if}
   {#if notice}<p class="queue-notice" role="status">{notice}</p>{/if}
   {#if queue}
-    {#if queue.printer.connection !== "connected" || !queue.printer.synchronized || queue.printer.print.error}<p
+    {@const reported = queueFailure(queue.current, queue.printer)}
+    {#if queue.printer.connection !== "connected" || !queue.printer.synchronized}<p
         class="printer-state"
       >
         {printerText(queue.printer)}
@@ -447,6 +443,30 @@
           {@render summary(queue.current)}
           {@render details(queue.current)}
         </details>{/key}
+    {/if}
+    {#if reported}
+      {@const failure = failureLines(reported.failure)}
+      {@const help = failureHelp(reported.failure.code)}
+      <div
+        class="failure device-failure"
+        role="status"
+        aria-label="本体が報告した失敗"
+      >
+        <p class="caption">
+          {reported.current ? "現在の本体エラー" : "保存された印刷の報告"}
+        </p>
+        <p><strong>{failure.title}</strong></p>
+        {#each failure.lines as line (line)}<p>{line}</p>{/each}
+        {#if help}
+          <p>{help.description}</p>
+          <a href={help.url} target="_blank" rel="noopener noreferrer"
+            >公式のエラー解説を開く（別タブ）</a
+          >
+        {/if}
+        {#if reported.current}<p>
+            本体のエラーを解消してから、印刷の状態を確認してください。
+          </p>{/if}
+      </div>
     {/if}
     {#if queue.current?.state === "needs_attention"}
       <div class="actions">
@@ -471,7 +491,7 @@
             })}>取り外した・現在のジョブを除く</button
         >
       </div>
-      {#if queue.recovery?.retry_reason}
+      {#if !reported?.current && queue.recovery?.retry_reason}
         <p class="failure" role="status">
           <span>{failureMessage(queue.recovery.retry_reason)}</span>
           {#if !queue.current.plate_deleted}<a
@@ -480,7 +500,7 @@
             >{/if}
         </p>
       {/if}
-      {#if queue.recovery?.discard_reason && queue.recovery.discard_reason !== queue.recovery.retry_reason}
+      {#if !reported?.current && queue.recovery?.discard_reason && queue.recovery.discard_reason !== queue.recovery.retry_reason}
         <p class="failure" role="status">
           {failureMessage(queue.recovery.discard_reason)}
         </p>
@@ -721,9 +741,16 @@
   .failure
     color: var(--c-danger)
   .device-failure
-    margin: 0 0 var(--sp-2)
-    padding-left: var(--sp-2)
+    margin: var(--sp-3) 0
+    padding-left: var(--sp-3)
     border-left: 2px solid var(--c-danger)
+    overflow-wrap: anywhere
+    p
+      margin: 0 0 var(--sp-2)
+    a
+      display: inline-flex
+      align-items: center
+      min-height: 44px
   .actions .btn
     min-height: 44px
     white-space: normal
