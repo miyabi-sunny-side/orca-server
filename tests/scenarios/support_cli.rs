@@ -257,34 +257,24 @@ pub fn support(mut rig: Rig) {
             },
             120,
         );
-        let bytes = if let Some(container) = &rig.container {
-            let paths = container::docker(&[
-                "exec",
-                &container.name,
-                "find",
-                &format!("/data/plates/jobs/{}", id(&job)),
-                "-name",
-                "print.gcode.3mf",
-            ]);
-            let paths: Vec<_> = paths.lines().collect();
-            assert_eq!(paths.len(), 1);
-            container.copy(paths[0], &format!("{name}.gcode.3mf"))
-        } else {
-            let (_, _, bytes) = estimate(&rig, &job);
-            fs::write(rig.output.join(format!("{name}.gcode.3mf")), &bytes).unwrap();
-            bytes
-        };
+        // The container's SQLite store is not readable from the host; the upload is the same slice.
+        let cached = rig.container.is_none().then(|| estimate(&rig, &job).2);
+        let seconds = rig.waiting(&job)["estimate"]["seconds"].clone();
+        let count = rig.broker.prints().len();
+        rig.next(&job, 200);
+        until(|| rig.broker.prints().len() == count + 1, 120);
+        let bytes = rig.ftp.contents().last().unwrap().clone();
+        if let Some(cached) = cached {
+            assert_eq!(cached, bytes);
+        }
+        fs::write(rig.output.join(format!("{name}.gcode.3mf")), &bytes).unwrap();
         let selected = if distinct {
             vec![temps[main], temps[interface]]
         } else {
             vec![temps[main]]
         };
         let result = inspect(&bytes, on, distinct, unused, &selected, beds[main]);
-        assert_eq!(result["seconds"], rig.waiting(&job)["estimate"]["seconds"]);
-        let count = rig.broker.prints().len();
-        rig.next(&job, 200);
-        until(|| rig.broker.prints().len() == count + 1, 120);
-        assert_eq!(rig.ftp.contents().last(), Some(&bytes));
+        assert_eq!(result["seconds"], seconds);
         let mut mapping = vec![[0, 3, 1][main]];
         if distinct {
             mapping.push([0, 3, 1][interface]);

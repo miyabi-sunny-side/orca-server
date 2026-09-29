@@ -36,7 +36,7 @@ test('role materials save, reopen and estimate with keyboard operation in both t
     if(width===320&&colorScheme==='dark'){
       await secondary.click();await page.getByRole('button',{name:'指定を解除',exact:true}).click();
       await page.getByRole('button',{name:'保存',exact:true}).click();
-      await expect(page.getByText('secondaryの材料を設定してください。',{exact:true})).toBeVisible();
+      await expect(page.getByText('secondaryの材料を設定してください。',{exact:true}).filter({visible:true})).toBeVisible();
       await expect(page.getByRole('button',{name:'印刷キューへ',exact:true})).toBeDisabled();
       await page.getByRole('button',{name:'構成を編集'}).click();await secondary.click();
       await page.locator(`button[data-filament-id="${ctx.secondary}"]`).click();
