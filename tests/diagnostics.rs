@@ -190,3 +190,86 @@ fn upload_and_save_failures_keep_their_stage_and_cause() {
     diagnostics(&rig);
     rig.check();
 }
+
+/// The value logged as `key=...` on the first line containing `message` after `from`.
+fn field(text: &str, message: &str, key: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.contains(message))?;
+    let start = line.find(&format!(" {key}="))? + key.len() + 2;
+    Some(line[start..].split(' ').next()?.to_owned())
+}
+
+#[test]
+fn ams_reports_are_traced_from_receipt_to_committed_assignments() {
+    let mut rig = Rig::new("diagnostics-ams");
+    rig.launch();
+    rig.seed();
+    let d = diagnostics(&rig);
+    let observation = &d["observation"];
+    assert!(observation["ams_reports"].as_u64() >= Some(1));
+    assert_eq!(observation["ams_bits"]["exist"], "9");
+    assert_eq!(observation["snapshot_request"]["trigger"], "subscribed");
+    assert_eq!(observation["snapshot_request"]["sent"], true);
+
+    let mut tagged = rig.full.clone();
+    tagged["print"]["ams"]["ams"][0]["tray"][2]["tag_uid"] = json!("SYNTHTAG0001");
+    tagged["print"]["ams"]["ams"][0]["tray"][2]["tray_uuid"] = json!(format!("uuid-{SECRET}"));
+    rig.broker.send(&tagged);
+    rig.broker
+        .send(&json!({"print":{"command":"push_status","msg":1,"ams":{
+        "tray_exist_bits":"9","tray_reading_bits":"1","tray_read_done_bits":"8"}}}));
+    until(
+        || diagnostics(&rig)["observation"]["ams_bits"]["reading"] == "1",
+        12,
+    );
+
+    let assigned = rig.slot(0)["filament_id"].clone();
+    assert!(!assigned.is_null());
+    let mut without_ams = rig.full.clone();
+    without_ams["print"].as_object_mut().unwrap().remove("ams");
+    rig.broker.send(&without_ams);
+    until(|| rig.slot(0)["filament_id"].is_null(), 12);
+
+    let text = log(&rig);
+    assert!(
+        !text.contains("SYNTHTAG0001") && !text.contains("uuid-"),
+        "tray identifiers in logs"
+    );
+    let absent = text
+        .lines()
+        .find(|l| l.contains("AMS report applied") && l.contains(r#""ams":"absent""#))
+        .expect("the full report without AMS is logged");
+    let report = absent
+        .split(" report=")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap();
+    assert!(
+        absent
+            .contains(r#""after":{"color":null,"material":null,"profile":null,"state":"absent"}"#)
+    );
+    let saved = text
+        .lines()
+        .find(|l| l.contains("AMS assignment changed") && l.contains(&format!(" report={report} ")))
+        .expect("the committed change carries the same report number");
+    assert!(saved.contains(r#"source="mqtt""#) && saved.contains(r#""reason":"unreported""#));
+    assert_eq!(
+        field(&text, "Full printer report requested", "trigger").as_deref(),
+        Some(r#""subscribed""#)
+    );
+
+    let requests = rig.broker.requests().len();
+    rig.broker.action(Action::Disconnect);
+    until(|| rig.broker.requests().len() > requests, 20);
+    rig.broker
+        .send(&json!({"print":{"command":"push_status","msg":1,"ams":{"tray_reading_bits":"1"}}}));
+    until(
+        || diagnostics(&rig)["observation"]["last_ignored"]["reason"] == "unsynchronized_diff",
+        12,
+    );
+    assert!(log(&rig).contains(r#"reason="unsynchronized_diff""#));
+    rig.broker.send(&rig.full);
+    until(|| rig.slot(0)["reported"]["present"] == true, 12);
+    rig.check();
+}

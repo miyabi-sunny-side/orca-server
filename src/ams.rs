@@ -164,6 +164,64 @@ pub(crate) fn invalidate_automatic(c: &Connection) -> Result<()> {
     }
     Ok(())
 }
+/// One material assignment changed by an observation, for logs. Identifiers stay internal.
+#[derive(Debug, Serialize)]
+pub(crate) struct SlotChange {
+    pub ams_id: u8,
+    pub slot_index: u8,
+    /// `new_slot`, `identity_changed`, `rematched` or `unreported`.
+    pub reason: &'static str,
+    pub filament_before: Option<String>,
+    pub filament_after: Option<String>,
+    pub source_before: String,
+    pub source_after: String,
+    pub revision: i64,
+}
+/// What one committed observation changed.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct AmsSave {
+    /// Slot rows written, including presence-only updates.
+    pub saved: usize,
+    pub changes: Vec<SlotChange>,
+}
+fn change(old: Option<&AmsSlot>, new: &AmsSlot, reason: &'static str) -> SlotChange {
+    SlotChange {
+        ams_id: new.ams_id,
+        slot_index: new.slot_index,
+        reason,
+        filament_before: old.and_then(|s| s.filament_id.clone()),
+        filament_after: new.filament_id.clone(),
+        source_before: old.map_or_else(String::new, |s| s.mapping_source.clone()),
+        source_after: new.mapping_source.clone(),
+        revision: new.revision,
+    }
+}
+/// Slots absent from the report lose their presence and any assignment.
+fn clear_unreported(
+    c: &Connection,
+    existing: Vec<AmsSlot>,
+    seen: &std::collections::BTreeSet<String>,
+    result: &mut AmsSave,
+) -> Result<()> {
+    for mut old in existing {
+        if !seen.contains(&old.id) && (old.reported.present.is_some() || old.filament_id.is_some())
+        {
+            let before = old.clone();
+            old.reported.present = None;
+            old.filament_id = None;
+            old.mapping_source = "unassigned".into();
+            old.revision += 1;
+            save(c, &old)?;
+            result.saved += 1;
+            if before.filament_id.is_some() || before.mapping_source != old.mapping_source {
+                result
+                    .changes
+                    .push(change(Some(&before), &old, "unreported"));
+            }
+        }
+    }
+    Ok(())
+}
 impl Database {
     pub(crate) fn resolve_slots(
         &self,
@@ -210,9 +268,11 @@ impl Database {
     pub(crate) fn ams_slots(&self, printer_id: &str) -> Result<Vec<AmsSlot>> {
         slots(&*self.connection()?, printer_id)
     }
-    pub(crate) fn observe_ams(&self, device: &Device, status: &Status) -> Result<()> {
+    /// Save a synchronized observation; the result is reported only after the commit.
+    pub(crate) fn observe_ams(&self, device: &Device, status: &Status) -> Result<AmsSave> {
+        let mut result = AmsSave::default();
         if !status.synchronized {
-            return Ok(());
+            return Ok(result);
         }
         let mut c = self.connection()?;
         let tx = c.transaction()?;
@@ -286,22 +346,23 @@ impl Database {
                     current.detect_on_insert = ams.detect_on_insert;
                     current.detect_on_power_up = ams.detect_on_power_up;
                     save(&tx, &current)?;
+                    result.saved += 1;
+                    if mapping_changed {
+                        let reason = if old.is_none() {
+                            "new_slot"
+                        } else if identity_changed {
+                            "identity_changed"
+                        } else {
+                            "rematched"
+                        };
+                        result.changes.push(change(old, &current, reason));
+                    }
                 }
             }
         }
-        for mut old in existing {
-            if !seen.contains(&old.id)
-                && (old.reported.present.is_some() || old.filament_id.is_some())
-            {
-                old.reported.present = None;
-                old.filament_id = None;
-                old.mapping_source = "unassigned".into();
-                old.revision += 1;
-                save(&tx, &old)?;
-            }
-        }
+        clear_unreported(&tx, existing, &seen, &mut result)?;
         tx.commit()?;
-        Ok(())
+        Ok(result)
     }
     pub(crate) fn map_slot(
         &self,

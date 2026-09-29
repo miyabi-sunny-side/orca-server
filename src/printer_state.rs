@@ -238,6 +238,17 @@ impl Saves {
 }
 
 pub struct State {
+    /// Reports offered to `apply` since start, accepted or not.
+    pub reports: u64,
+    pub ignored: Option<(u64, &'static str)>,
+    pub ignored_count: u64,
+    /// Accepted reports that carried the `ams` key.
+    pub ams_reports: u64,
+    pub ams_report_at: Option<u64>,
+    /// Latest full-report request: time, trigger and whether it was queued.
+    pub snapshot_request: Option<(u64, &'static str, bool)>,
+    /// Latest AMS exist/reading/read-done bits as reported (log projection).
+    pub ams_bits: Option<Value>,
     pub link: Link,
     pub saves: Saves,
     /// Latest FTPS failure: time and the stage that failed.
@@ -258,6 +269,13 @@ pub struct State {
 impl State {
     pub fn new(configured: bool) -> Self {
         Self {
+            reports: 0,
+            ignored: None,
+            ignored_count: 0,
+            ams_reports: 0,
+            ams_report_at: None,
+            snapshot_request: None,
+            ams_bits: None,
             link: Link::default(),
             saves: Saves::default(),
             upload_failure: None,
@@ -286,7 +304,25 @@ impl State {
         link.synchronized_at = None;
         let saves = std::mem::take(&mut self.saves);
         let upload_failure = self.upload_failure.take();
+        let counts = (
+            self.reports,
+            self.ignored,
+            self.ignored_count,
+            self.ams_reports,
+            self.ams_report_at,
+            self.snapshot_request,
+            self.ams_bits.take(),
+        );
         *self = Self::new(true);
+        (
+            self.reports,
+            self.ignored,
+            self.ignored_count,
+            self.ams_reports,
+            self.ams_report_at,
+            self.snapshot_request,
+            self.ams_bits,
+        ) = counts;
         self.link = link;
         self.saves = saves;
         self.upload_failure = upload_failure;
@@ -303,19 +339,31 @@ impl State {
         self.connection = "disconnected";
         self.synchronized = false;
     }
+    /// Apply one report; every report is counted and the last ignore reason is kept.
     pub fn apply(&mut self, payload: &[u8], now: u64) -> bool {
+        self.reports += 1;
+        match self.accept(payload, now) {
+            Ok(()) => true,
+            Err(reason) => {
+                self.ignored = Some((now, reason));
+                self.ignored_count += 1;
+                false
+            }
+        }
+    }
+    fn accept(&mut self, payload: &[u8], now: u64) -> std::result::Result<(), &'static str> {
         if self.connection != "connected" {
-            return false;
+            return Err("disconnected");
         }
         let Ok(value) = serde_json::from_slice::<Value>(payload) else {
             self.synchronized = false;
-            return false;
+            return Err("invalid_json");
         };
         let Some(report) = value.get("print").and_then(Value::as_object) else {
-            return false;
+            return Err("not_print");
         };
         if report.get("command").and_then(Value::as_str) != Some("push_status") {
-            return false;
+            return Err("not_push_status");
         }
         let full = match report.get("msg") {
             None => true,
@@ -323,7 +371,7 @@ impl State {
             Some(value) if value.as_u64() == Some(1) => false,
             _ => {
                 self.synchronized = false;
-                return false;
+                return Err("invalid_msg");
             }
         };
         if !self.fresh(now) {
@@ -339,7 +387,11 @@ impl State {
             self.synchronized = true;
             self.link.snapshot_at = Some(now);
         } else if !self.synchronized {
-            return false;
+            return Err("unsynchronized_diff");
+        }
+        if report.contains_key("ams") {
+            self.ams_reports += 1;
+            self.ams_report_at = Some(now);
         }
         update(&mut self.nozzle_diameter, report, "nozzle_diameter", string);
         self.auto_refill.update(report);
@@ -377,7 +429,7 @@ impl State {
                 start.resynchronized(&status);
             }
         }
-        true
+        Ok(())
     }
 
     fn fresh(&self, now: u64) -> bool {
@@ -559,6 +611,137 @@ impl Tray {
         update(&mut self.remaining_percent, raw, "remain", percent);
         self.last_seen_at = Some(now);
     }
+}
+
+/// A short hex/decimal field as reported, or `"invalid"`; never arbitrary text.
+fn short_code(value: &Value) -> Value {
+    match value {
+        Value::Number(n) => Value::Number(n.clone()),
+        Value::String(s)
+            if (1..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            Value::String(s.clone())
+        }
+        _ => Value::from("invalid"),
+    }
+}
+fn colour(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| s.len() == 8 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned)
+}
+fn tray_summary(raw: &Value) -> Value {
+    let Some(tray) = raw.as_object() else {
+        return Value::from("invalid");
+    };
+    let id = tray.get("id").and_then(number);
+    if tray.len() == 1 && id.is_some() {
+        return serde_json::json!({"id":id,"kind":"id_only"});
+    }
+    let material = tray.get("tray_type").and_then(string);
+    serde_json::json!({
+        "id": id,
+        "kind": if material.is_some() { "loaded" } else { "empty" },
+        "material": material,
+        "color": tray.get("tray_color").and_then(colour),
+        "profile": tray.get("tray_info_idx").and_then(string),
+        "remain": tray.get("remain").and_then(number),
+    })
+}
+
+/// What a report said about the AMS, for logs: allow-listed fields and tray shapes only.
+/// `None` for reports that neither carry `ams` nor replace it as a full report.
+pub fn ams_summary(value: &Value) -> Option<Value> {
+    let report = value.get("print")?.as_object()?;
+    if report.get("command").and_then(Value::as_str) != Some("push_status") {
+        return None;
+    }
+    let msg = report.get("msg");
+    let full = msg.is_none_or(|m| m.as_u64() == Some(0));
+    let ams = report.get("ams");
+    if ams.is_none() && !full {
+        return None;
+    }
+    let mut summary = serde_json::json!({
+        "msg": msg.map(|m| if m.is_u64() { m.clone() } else { Value::from("invalid") }),
+        "full": full,
+    });
+    let Some(ams) = ams else {
+        summary["ams"] = Value::from("absent");
+        return Some(summary);
+    };
+    let Some(ams) = ams.as_object() else {
+        summary["ams"] = Value::from("invalid");
+        return Some(summary);
+    };
+    summary["ams"] = Value::from("object");
+    for (key, name) in [
+        ("tray_exist_bits", "exist_bits"),
+        ("tray_reading_bits", "reading_bits"),
+        ("tray_read_done_bits", "read_done_bits"),
+        ("ams_exist_bits", "ams_exist_bits"),
+        ("tray_now", "tray_now"),
+    ] {
+        if let Some(value) = ams.get(key) {
+            summary[name] = short_code(value);
+        }
+    }
+    if let Some(units) = ams.get("ams") {
+        summary["units"] = units.as_array().map_or(Value::from("invalid"), |units| {
+            units
+                .iter()
+                .map(|unit| {
+                    let trays = match unit.get("tray") {
+                        None => Value::from("omitted"),
+                        Some(trays) => trays.as_array().map_or(Value::from("invalid"), |t| {
+                            t.iter().map(tray_summary).collect()
+                        }),
+                    };
+                    serde_json::json!({"id": unit.get("id").and_then(number), "trays": trays})
+                })
+                .collect()
+        });
+    }
+    Some(summary)
+}
+
+fn slot_view(tray: Option<&Tray>) -> Value {
+    let state = match tray.map(|t| t.present) {
+        None => "absent",
+        Some(None) => "unknown",
+        Some(Some(true)) => "present",
+        Some(Some(false)) => "empty",
+    };
+    serde_json::json!({
+        "state": state,
+        "material": tray.and_then(|t| t.material.clone()),
+        "color": tray.and_then(|t| t.color.clone()),
+        "profile": tray.and_then(|t| t.profile_id.clone()),
+    })
+}
+
+/// Slots whose presence, material, colour, profile or tag identity changed between two states.
+/// Identity changes are shown as a flag; tag values are never included.
+pub fn ams_changes(before: Option<&AmsStatus>, after: Option<&AmsStatus>) -> Vec<Value> {
+    let trays = |ams: Option<&AmsStatus>| -> std::collections::BTreeMap<(u8, u8), Tray> {
+        ams.into_iter()
+            .flat_map(|a| &a.units)
+            .flat_map(|u| u.trays.iter().map(move |t| ((u.id, t.id), t.clone())))
+            .collect()
+    };
+    let (old, new) = (trays(before), trays(after));
+    let keys: std::collections::BTreeSet<_> = old.keys().chain(new.keys()).copied().collect();
+    keys.into_iter()
+        .filter_map(|key| {
+            let (b, a) = (old.get(&key), new.get(&key));
+            let (bv, av) = (slot_view(b), slot_view(a));
+            let identity_changed = b.and_then(|t| t.tag_uid.as_ref()) != a.and_then(|t| t.tag_uid.as_ref());
+            (bv != av || identity_changed).then(|| {
+                serde_json::json!({"unit": key.0, "tray": key.1, "before": bv, "after": av, "identity_changed": identity_changed})
+            })
+        })
+        .collect()
 }
 
 fn update<T>(
@@ -1025,5 +1208,146 @@ mod history_tests {
         state.connected();
         assert_eq!(state.link.snapshot_at, None);
         assert_eq!(state.link.connected_at, Some(2));
+    }
+}
+
+#[cfg(test)]
+mod ams_trace_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn report_summary_keeps_allowed_fields_and_tray_shapes_without_identifiers() {
+        let report = json!({"print":{"command":"push_status","msg":0,"ams":{
+            "tray_exist_bits":"b","tray_reading_bits":"0","tray_read_done_bits":"b","ams_exist_bits":"1","tray_now":"255",
+            "ams":[{"id":"0","humidity":"3","tray":[
+                {"id":"0","tray_type":"PLA","tray_color":"000000FF","tray_info_idx":"GFA01","remain":80,"tag_uid":"SECRET-TAG","tray_uuid":"SECRET-UUID","tray_sub_brands":"PLA Matte"},
+                {"id":"1"},
+                {"id":"2","tray_type":"","tray_color":"00000000"},
+                "broken"
+            ]},{"id":"1"}]}}});
+        let s = ams_summary(&report).unwrap();
+        assert_eq!(s["full"], true);
+        assert_eq!(s["msg"], 0);
+        assert_eq!(s["ams"], "object");
+        assert_eq!(
+            (&s["exist_bits"], &s["reading_bits"], &s["read_done_bits"]),
+            (&json!("b"), &json!("0"), &json!("b"))
+        );
+        let trays = &s["units"][0]["trays"];
+        assert_eq!(
+            trays[0],
+            json!({"id":0,"kind":"loaded","material":"PLA","color":"000000FF","profile":"GFA01","remain":80})
+        );
+        assert_eq!(trays[1], json!({"id":1,"kind":"id_only"}));
+        assert_eq!(trays[2]["kind"], "empty");
+        assert_eq!(trays[3], "invalid");
+        assert_eq!(s["units"][1]["trays"], "omitted");
+        let text = s.to_string();
+        assert!(!text.contains("SECRET") && !text.contains("Matte"));
+    }
+
+    #[test]
+    fn report_summary_marks_absent_or_invalid_ams_and_skips_unrelated_diffs() {
+        let full = |ams: Option<Value>| {
+            let mut r = json!({"print":{"command":"push_status","gcode_state":"IDLE"}});
+            if let Some(ams) = ams {
+                r["print"]["ams"] = ams;
+            }
+            r
+        };
+        let s = ams_summary(&full(None)).unwrap();
+        assert_eq!(
+            (&s["full"], &s["msg"], &s["ams"]),
+            (&json!(true), &Value::Null, &json!("absent"))
+        );
+        assert_eq!(
+            ams_summary(&full(Some(json!("x")))).unwrap()["ams"],
+            "invalid"
+        );
+        let bad = ams_summary(&full(Some(json!({"tray_exist_bits":"zz","ams":"x"})))).unwrap();
+        assert_eq!(
+            (&bad["exist_bits"], &bad["units"]),
+            (&json!("invalid"), &json!("invalid"))
+        );
+        let diff = json!({"print":{"command":"push_status","msg":1,"mc_percent":5}});
+        assert!(ams_summary(&diff).is_none());
+        let odd = json!({"print":{"command":"push_status","msg":"two","ams":{}}});
+        assert_eq!(ams_summary(&odd).unwrap()["msg"], "invalid");
+        assert!(ams_summary(&json!({"print":{"command":"project_file","ams":{}}})).is_none());
+    }
+
+    fn state_with(report: &Value) -> Option<AmsStatus> {
+        let mut state = State::new(true);
+        state.connected();
+        state.apply(report.to_string().as_bytes(), 1);
+        state.status(1).ams
+    }
+
+    #[test]
+    fn applied_changes_report_state_and_identity_changes_but_not_remaining() {
+        let report = |trays: Value, bits: &str| {
+            json!({"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,
+                "ams":{"tray_exist_bits":bits,"ams":[{"id":"0","tray":trays}]}}})
+        };
+        let before = state_with(&report(
+            json!([{"id":"0","tray_type":"PLA","tray_color":"000000FF","tag_uid":"AAAA","remain":80},{"id":"1","tray_type":"PLA","tray_color":"FFFFFFFF"}]),
+            "3",
+        ));
+        let same = state_with(&report(
+            json!([{"id":"0","tray_type":"PLA","tray_color":"000000FF","tag_uid":"AAAA","remain":60},{"id":"1","tray_type":"PLA","tray_color":"FFFFFFFF"}]),
+            "3",
+        ));
+        assert!(ams_changes(before.as_ref(), same.as_ref()).is_empty());
+        let after = state_with(&report(
+            json!([{"id":"0","tray_type":"PLA","tray_color":"000000FF","tag_uid":"BBBB"},{"id":"1"}]),
+            "1",
+        ));
+        let changes = ams_changes(before.as_ref(), after.as_ref());
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0]["tray"], 0);
+        assert_eq!(changes[0]["identity_changed"], true);
+        assert_eq!(changes[1]["before"]["state"], "present");
+        assert_eq!(
+            changes[1]["after"],
+            json!({"state":"empty","material":null,"color":null,"profile":null})
+        );
+        let cleared = ams_changes(before.as_ref(), None);
+        assert_eq!(cleared.len(), 2);
+        assert_eq!(cleared[0]["after"]["state"], "absent");
+        assert!(!serde_json::to_string(&changes).unwrap().contains("BBBB"));
+    }
+
+    #[test]
+    fn ignored_reports_keep_their_reason_and_all_reports_are_counted() {
+        let mut state = State::new(true);
+        assert!(!state.apply(b"{}", 1));
+        assert_eq!(state.ignored, Some((1, "disconnected")));
+        state.connected();
+        for (payload, reason) in [
+            (&b"broken"[..], "invalid_json"),
+            (br#"{"info":{}}"#, "not_print"),
+            (
+                br#"{"print":{"command":"project_file"}}"#,
+                "not_push_status",
+            ),
+            (
+                br#"{"print":{"command":"push_status","msg":"x"}}"#,
+                "invalid_msg",
+            ),
+            (
+                br#"{"print":{"command":"push_status","msg":1,"ams":{}}}"#,
+                "unsynchronized_diff",
+            ),
+        ] {
+            assert!(!state.apply(payload, 2));
+            assert_eq!(state.ignored, Some((2, reason)));
+        }
+        assert!(state.apply(
+            br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0}}"#,
+            3
+        ));
+        assert_eq!(state.reports, 7);
+        assert_eq!(state.ignored_count, 6);
     }
 }

@@ -173,3 +173,63 @@ fn schema_four_unknown_load_order_initializes_by_slot_and_keeps_references() {
         19
     );
 }
+
+#[test]
+fn saved_observations_name_each_assignment_change_and_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+    seed(&db);
+    let mut state = State::new(true);
+    state.connected();
+    let mut apply = |value: &Value| {
+        assert!(state.apply(&serde_json::to_vec(value).unwrap(), 10));
+        db.observe_ams(&device(), &state.status(10)).unwrap()
+    };
+    let first = apply(&full("7"));
+    assert_eq!(first.saved, 3);
+    let reasons: Vec<_> = first
+        .changes
+        .iter()
+        .map(|c| (c.slot_index, c.reason, c.filament_after.as_deref()))
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            (0, "new_slot", Some("black")),
+            (1, "new_slot", Some("black")),
+            (2, "new_slot", Some("white"))
+        ]
+    );
+    let repeat = apply(&full("7"));
+    assert!(
+        repeat.changes.is_empty() && repeat.saved == 0,
+        "an unchanged report saves nothing"
+    );
+
+    let unloaded = apply(&full("5"));
+    assert_eq!(unloaded.changes.len(), 1);
+    let change = &unloaded.changes[0];
+    assert_eq!((change.slot_index, change.reason), (1, "identity_changed"));
+    assert_eq!(
+        (
+            change.filament_before.as_deref(),
+            change.filament_after.as_deref()
+        ),
+        (Some("black"), None)
+    );
+    assert_eq!(
+        (change.source_before.as_str(), change.source_after.as_str()),
+        ("automatic", "unassigned")
+    );
+
+    let absent = apply(
+        &json!({"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0}}),
+    );
+    assert_eq!(
+        absent.changes.len(),
+        2,
+        "slots with an assignment are cleared"
+    );
+    assert!(absent.changes.iter().all(|c| c.reason == "unreported"));
+    assert_eq!(absent.saved, 3, "the empty slot also loses its presence");
+}

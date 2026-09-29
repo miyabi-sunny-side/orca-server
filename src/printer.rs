@@ -391,6 +391,8 @@ pub(crate) struct Diagnostics {
     pub link: crate::printer_state::Link,
     pub saves: crate::printer_state::Saves,
     pub upload_failure: Option<(u64, &'static str)>,
+    /// Report counters, the latest AMS bits and the latest full-report request.
+    pub observation: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -454,6 +456,15 @@ impl Printer {
             link: state.link.clone(),
             saves: state.saves.clone(),
             upload_failure: state.upload_failure,
+            observation: serde_json::json!({
+                "reports": state.reports,
+                "ignored": state.ignored_count,
+                "last_ignored": state.ignored.map(|(at, reason)| serde_json::json!({"at":at,"reason":reason})),
+                "ams_reports": state.ams_reports,
+                "ams_report_at": state.ams_report_at,
+                "ams_bits": state.ams_bits,
+                "snapshot_request": state.snapshot_request.map(|(at, trigger, sent)| serde_json::json!({"at":at,"trigger":trigger,"sent":sent})),
+            }),
         }
     }
 
@@ -467,8 +478,9 @@ impl Printer {
         let state = self.state.lock().await;
         let status = state.status(now());
         if let Some((db, device)) = self.inventory.clone() {
-            let observed = state.status(now());
-            crate::plate_api::blocking(move || db.observe_ams(&device, &observed)).await?;
+            let (observed, report) = (state.status(now()), state.reports);
+            crate::plate_api::blocking(move || observe(&db, &device, &observed, "status", report))
+                .await?;
         }
         Ok((state, status))
     }
@@ -490,8 +502,9 @@ impl Printer {
             ));
         }
         let (db, device) = self.inventory.clone().ok_or(Error::NotFound)?;
+        let report = state.reports;
         let slots = crate::plate_api::blocking(move || {
-            db.observe_ams(&device, &status)?;
+            observe(&db, &device, &status, "inventory", report)?;
             match change {
                 Some(crate::ams::Change::Mapping(id, m)) => {
                     db.map_slot(&device.id, &id, m.revision, m.filament_id.as_deref())?;
@@ -520,8 +533,9 @@ impl Printer {
             return Err(Error::Conflict("Wait for a current printer report"));
         }
         let (db, device) = self.inventory.clone().ok_or(Error::NotFound)?;
+        let report = state.reports;
         crate::plate_api::blocking(move || {
-            db.observe_ams(&device, &status)?;
+            observe(&db, &device, &status, "resolve", report)?;
             db.resolve_slots(&device.id, &filament, &device.settings.machine_profile_key)
         })
         .await
@@ -645,8 +659,13 @@ async fn on_report(
     inventory: Option<&(crate::database::Database, crate::database::Device)>,
     payload: &[u8],
 ) {
+    let value = serde_json::from_slice::<serde_json::Value>(payload).ok();
+    let summary = value.as_ref().and_then(crate::printer_state::ams_summary);
+    let before = summary.as_ref().and_then(|_| state.status(now()).ams);
+    let ignored_before = state.ignored.map(|(_, reason)| reason);
     let applied = state.apply(payload, now());
     let status = state.status(now());
+    let report = state.reports;
     if applied
         && status.synchronized
         && let Some(failures) = state.link.synchronized(now())
@@ -654,24 +673,38 @@ async fn on_report(
         tracing::info!(
             printer,
             epoch = state.epoch,
+            report,
             failures,
             state = status.print.state.as_deref().unwrap_or(""),
             error = status.print.error.map(print_start::error_code),
             "P1 status synchronized"
         );
     }
+    if let Some(summary) = &summary {
+        log_ams_report(
+            printer,
+            state,
+            summary,
+            before.as_ref(),
+            applied,
+            ignored_before,
+        );
+    }
     if applied && let Some((db, device)) = inventory {
         let (db, device, observed) = (db.clone(), device.clone(), state.status(now()));
-        match crate::plate_api::blocking(move || db.observe_ams(&device, &observed)).await {
+        match crate::plate_api::blocking(move || observe(&db, &device, &observed, "mqtt", report))
+            .await
+        {
             Ok(()) => {
                 if let Some(failures) = state.saves.saved("ams") {
-                    tracing::info!(printer, failures, "AMS observation saved again");
+                    tracing::info!(printer, report, failures, "AMS observation saved again");
                 }
             }
             Err(error) => {
                 if state.saves.failed("ams", save_kind(&error), now()) {
                     tracing::warn!(
                         printer,
+                        report,
                         kind = save_kind(&error),
                         "AMS observation could not be saved; inventory reads will retry"
                     );
@@ -679,12 +712,107 @@ async fn on_report(
             }
         }
     }
-    if let Ok(value) = serde_json::from_slice(payload)
+    if let Some(value) = &value
         && let Some(start) = &mut state.start
     {
-        start.observe(&value, &status);
+        start.observe(value, &status);
     }
     persist(inventory, state);
+}
+
+/// Log what an AMS-bearing (or AMS-replacing full) report said and what it changed in memory.
+/// Unchanged diffs go to debug; full reports, changes, new bit patterns and ignore reasons to info.
+fn log_ams_report(
+    printer: &str,
+    state: &mut State,
+    summary: &serde_json::Value,
+    before: Option<&crate::printer_state::AmsStatus>,
+    applied: bool,
+    ignored_before: Option<&'static str>,
+) {
+    let report = state.reports;
+    if !applied {
+        let reason = state.ignored.map_or("", |(_, reason)| reason);
+        if ignored_before == Some(reason) {
+            tracing::debug!(
+                printer,
+                epoch = state.epoch,
+                report,
+                reason,
+                "AMS report ignored"
+            );
+        } else {
+            tracing::info!(printer, epoch = state.epoch, report, reason, summary = %summary, "AMS report ignored");
+        }
+        return;
+    }
+    let changes = crate::printer_state::ams_changes(before, state.status(now()).ams.as_ref());
+    let bits = serde_json::json!({"exist":summary["exist_bits"],"reading":summary["reading_bits"],"read_done":summary["read_done_bits"]});
+    let new_bits = summary["ams"] == "object"
+        && bits
+            .as_object()
+            .is_some_and(|b| b.values().any(|v| !v.is_null()))
+        && state.ams_bits.as_ref() != Some(&bits);
+    if new_bits {
+        state.ams_bits = Some(bits);
+    }
+    let changes = serde_json::Value::from(changes);
+    if summary["full"] == true || new_bits || changes.as_array().is_some_and(|c| !c.is_empty()) {
+        tracing::info!(printer, epoch = state.epoch, report, ams_reports = state.ams_reports, summary = %summary, changes = %changes, "AMS report applied");
+    } else {
+        tracing::debug!(printer, epoch = state.epoch, report, summary = %summary, "AMS report applied without change");
+    }
+}
+
+/// Save an observation and log what the committed transaction changed, tied to its report.
+fn observe(
+    db: &crate::database::Database,
+    device: &crate::database::Device,
+    status: &crate::printer_state::Status,
+    source: &'static str,
+    report: u64,
+) -> Result<()> {
+    match db.observe_ams(device, status) {
+        Ok(saved) if !saved.changes.is_empty() => {
+            tracing::info!(printer = %device.id, source, report, report_at = status.updated_at, saved = saved.saved, changes = %serde_json::json!(saved.changes), "AMS assignment changed");
+            Ok(())
+        }
+        Ok(saved) => {
+            if saved.saved > 0 {
+                tracing::debug!(printer = %device.id, source, report, saved = saved.saved, "AMS observation saved");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            // The MQTT path logs through its failure counter; request paths return the error.
+            if source != "mqtt" {
+                tracing::warn!(printer = %device.id, source, report, kind = save_kind(&error), "AMS observation could not be saved");
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Ask for a full report and record why. Replies carry no reliable link to a request.
+async fn snapshot(
+    printer: &str,
+    state: &Mutex<State>,
+    client: &AsyncClient,
+    topic: &str,
+    trigger: &'static str,
+) -> bool {
+    let sent = request_snapshot(client, topic).is_ok();
+    let mut state = state.lock().await;
+    state.snapshot_request = Some((now(), trigger, sent));
+    tracing::info!(
+        printer,
+        epoch = state.epoch,
+        report = state.reports,
+        trigger,
+        sent,
+        "Full printer report requested"
+    );
+    sent
 }
 
 /// Send a transferred start once, and only on the connection it was admitted for.
@@ -953,7 +1081,7 @@ async fn run(
                     Ok(Event::Incoming(Incoming::SubAck(ack))) => {
                         if ack.return_codes.len() != 1 || !matches!(ack.return_codes[0], SubscribeReasonCode::Success(_)) { break "subscribe"; }
                         subscribed = true;
-                        if request_snapshot(&client, &request).is_err() { break "publish"; }
+                        if !snapshot(&printer, &state, &client, &request, "subscribed").await { break "publish"; }
                         refresh.reset();
                     }
                     Ok(Event::Incoming(Incoming::Publish(message))) if subscribed && message.topic == report && !message.retain => {
@@ -1000,7 +1128,7 @@ async fn run(
                     if timed_out { break if synchronized { "start_timeout" } else { "unsynchronized" }; }
                 }
                 _ = refresh.tick() => {
-                    if subscribed && !state.lock().await.status(now()).synchronized && request_snapshot(&client, &request).is_err() { break "publish"; }
+                    if subscribed && !state.lock().await.status(now()).synchronized && !snapshot(&printer, &state, &client, &request, "refresh").await { break "publish"; }
                 }
             }
         };

@@ -202,6 +202,7 @@ AMS IDは0〜255を保持し、各trayは0〜3です。在席ビットで確認�
 | `decision` | キューAPIと同じ判定の`allowed`（next/retry/discard）と`reasons`、参照した根拠`evidence`（`fresh`、`full_snapshot`、`current_connection`、`identity`＝`none`/`target`/`other`、`terminal`）。 |
 | `saves` | 最後の保存失敗（`at`、`operation`＝`attempt`/`ams`、`kind`）、失敗中か、連続回数。メモリとDBが食い違う手掛かり。 |
 | `upload_failure` | 最後のFTPS失敗の時刻と段階（`tls`、`connect`、`login`、`protection`、`binary_mode`、`transfer`、`size`、`timeout`）。 |
+| `observation` | 起動後の受信報告数`reports`、採用しなかった数`ignored`と最後の理由`last_ignored`、`ams`キーを含む採用報告数`ams_reports`と最終時刻`ams_report_at`、最後のAMSビット`ams_bits`（`exist`、`reading`、`read_done`）、最後の全状態要求`snapshot_request`（`at`、`trigger`＝`subscribed`/`refresh`、`sent`）。 |
 
 時刻は取得した瞬間のメモリとDBの値で、観測の世代は`queue_generation`と`connection.epoch`で区別します。
 アクセスコード・証明書・Webhook URL・MQTTパケット・G-codeやモデルは返しません。任意のSQLやファイル読取り、復旧操作の入口にはなりません。
@@ -215,6 +216,16 @@ AMS IDは0〜255を保持し、各trayは0〜3です。在席ビットで確認�
 - `Print attempt phase changed`（`from`、`to`、理由）、`Queue recovery decision changed`（可否と理由）。
 - `Print observation could not be saved`／`saved again`、`AMS observation ...`（保存失敗の分類と回復）。
 - `FTPS transfer failed`（失敗段階`stage`）。
+
+AMSの受信から材料割当の保存までは、同じ受信番号`report`で追えます。
+
+- `Full printer report requested`: 全状態要求の契機`trigger`と送信成否`sent`。応答は要求と対応付けられないため、後続の全量受信は時刻で読みます。
+- `AMS report applied`: 報告の要約`summary`（`msg`、`full`、`ams`＝`object`/`absent`/`invalid`、存在・読取中・読取済みビット、unitごとのtray形状`loaded`/`empty`/`id_only`/`omitted`、材料・色・プロファイル・残量）と、メモリ上の変化`changes`（前後の`state`＝`present`/`empty`/`unknown`/`absent`、材料・色・プロファイル、識別情報の変化`identity_changed`）。全状態・変化・新しいビットの組合せだけをinfo、変化のない差分はdebugです。
+- `AMS report ignored`: 採用しなかった理由`reason`（`disconnected`、`invalid_json`、`invalid_msg`、`unsynchronized_diff`等）。同じ理由の連続はdebugです。
+- `AMS assignment changed`: transactionのcommit後に、呼出元`source`（`mqtt`、画面・キュー取得の`status`、`inventory`、`resolve`）、元の報告`report`・`report_at`、スロットごとの割当前後・割当元と理由`reason`（`new_slot`、`identity_changed`、`rematched`、`unreported`）。
+
+「届いていない」と「届いたが変化なし・無視」は、診断APIの`observation.reports`・`ams_reports`・`last_ignored`と、`LOG_LEVEL=debug`での上記debug行で区別します。
+タグUID、tray UUID、機器シリアル、アクセスコードは記録しません。サーバーが受信していないことだけでは、本体の未送信と経路での欠落を区別できません。
 
 ## 接続できない場合
 

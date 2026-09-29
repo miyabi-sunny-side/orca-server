@@ -938,6 +938,7 @@ impl Service {
             },
             "saves": observed.saves,
             "upload_failure": observed.upload_failure.map(|(at, stage)| json!({"at":at,"stage":stage})),
+            "observation": observed.observation,
         }))
     }
     pub(crate) async fn apply(self: &Arc<Self>, command: Command) -> Result<Value> {
