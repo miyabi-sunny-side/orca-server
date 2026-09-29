@@ -1262,13 +1262,23 @@ impl Database {
                 .map(|s| serde_json::from_str::<Attempt>(&s))
                 .transpose()
                 .map_err(std::io::Error::other)?;
-            if !matches!(state.as_str(), "awaiting_removal" | "printing") {
-                if let Some(a) = &mut restored {
+            // A restart drops the connection; a result already known is kept as it was.
+            let in_flight = restored.as_ref().is_none_or(|a| {
+                matches!(
+                    a.phase,
+                    Phase::Uploading | Phase::AwaitingConfirmation | Phase::Accepted
+                )
+            });
+            if let Some(a) = &mut restored {
+                if in_flight {
                     a.fail(
                         Phase::Unknown,
                         "Server restarted; inspect the printer before another start",
                     );
                 }
+                a.lost_connection();
+            }
+            if in_flight && !matches!(state.as_str(), "awaiting_removal" | "printing") {
                 tx.execute("UPDATE print_jobs SET state='needs_attention',last_error='Server restarted; inspect the printer before another start' WHERE id=?1",[id])?;
                 tx.execute(
                     "UPDATE printers SET queue_generation=queue_generation+1 WHERE id=?1",
@@ -2301,11 +2311,31 @@ mod tests {
         a.id = prep.job.attempt_id.unwrap();
         a.sent(1);
         s.store.db.persist_attempt("one", &a).unwrap();
-        let uncertain = s.store.db.restore_attempt("one").unwrap().unwrap();
+        let mut uncertain = s.store.db.restore_attempt("one").unwrap().unwrap();
         assert_eq!(uncertain.phase, Phase::Unknown);
         assert_eq!(
             jobs(&s.store.db.connection().unwrap(), "one").unwrap()[0].state,
             "needs_attention"
+        );
+        let mut idle = status();
+        idle.print.name = None;
+        idle.print.file = None;
+        uncertain.resynchronized(&idle);
+        assert_eq!(
+            uncertain.phase,
+            Phase::Resolved,
+            "a restart is a new connection"
+        );
+        s.store.db.persist_attempt("one", &uncertain).unwrap();
+        let known = s.store.db.restore_attempt("one").unwrap().unwrap();
+        assert_eq!(known.phase, Phase::Resolved, "a known result stays known");
+        assert_eq!(known.message, uncertain.message);
+        let mut rejected = a.clone();
+        rejected.fail(Phase::Rejected, "Printer rejected the start request");
+        s.store.db.persist_attempt("one", &rejected).unwrap();
+        assert_eq!(
+            s.store.db.restore_attempt("one").unwrap().unwrap().phase,
+            Phase::Rejected
         );
         a.phase = Phase::Printing;
         s.store.db.persist_attempt("one", &a).unwrap();

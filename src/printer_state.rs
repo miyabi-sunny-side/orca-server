@@ -189,6 +189,7 @@ impl State {
         self.epoch = self.epoch.wrapping_add(1);
         if let Some(start) = &mut self.start {
             start.disconnected();
+            start.lost_connection();
         }
         self.connection = "disconnected";
         self.synchronized = false;
@@ -255,6 +256,17 @@ impl State {
         }
         self.synchronized = self.print.state.is_some() && self.print.error.is_some();
         self.updated_at = Some(now);
+        // An empty target must be reported, not merely omitted, to count as a snapshot.
+        if full
+            && ["subtask_name", "gcode_file"]
+                .iter()
+                .all(|k| report.contains_key(*k))
+        {
+            let status = self.status(now);
+            if let Some(start) = &mut self.start {
+                start.resynchronized(&status);
+            }
+        }
         true
     }
 
@@ -738,6 +750,70 @@ mod tests {
         );
         assert!(state.status(111).ams.is_none());
         assert!(!state.status(111).ready_to_print);
+    }
+}
+
+#[cfg(test)]
+mod resync_tests {
+    use super::*;
+    use crate::print_start::{Attempt, Phase};
+
+    const IDLE: &[u8] = br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,"subtask_name":"","gcode_file":""}}"#;
+
+    fn uncertain() -> State {
+        let mut state = State::new(true);
+        state.connected();
+        let mut attempt = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        attempt.sent(1);
+        state.start = Some(attempt);
+        state.apply(IDLE, 2);
+        state.start.as_mut().unwrap().tick(10, 5);
+        state
+    }
+
+    fn phase(state: &State) -> Phase {
+        state.start.as_ref().unwrap().phase
+    }
+
+    #[test]
+    fn only_a_full_idle_snapshot_on_a_new_connection_resolves_an_uncertain_start() {
+        let mut state = uncertain();
+        assert_eq!(phase(&state), Phase::Unknown);
+        state.apply(IDLE, 11);
+        assert_eq!(phase(&state), Phase::Unknown, "same connection");
+        state.disconnected();
+        state.connected();
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":1,"gcode_state":"IDLE","print_error":0,"subtask_name":"","gcode_file":""}}"#,
+            12,
+        );
+        assert_eq!(phase(&state), Phase::Unknown, "a diff is not a snapshot");
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0}}"#,
+            13,
+        );
+        assert_eq!(
+            phase(&state),
+            Phase::Unknown,
+            "missing identity fields are not an empty target"
+        );
+        state.apply(IDLE, 14);
+        assert_eq!(phase(&state), Phase::Resolved);
+    }
+
+    #[test]
+    fn a_restart_counts_as_a_lost_connection() {
+        let mut state = State::new(true);
+        let mut attempt = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        attempt.sent(1);
+        attempt.disconnected();
+        attempt.lost_connection();
+        let mut restored: Attempt = serde_json::from_value(serde_json::json!(attempt)).unwrap();
+        restored.message = None;
+        state.start = Some(restored);
+        state.connected();
+        state.apply(IDLE, 2);
+        assert_eq!(phase(&state), Phase::Resolved);
     }
 }
 

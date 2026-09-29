@@ -458,8 +458,43 @@ fn stopped_discard_preserves_recovery_across_empty_queue_and_restart() {
     }
 }
 
+/// What a printer reports after power-on: a full snapshot with an explicitly empty target.
+fn empty_idle(rig: &Rig) {
+    let mut report = rig.full.clone();
+    report["print"]["subtask_name"] = json!("");
+    report["print"]["gcode_file"] = json!("");
+    rig.broker.send(&report);
+    until(|| rig.queue()["printer"]["ready_to_print"] == true, 12);
+}
+fn reconnect(rig: &Rig) {
+    let requests = rig.broker.requests().len();
+    rig.broker.action(Action::Disconnect);
+    until(|| rig.broker.requests().len() > requests, 20);
+}
+fn blocked(rig: &Rig, job: &Value) {
+    thread::sleep(Duration::from_millis(300));
+    let q = rig.queue();
+    assert_eq!(q["allowed"]["retry"], false, "{q}");
+    assert_eq!(
+        q["recovery"]["retry_reason"],
+        "Wait for a matching terminal report for the previous start"
+    );
+    post_queue(rig, &retry(rig, job), 409);
+}
+fn retry_once(rig: &Rig, job: &Value) {
+    let prints = rig.broker.prints().len();
+    let q = rig.queue();
+    assert_eq!(q["allowed"]["discard"], true);
+    let request = retry(rig, job);
+    post_queue(rig, &request, 200);
+    until(|| rig.broker.prints().len() == prints + 1, 12);
+    post_queue(rig, &request, 200);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(rig.broker.prints().len(), prints + 1);
+}
+
 #[test]
-fn unknown_sent_attempt_requires_matching_terminal_report_before_reprint() {
+fn unknown_sent_attempt_requires_a_new_connection_snapshot_before_reprint() {
     let mut rig = Rig::new("unknown-reprint");
     rig.launch();
     rig.seed();
@@ -470,13 +505,108 @@ fn unknown_sent_attempt_requires_matching_terminal_report_before_reprint() {
     rig.launch();
     rig.start_phase("unknown");
     rig.idle();
-    assert_eq!(rig.queue()["allowed"]["retry"], false);
-    post_queue(&rig, &retry(&rig, &job), 409);
+    blocked(&rig, &job);
     assert_eq!(rig.broker.prints().len(), 1);
-    rig.report("FAILED");
+    empty_idle(&rig);
+    rig.start_phase("resolved");
     until(|| rig.queue()["allowed"]["retry"] == true, 12);
-    post_queue(&rig, &retry(&rig, &job), 200);
-    until(|| rig.broker.prints().len() == 2, 12);
+    retry_once(&rig, &job);
+    rig.check();
+}
+
+#[test]
+fn a_stopped_print_recovers_after_a_power_cycle_and_restart() {
+    let mut rig = Rig::new("power-cycle-stopped");
+    rig.launch();
+    rig.seed();
+    let job = rig.add(3);
+    rig.next(&job, 200);
+    until(|| rig.broker.prints().len() == 1, 12);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.report("FAILED");
+    rig.phase("needs_attention");
+    empty_idle(&rig);
+    blocked(&rig, &job);
+    reconnect(&rig);
+    rig.broker
+        .send(&json!({"print":{"command":"push_status","msg":1,"gcode_state":"IDLE","print_error":0,"subtask_name":"","gcode_file":""}}));
+    rig.idle();
+    blocked(&rig, &job);
+    empty_idle(&rig);
+    rig.start_phase("resolved");
+    let q = rig.queue();
+    assert_eq!(q["allowed"]["retry"], true);
+    assert_eq!(q["current"]["failure"]["kind"], "stopped");
+    rig.stop(false);
+    rig.launch();
+    rig.idle();
+    until(|| rig.queue()["allowed"]["retry"] == true, 12);
+    assert_eq!(rig.broker.prints().len(), 1);
+    retry_once(&rig, &job);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.check();
+}
+
+#[test]
+fn a_power_cut_before_any_terminal_report_recovers_only_when_idle() {
+    for next in [false, true] {
+        let mut rig = Rig::new(&format!("power-cycle-printing-{next}"));
+        rig.launch();
+        rig.seed();
+        let job = rig.add(3);
+        rig.next(&job, 200);
+        until(|| rig.broker.prints().len() == 1, 12);
+        rig.report("RUNNING");
+        rig.phase("printing");
+        reconnect(&rig);
+        rig.start_phase("unknown");
+        let mut paused = rig.full.clone();
+        paused["print"]["gcode_state"] = json!("PAUSE");
+        paused["print"]["print_error"] = json!(0x0300_8010);
+        paused["print"]["subtask_name"] = json!("");
+        paused["print"]["gcode_file"] = json!("");
+        rig.broker.send(&paused);
+        until(|| rig.queue()["printer"]["synchronized"] == true, 12);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(rig.queue()["printer"]["start"]["phase"], "unknown");
+        empty_idle(&rig);
+        rig.start_phase("resolved");
+        until(|| rig.queue()["allowed"]["discard"] == true, 12);
+        if next {
+            rig.discard();
+            let following = rig.add(3);
+            let q = rig.queue();
+            assert_eq!(q["allowed"]["next"], true);
+            rig.send(
+                json!({"type":"next","expected_job":following["id"],"removed_job":null,"cleared":true}),
+                200,
+            );
+            until(|| rig.broker.prints().len() == 2, 12);
+        } else {
+            // A start that still arrives late is tracked again and blocks a second start.
+            rig.report("RUNNING");
+            rig.phase("printing");
+            thread::sleep(Duration::from_millis(300));
+            assert_eq!(rig.queue()["allowed"]["retry"], false);
+            rig.report("FAILED");
+            rig.phase("needs_attention");
+            assert_eq!(rig.broker.prints().len(), 1);
+            retry_once(&rig, &job);
+        }
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(rig.broker.prints().len(), 2);
+        assert!(
+            rig.db()
+                .query_row("SELECT count(*) FROM print_history", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap()
+                == 0,
+            "an interrupted print is not a completion"
+        );
+        rig.check();
+    }
 }
 
 #[test]

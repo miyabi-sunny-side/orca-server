@@ -295,6 +295,8 @@ export const failureText: Record<string, string> = {
     "印刷が一時停止しています。本体で再開するか停止してください。",
   "Print ended without a completion report; inspect the printer":
     "完了報告なしに印刷が終了しました。本体を確認してください。",
+  "Printer reconnected idle without this print; check the plate before starting again":
+    "本体は再接続後に待機中で、この印刷は動いていません。プレートを確認して再印刷か削除を選んでください。",
 };
 
 export type Estimate = {

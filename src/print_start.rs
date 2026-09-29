@@ -90,6 +90,9 @@ pub struct Attempt {
     sequence: String,
     sent_at: Option<u64>,
     observed_printing: bool,
+    /// The connection this uncertain start was sent on is gone (disconnect or restart).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    connection_lost: bool,
 }
 
 pub fn check_nozzle(status: &Status, diameter: &str, material: &str) -> Result<()> {
@@ -127,6 +130,7 @@ impl Attempt {
             sequence: (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string(),
             sent_at: None,
             observed_printing: false,
+            connection_lost: false,
         }
     }
     pub fn name(&self) -> String {
@@ -194,16 +198,29 @@ impl Attempt {
             );
         }
     }
-    pub fn resolve(&mut self, status: &Status) -> Result<()> {
-        if self.phase != Phase::Unknown || !status.ready_to_print {
-            return Err(Error::Conflict(
-                "Only an unknown start with a ready printer can be resolved",
-            ));
+    /// Mark that later reports come from a new connection, where the old client's queue is gone.
+    pub fn lost_connection(&mut self) {
+        if self.was_sent() && self.phase == Phase::Unknown {
+            self.connection_lost = true;
         }
-        self.phase = Phase::Resolved;
-        self.message = None;
-        self.failure = None;
-        Ok(())
+    }
+    /// A full snapshot from a new connection: IDLE, no error and no target means the uncertain
+    /// start is no longer active (for example after a power cycle). A stop already seen is kept.
+    pub fn resynchronized(&mut self, status: &Status) {
+        if self.connection_lost
+            && self.phase == Phase::Unknown
+            && status.synchronized
+            && status.print.state.as_deref() == Some("IDLE")
+            && status.print.error == Some(0)
+            && status.print.name.is_none()
+            && status.print.file.is_none()
+        {
+            self.connection_lost = false;
+            self.fail(
+                Phase::Resolved,
+                "Printer reconnected idle without this print; check the plate before starting again",
+            );
+        }
     }
     /// Durable notification key for the current failure; one message per attempt and code.
     pub fn notification(&self) -> Option<String> {
@@ -218,7 +235,11 @@ impl Attempt {
     pub fn observe(&mut self, value: &Value, status: &Status) {
         if !matches!(
             self.phase,
-            Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing | Phase::Unknown
+            Phase::AwaitingConfirmation
+                | Phase::Accepted
+                | Phase::Printing
+                | Phase::Unknown
+                | Phase::Resolved
         ) {
             return;
         }
@@ -256,6 +277,8 @@ impl Attempt {
         if !matches {
             return;
         }
+        // The attempt is observed on the current connection again.
+        self.connection_lost = false;
         if let Some(code) = status.print.error.filter(|&code| code != 0) {
             self.fail(
                 Phase::Unknown,
@@ -709,24 +732,103 @@ mod tests {
         }
     }
 
+    fn idle_snapshot() -> Status {
+        let mut status = ready();
+        status.print.state = Some("IDLE".into());
+        status.print.error = Some(0);
+        status.print.name = None;
+        status.print.file = None;
+        status
+    }
+
     #[test]
-    fn loss_or_timeout_remains_unknown_until_explicit_resolution_or_matching_report() {
+    fn loss_or_timeout_remains_unknown_until_a_reconnected_idle_snapshot_or_matching_report() {
         let mut a = Attempt::new("plate".into(), "revision".into(), 0, "PLA".into());
         a.sent(10);
         a.tick(15, 5);
         assert_eq!(a.phase, Phase::Unknown);
         assert!(a.blocks_start());
-        assert!(a.resolve(&ready()).is_ok());
+        a.resynchronized(&idle_snapshot());
+        assert_eq!(a.phase, Phase::Unknown, "same connection is not evidence");
+        a.lost_connection();
+        a.resynchronized(&idle_snapshot());
         assert_eq!(a.phase, Phase::Resolved);
+        assert!(!a.blocks_start());
         let mut a = Attempt::new("p".into(), "r".into(), 0, "PLA".into());
         a.disconnected();
+        a.lost_connection();
         assert_eq!(a.phase, Phase::Uploading);
+        a.resynchronized(&idle_snapshot());
+        assert_eq!(
+            a.phase,
+            Phase::Uploading,
+            "an unsent upload is not resolved"
+        );
         a.sent(1);
         a.disconnected();
         assert_eq!(a.phase, Phase::Unknown);
-        let mut busy = ready();
-        busy.ready_to_print = false;
-        assert!(a.resolve(&busy).is_err());
+    }
+
+    #[test]
+    fn a_power_cycle_releases_only_on_an_idle_error_free_snapshot_without_a_target() {
+        let mut stopped = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        let mut status = printing(&mut stopped);
+        status.print.state = Some("FAILED".into());
+        status.print.error = Some(0);
+        stopped.observe(&json!({"print":{"command":"push_status"}}), &status);
+        assert_eq!(stopped.failure.as_ref().unwrap().kind, FailureKind::Stopped);
+        stopped.disconnected();
+        stopped.lost_connection();
+        let mut unsynchronized = idle_snapshot();
+        unsynchronized.synchronized = false;
+        let mut other = idle_snapshot();
+        other.print.name = Some("orca-other".into());
+        let mut errored = idle_snapshot();
+        errored.print.error = Some(0x0300_8010);
+        for (state, blocked) in [
+            ("RUNNING", idle_snapshot()),
+            ("PREPARE", idle_snapshot()),
+            ("PAUSE", idle_snapshot()),
+            ("FAILED", idle_snapshot()),
+            ("IDLE", unsynchronized),
+            ("IDLE", other),
+            ("IDLE", errored),
+        ] {
+            let mut blocked = blocked;
+            blocked.print.state = Some(state.into());
+            let mut a = stopped.clone();
+            a.resynchronized(&blocked);
+            assert_eq!(a.phase, Phase::Unknown, "{state} must not release");
+        }
+        let mut released = stopped.clone();
+        released.resynchronized(&idle_snapshot());
+        assert_eq!(released.phase, Phase::Resolved);
+        assert_eq!(
+            released.failure.as_ref().map(|f| f.kind),
+            Some(FailureKind::Stopped),
+            "the confirmed stop stays as evidence"
+        );
+        let restored: Attempt = serde_json::from_value(json!(released)).unwrap();
+        assert_eq!(restored.phase, Phase::Resolved);
+        let mut late = released.clone();
+        let mut running = idle_snapshot();
+        running.print.state = Some("RUNNING".into());
+        running.print.name = Some(late.name());
+        late.observe(&json!({"print":{"command":"push_status"}}), &running);
+        assert_eq!(late.phase, Phase::Printing, "a late start is tracked again");
+        let mut resumed = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        let mut running = printing(&mut resumed);
+        let before = json!(resumed);
+        resumed.disconnected();
+        resumed.lost_connection();
+        running.print.name = Some(resumed.name());
+        resumed.observe(&json!({"print":{"command":"push_status"}}), &running);
+        assert_eq!(resumed.phase, Phase::Printing);
+        assert_eq!(
+            json!(resumed),
+            before,
+            "a matching report on the new connection leaves no reconnect mark"
+        );
     }
 }
 

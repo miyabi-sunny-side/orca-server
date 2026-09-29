@@ -641,6 +641,41 @@ fn stopped_queue_retry_shares_rest_guards_and_replay_detection() {
     );
 }
 #[test]
+fn power_cycled_stop_is_retried_once_through_mcp() {
+    let mut rig = common::Rig::new("mcp-power-cycle");
+    rig.launch();
+    rig.seed();
+    rig.add(3);
+    let job = rig.queue()["waiting"][0].clone();
+    rig.next(&job, 200);
+    common::until(|| rig.broker.prints().len() == 1, 12);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.report("FAILED");
+    rig.phase("needs_attention");
+    let requests = rig.broker.requests().len();
+    rig.broker.action(common::peers::Action::Disconnect);
+    common::until(|| rig.broker.requests().len() > requests, 20);
+    let mut idle = rig.full.clone();
+    idle["print"]["subtask_name"] = json!("");
+    idle["print"]["gcode_file"] = json!("");
+    rig.broker.send(&idle);
+    common::until(|| rig.queue()["allowed"]["retry"] == true, 12);
+    let base = rig.base.clone();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = ().serve(StreamableHttpClientTransport::from_uri(format!("{base}/mcp"))).await.unwrap();
+        let q = call(&client, "queue_get", json!({"printer_id":"p1"}), false).await["data"].clone();
+        assert!(q["recovery"]["retry_reason"].is_null());
+        let args = json!({"printer_id":"p1", "epoch":q["epoch"], "generation":q["generation"], "request_id":q["request_id"], "expected_job":q["current"]["id"]});
+        call(&client, "queue_retry", args.clone(), false).await;
+        call(&client, "queue_retry", args, false).await;
+        client.cancel().await.unwrap();
+    });
+    common::until(|| rig.broker.prints().len() == 2, 12);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(rig.broker.prints().len(), 2);
+}
+#[test]
 #[allow(clippy::too_many_lines)] // Observe one complete two-print cycle and its rejected/replayed requests.
 fn queue_continuation() {
     let mut rig = common::Rig::new("mcp-queue");
