@@ -246,7 +246,7 @@ pub fn router(
             "/api/printers/{id}/ams/{slot}",
             axum::routing::put(map_inventory),
         )
-        .route("/api/printer/status", get(status))
+        .merge(state_routes())
         .route(
             "/api/queue",
             get(read_queue)
@@ -400,6 +400,12 @@ impl Registry {
         value.strength.wall_loops = value.strength.wall_loops.or(defaults.strength.wall_loops);
         Ok(())
     }
+}
+/// Read-only printer state: the page's status and the investigation snapshot.
+fn state_routes() -> Router<Arc<Registry>> {
+    Router::new()
+        .route("/api/printer/status", get(status))
+        .route("/api/printers/{id}/diagnostics", get(diagnostics))
 }
 fn product_routes() -> Router<Arc<Registry>> {
     Router::new()
@@ -582,6 +588,16 @@ async fn status(
     let entry = registry.selected(&entries, &query)?;
     entry.usable()?;
     Ok(Json(entry.printer.status().await))
+}
+async fn diagnostics(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>> {
+    let queue = {
+        let entries = registry.entries.lock().await;
+        entries.get(&id).ok_or(Error::NotFound)?.queue.clone()
+    };
+    queue.diagnostics().await.map(Json)
 }
 async fn read_queue(
     State(registry): State<Arc<Registry>>,

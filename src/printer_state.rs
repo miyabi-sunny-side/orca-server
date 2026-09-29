@@ -143,7 +143,105 @@ impl Status {
     }
 }
 
+/// Repeated identical warnings are summarized at this interval.
+pub const REPEAT_LOG_SECS: u64 = 600;
+
+/// Connection history for diagnostics and throttled logs. Holds safe categories, never raw errors.
+#[derive(Clone, Default, Serialize)]
+pub struct Link {
+    pub connected_at: Option<u64>,
+    pub disconnected_at: Option<u64>,
+    pub disconnect_reason: Option<&'static str>,
+    /// Lost or failed connections since the last synchronized report.
+    pub failures: u32,
+    /// First synchronized report on the current connection.
+    pub synchronized_at: Option<u64>,
+    /// Latest full report on the current connection.
+    pub snapshot_at: Option<u64>,
+    #[serde(skip)]
+    logged_at: Option<u64>,
+}
+impl Link {
+    pub fn connected(&mut self, now: u64) {
+        self.connected_at = Some(now);
+        self.synchronized_at = None;
+        self.snapshot_at = None;
+    }
+    /// Record a lost or failed connection; true when it should be logged.
+    pub fn failed(&mut self, reason: &'static str, now: u64) -> bool {
+        let log = self.failures == 0
+            || self.disconnect_reason != Some(reason)
+            || self
+                .logged_at
+                .is_none_or(|at| now.saturating_sub(at) >= REPEAT_LOG_SECS);
+        self.failures += 1;
+        self.disconnected_at = Some(now);
+        self.disconnect_reason = Some(reason);
+        if log {
+            self.logged_at = Some(now);
+        }
+        log
+    }
+    /// The first synchronized report on this connection returns the failures it recovered from.
+    pub fn synchronized(&mut self, now: u64) -> Option<u32> {
+        if self.synchronized_at.is_some() {
+            return None;
+        }
+        self.synchronized_at = Some(now);
+        Some(std::mem::take(&mut self.failures))
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct SaveFailure {
+    pub at: u64,
+    pub operation: &'static str,
+    pub kind: &'static str,
+}
+/// Why memory and the database may differ: the latest failed save and whether it still fails.
+#[derive(Clone, Default, Serialize)]
+pub struct Saves {
+    pub last_failure: Option<SaveFailure>,
+    pub failing: bool,
+    pub failures: u32,
+}
+impl Saves {
+    /// Record a failed save; true when it is new or its operation or kind changed.
+    pub fn failed(&mut self, operation: &'static str, kind: &'static str, now: u64) -> bool {
+        let log = !self.failing
+            || self
+                .last_failure
+                .as_ref()
+                .is_none_or(|f| (f.operation, f.kind) != (operation, kind));
+        self.last_failure = Some(SaveFailure {
+            at: now,
+            operation,
+            kind,
+        });
+        self.failing = true;
+        self.failures += 1;
+        log
+    }
+    /// A successful save of the failing operation returns how many failures preceded it.
+    pub fn saved(&mut self, operation: &str) -> Option<u32> {
+        if !self.failing
+            || self
+                .last_failure
+                .as_ref()
+                .is_some_and(|f| f.operation != operation)
+        {
+            return None;
+        }
+        self.failing = false;
+        Some(std::mem::take(&mut self.failures))
+    }
+}
+
 pub struct State {
+    pub link: Link,
+    pub saves: Saves,
+    /// Latest FTPS failure: time and the stage that failed.
+    pub upload_failure: Option<(u64, &'static str)>,
     nozzle_diameter: Option<String>,
     nozzle_material: Option<String>,
     pub start: Option<crate::print_start::Attempt>,
@@ -160,6 +258,9 @@ pub struct State {
 impl State {
     pub fn new(configured: bool) -> Self {
         Self {
+            link: Link::default(),
+            saves: Saves::default(),
+            upload_failure: None,
             nozzle_diameter: None,
             nozzle_material: None,
             start: None,
@@ -180,7 +281,15 @@ impl State {
     pub fn connected(&mut self) {
         let start = self.start.take();
         let epoch = self.epoch.wrapping_add(1);
+        let mut link = std::mem::take(&mut self.link);
+        link.snapshot_at = None;
+        link.synchronized_at = None;
+        let saves = std::mem::take(&mut self.saves);
+        let upload_failure = self.upload_failure.take();
         *self = Self::new(true);
+        self.link = link;
+        self.saves = saves;
+        self.upload_failure = upload_failure;
         self.start = start;
         self.epoch = epoch;
         self.connection = "connected";
@@ -228,6 +337,7 @@ impl State {
             self.auto_refill = AutoRefill::default();
             self.tray_bits = None;
             self.synchronized = true;
+            self.link.snapshot_at = Some(now);
         } else if !self.synchronized {
             return false;
         }
@@ -839,5 +949,81 @@ mod configuration_tests {
         state.disconnected();
         state.connected();
         assert!(state.status(3).nozzle_diameter.is_none());
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_failures_are_logged_first_on_change_and_every_ten_minutes() {
+        let mut link = Link::default();
+        assert!(link.failed("refused", 100));
+        assert!(!link.failed("refused", 105));
+        assert!(!link.failed("refused", 699));
+        assert!(link.failed("refused", 700), "periodic summary");
+        assert!(link.failed("auth", 705), "reason changed");
+        assert_eq!(link.failures, 5);
+        assert_eq!(
+            (link.disconnected_at, link.disconnect_reason),
+            (Some(705), Some("auth"))
+        );
+        link.connected(710);
+        assert_eq!(
+            link.synchronized(711),
+            Some(5),
+            "recovered after 5 failures"
+        );
+        assert_eq!(link.synchronized(712), None, "only the first snapshot");
+        assert_eq!(link.synchronized_at, Some(711));
+        assert!(link.failed("closed", 800), "a new outage is logged again");
+        link.connected(805);
+        assert_eq!(link.synchronized_at, None);
+        assert_eq!(link.synchronized(806), Some(1));
+    }
+
+    #[test]
+    fn save_failures_are_logged_once_per_kind_and_recovery_is_reported() {
+        let mut saves = Saves::default();
+        assert_eq!(saves.saved("attempt"), None);
+        assert!(saves.failed("attempt", "database", 10));
+        assert!(!saves.failed("attempt", "database", 11));
+        assert!(saves.failed("attempt", "conflict", 12));
+        assert_eq!(
+            saves.saved("ams"),
+            None,
+            "another operation does not clear it"
+        );
+        assert!(saves.failing);
+        assert_eq!(saves.saved("attempt"), Some(3));
+        assert!(!saves.failing);
+        let last = saves.last_failure.as_ref().unwrap();
+        assert_eq!(
+            (last.at, last.operation, last.kind),
+            (12, "attempt", "conflict")
+        );
+    }
+
+    #[test]
+    fn connection_history_survives_reconnects_and_tracks_full_snapshots() {
+        let mut state = State::new(true);
+        state.link.failed("timeout", 1);
+        state.connected();
+        state.link.connected(2);
+        assert_eq!(state.link.disconnect_reason, Some("timeout"));
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":1,"gcode_state":"IDLE","print_error":0}}"#,
+            3,
+        );
+        assert_eq!(state.link.snapshot_at, None, "a diff is not a snapshot");
+        state.apply(
+            br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0}}"#,
+            4,
+        );
+        assert_eq!(state.link.snapshot_at, Some(4));
+        state.connected();
+        assert_eq!(state.link.snapshot_at, None);
+        assert_eq!(state.link.connected_at, Some(2));
     }
 }

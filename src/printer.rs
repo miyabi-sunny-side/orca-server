@@ -363,7 +363,7 @@ impl Config {
     }
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -385,6 +385,14 @@ enum Request {
         response: oneshot::Sender<Result<()>>,
     },
 }
+pub(crate) struct Diagnostics {
+    pub status: crate::printer_state::Status,
+    pub epoch: u64,
+    pub link: crate::printer_state::Link,
+    pub saves: crate::printer_state::Saves,
+    pub upload_failure: Option<(u64, &'static str)>,
+}
+
 #[derive(Clone)]
 pub struct Printer {
     state: Arc<Mutex<State>>,
@@ -435,6 +443,18 @@ impl Printer {
 
     pub async fn status(&self) -> crate::printer_state::Status {
         self.state.lock().await.status(now())
+    }
+
+    /// One in-memory snapshot for diagnostics. Unlike `observed_status`, it writes nothing.
+    pub(crate) async fn diagnostics(&self) -> Diagnostics {
+        let state = self.state.lock().await;
+        Diagnostics {
+            status: state.status(now()),
+            epoch: state.epoch,
+            link: state.link.clone(),
+            saves: state.saves.clone(),
+            upload_failure: state.upload_failure,
+        }
     }
 
     // Keep report updates and AMS edits outside the queue admission transaction.
@@ -582,14 +602,19 @@ impl Printer {
             let Some(start) = state.start.as_mut().filter(|s| s.id == transfer.id) else {
                 return;
             };
-            if !matches!(result, Ok(Ok(()))) {
+            let failed = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(step)) => Some(step),
+                Err(_) => Some("timeout"),
+            };
+            if failed.is_some() {
                 start.fail(
                     Phase::UploadFailed,
                     "FTPS transfer failed or timed out; no start command was sent",
                 );
             } else if printer
                 .starts
-                .try_send(Request::Start(transfer.id, epoch))
+                .try_send(Request::Start(transfer.id.clone(), epoch))
                 .is_err()
             {
                 start.fail(
@@ -597,31 +622,174 @@ impl Printer {
                     "Printer command channel unavailable; no start command was sent",
                 );
             }
-            persist(printer.inventory.as_ref(), state.start.as_ref());
+            if let Some(step) = failed {
+                state.upload_failure = Some((now(), step));
+                tracing::warn!(
+                    printer = printer.inventory.as_ref().map_or("", |(_, d)| d.id.as_str()),
+                    job = %transfer.job_id,
+                    attempt = %transfer.id,
+                    stage = step,
+                    "FTPS transfer failed; no start command was sent"
+                );
+            }
+            persist(printer.inventory.as_ref(), &mut state);
         });
         Ok(attempt)
     }
 }
 
+/// Apply one printer report to the state, the AMS inventory and the current attempt.
+async fn on_report(
+    printer: &str,
+    state: &mut State,
+    inventory: Option<&(crate::database::Database, crate::database::Device)>,
+    payload: &[u8],
+) {
+    let applied = state.apply(payload, now());
+    let status = state.status(now());
+    if applied
+        && status.synchronized
+        && let Some(failures) = state.link.synchronized(now())
+    {
+        tracing::info!(
+            printer,
+            epoch = state.epoch,
+            failures,
+            state = status.print.state.as_deref().unwrap_or(""),
+            error = status.print.error.map(print_start::error_code),
+            "P1 status synchronized"
+        );
+    }
+    if applied && let Some((db, device)) = inventory {
+        let (db, device, observed) = (db.clone(), device.clone(), state.status(now()));
+        match crate::plate_api::blocking(move || db.observe_ams(&device, &observed)).await {
+            Ok(()) => {
+                if let Some(failures) = state.saves.saved("ams") {
+                    tracing::info!(printer, failures, "AMS observation saved again");
+                }
+            }
+            Err(error) => {
+                if state.saves.failed("ams", save_kind(&error), now()) {
+                    tracing::warn!(
+                        printer,
+                        kind = save_kind(&error),
+                        "AMS observation could not be saved; inventory reads will retry"
+                    );
+                }
+            }
+        }
+    }
+    if let Ok(value) = serde_json::from_slice(payload)
+        && let Some(start) = &mut state.start
+    {
+        start.observe(&value, &status);
+    }
+    persist(inventory, state);
+}
+
+/// Send a transferred start once, and only on the connection it was admitted for.
+fn send_start(
+    state: &mut State,
+    id: &str,
+    same_connection: bool,
+    client: &AsyncClient,
+    request: &str,
+    config: &Config,
+    inventory: Option<&(crate::database::Database, crate::database::Device)>,
+) {
+    let status = state.status(now());
+    let Some(start) = state
+        .start
+        .as_mut()
+        .filter(|s| s.id == id && s.phase == Phase::Uploading)
+    else {
+        return;
+    };
+    let admitted =
+        inventory.is_some_and(|(db, device)| db.check_attempt(device, start, &status).is_ok());
+    if !same_connection
+        || !admitted
+        || print_start::check_nozzle(&status, &config.nozzle_diameter, &config.nozzle_material)
+            .is_err()
+    {
+        start.fail(
+            Phase::NotSent,
+            "Printer status or selected AMS changed during transfer; no start command was sent",
+        );
+    } else {
+        // Commit BEFORE enqueueing MQTT. A crash in either side of this barrier is never replayed.
+        start.sent(now());
+        let saved =
+            inventory.is_some_and(|(db, device)| db.persist_attempt(&device.id, start).is_ok());
+        if !saved {
+            start.fail(
+                Phase::NotSent,
+                "Cannot persist the start request; no start command was sent",
+            );
+        } else if client
+            .try_publish(request, QoS::AtMostOnce, false, start.command().to_string())
+            .is_err()
+        {
+            start.fail(
+                Phase::NotSent,
+                "MQTT publish was not queued; no start command was sent",
+            );
+        }
+    }
+    persist(inventory, state);
+}
+
+/// Save the observed attempt. A failure and its recovery are logged once, not on every retry.
 fn persist(
     inventory: Option<&(crate::database::Database, crate::database::Device)>,
-    attempt: Option<&Attempt>,
+    state: &mut State,
 ) {
-    if let (Some((db, device)), Some(attempt)) = (inventory, attempt)
-        && db.persist_attempt(&device.id, attempt).is_err()
-    {
-        tracing::warn!("Print observation could not be saved; retrying on the next report or tick");
+    let (Some((db, device)), Some(attempt)) = (inventory, state.start.as_ref()) else {
+        return;
+    };
+    match db.persist_attempt(&device.id, attempt) {
+        Ok(()) => {
+            if let Some(failures) = state.saves.saved("attempt") {
+                tracing::info!(printer = %device.id, job = %attempt.job_id, attempt = %attempt.id, failures, "Print observation saved again");
+            }
+        }
+        Err(error) => {
+            let kind = save_kind(&error);
+            if state.saves.failed("attempt", kind, now()) {
+                tracing::warn!(printer = %device.id, job = %attempt.job_id, attempt = %attempt.id, kind, "Print observation could not be saved; retrying on the next report or tick");
+            }
+        }
     }
 }
 
-async fn upload(config: &Config, name: &str, bytes: &[u8]) -> std::result::Result<(), ()> {
+fn log_phase(printer: &str, last: &mut Option<(String, Phase)>, state: &State) {
+    if let (Some((from, to)), Some(a)) = (transition(last, state.start.as_ref()), &state.start) {
+        tracing::info!(
+            printer,
+            epoch = state.epoch,
+            job = %a.job_id,
+            attempt = %a.id,
+            from = ?from,
+            to = ?to,
+            reason = a.message.as_deref().unwrap_or(""),
+            "Print attempt phase changed"
+        );
+    }
+}
+
+/// Upload the print file; an error names the failed stage, never the server's reply.
+async fn upload(
+    config: &Config,
+    name: &str,
+    bytes: &[u8],
+) -> std::result::Result<(), &'static str> {
     use suppaftp::{
         tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream},
         types::FileType,
     };
     // One TLS config per upload shares the control session with its data connection.
     let connector = AsyncRustlsConnector::from(suppaftp::tokio_rustls::TlsConnector::from(
-        config.tls().map_err(|_| ())?,
+        config.tls().map_err(|_| "tls")?,
     ));
     let mut ftp = AsyncRustlsFtpStream::connect_secure_implicit(
         (config.ip, config.ftps_port),
@@ -629,7 +797,7 @@ async fn upload(config: &Config, name: &str, bytes: &[u8]) -> std::result::Resul
         &config.ip.to_string(),
     )
     .await
-    .map_err(|_| ())?;
+    .map_err(|_| "connect")?;
     // Keep PASV's dynamic port, but never follow its address to another host.
     ftp.set_passive_nat_workaround(true);
     if config.ip.is_ipv6() {
@@ -637,24 +805,94 @@ async fn upload(config: &Config, name: &str, bytes: &[u8]) -> std::result::Resul
     }
     ftp.login("bblp", &config.access_code)
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| "login")?;
     ftp.custom_command("PBSZ 0", &[suppaftp::Status::CommandOk])
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| "protection")?;
     ftp.custom_command("PROT P", &[suppaftp::Status::CommandOk])
         .await
-        .map_err(|_| ())?;
-    ftp.transfer_type(FileType::Binary).await.map_err(|_| ())?;
+        .map_err(|_| "protection")?;
+    ftp.transfer_type(FileType::Binary)
+        .await
+        .map_err(|_| "binary_mode")?;
     let count = ftp
         .put_file(name, &mut std::io::Cursor::new(bytes))
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| "transfer")?;
     if count != bytes.len() as u64 {
-        return Err(());
+        return Err("size");
     }
     // A final positive transfer reply is authoritative; QUIT failure cannot undo it.
     let _ = tokio::time::timeout(Duration::from_secs(2), ftp.quit()).await;
     Ok(())
+}
+
+fn io_kind(error: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind::{
+        BrokenPipe, ConnectionAborted, ConnectionRefused, ConnectionReset, HostUnreachable,
+        NetworkUnreachable, TimedOut, UnexpectedEof,
+    };
+    if error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        .is_some()
+    {
+        return "tls";
+    }
+    match error.kind() {
+        TimedOut => "timeout",
+        ConnectionRefused => "refused",
+        ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof => "closed",
+        HostUnreachable | NetworkUnreachable => "unreachable",
+        _ => "io",
+    }
+}
+
+/// A safe category for logs and diagnostics; library errors can echo packets or credentials.
+fn classify(error: &rumqttc::ConnectionError) -> &'static str {
+    use rumqttc::{ConnectReturnCode, ConnectionError, StateError};
+    match error {
+        ConnectionError::Io(e)
+        | ConnectionError::MqttState(
+            StateError::Io(e) | StateError::Deserialization(rumqttc::mqttbytes::Error::Io(e)),
+        ) => io_kind(e),
+        ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout => "timeout",
+        ConnectionError::Tls(_) => "tls",
+        ConnectionError::ConnectionRefused(
+            ConnectReturnCode::NotAuthorized | ConnectReturnCode::BadUserNamePassword,
+        ) => "auth",
+        ConnectionError::ConnectionRefused(_) => "refused",
+        ConnectionError::MqttState(StateError::AwaitPingResp) => "keepalive",
+        ConnectionError::MqttState(StateError::ConnectionAborted)
+        | ConnectionError::RequestsDone => "closed",
+        _ => "protocol",
+    }
+}
+
+fn save_kind(error: &Error) -> &'static str {
+    match error {
+        Error::Unavailable(_) => "database",
+        Error::Conflict(_) => "conflict",
+        Error::Io(_) => "io",
+        _ => "other",
+    }
+}
+
+/// The attempt's phase when it differs from the last one seen for the same attempt.
+fn transition(
+    last: &mut Option<(String, Phase)>,
+    start: Option<&Attempt>,
+) -> Option<(Option<Phase>, Phase)> {
+    let start = start?;
+    let before = last
+        .as_ref()
+        .filter(|(id, _)| *id == start.id)
+        .map(|(_, phase)| *phase);
+    if before == Some(start.phase) {
+        return None;
+    }
+    *last = Some((start.id.clone(), start.phase));
+    Some((before, start.phase))
 }
 
 fn request_snapshot(
@@ -688,6 +926,10 @@ async fn run(
     let serial = &config.serial;
     let report = format!("device/{serial}/report");
     let request = format!("device/{serial}/request");
+    let printer = inventory
+        .as_ref()
+        .map_or(String::new(), |(_, device)| device.id.clone());
+    let mut last_phase = None;
     loop {
         // New queues on reconnect: requests from a lost connection are never replayed.
         let (client, mut events) = AsyncClient::new(options.clone(), 8);
@@ -696,35 +938,32 @@ async fn run(
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut subscribed = false;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
-        loop {
+        // Why this connection ended, as a safe category.
+        let reason = loop {
             tokio::select! {
                 event = events.poll() => match event {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                        state.lock().await.connected();
-                        if client.try_subscribe(&report, QoS::AtMostOnce).is_err() { break; }
+                        let mut state = state.lock().await;
+                        state.connected();
+                        state.link.connected(now());
+                        tracing::info!(printer, epoch = state.epoch, "P1 MQTT connected; requesting a full report");
+                        drop(state);
+                        if client.try_subscribe(&report, QoS::AtMostOnce).is_err() { break "subscribe"; }
                     }
                     Ok(Event::Incoming(Incoming::SubAck(ack))) => {
-                        if ack.return_codes.len() != 1 || !matches!(ack.return_codes[0], SubscribeReasonCode::Success(_)) { break; }
+                        if ack.return_codes.len() != 1 || !matches!(ack.return_codes[0], SubscribeReasonCode::Success(_)) { break "subscribe"; }
                         subscribed = true;
-                        if request_snapshot(&client, &request).is_err() { break; }
+                        if request_snapshot(&client, &request).is_err() { break "publish"; }
                         refresh.reset();
                     }
                     Ok(Event::Incoming(Incoming::Publish(message))) if subscribed && message.topic == report && !message.retain => {
                         let mut state = state.lock().await;
-                        let applied=state.apply(&message.payload, now());
-                        let status = state.status(now());
-                        if applied && let Some((db,device))=&inventory {
-                            let db=db.clone();let device=device.clone();let observed=state.status(now());
-                            if crate::plate_api::blocking(move || db.observe_ams(&device,&observed)).await.is_err() {
-                                tracing::warn!("AMS observation could not be saved; inventory reads will retry");
-                            }
-                        }
-                        if let Ok(value) = serde_json::from_slice(&message.payload)
-                            && let Some(start) = &mut state.start { start.observe(&value, &status); }
-                        persist(inventory.as_ref(),state.start.as_ref());
+                        on_report(&printer, &mut state, inventory.as_ref(), &message.payload).await;
+                        log_phase(&printer, &mut last_phase, &state);
                     }
                     Ok(_) => {},
-                    Err(_) => break, // Never log library errors or packets: they may contain credentials.
+                    // Never log library errors or packets: they may contain credentials.
+                    Err(error) => break classify(&error),
                 },
                 Some(command) = starts.recv() => {
                     let mut state = state.lock().await;
@@ -742,48 +981,45 @@ async fn run(
                         },
                     };
                     let same_connection = state.epoch == epoch && subscribed;
-                    if let Some(start) = state.start.as_mut().filter(|s| s.id == id && s.phase == Phase::Uploading) {
-                        let admitted=inventory.as_ref().is_some_and(|(db,device)|db.check_attempt(device,start,&status).is_ok());
-                        if !same_connection || !admitted || print_start::check_nozzle(&status,&config.nozzle_diameter,&config.nozzle_material).is_err() {
-                            start.fail(Phase::NotSent,"Printer status or selected AMS changed during transfer; no start command was sent");
-                        } else {
-                            // Commit BEFORE enqueueing MQTT. A crash in either side of this barrier is never replayed.
-                            start.sent(now());
-                            let saved=inventory.as_ref().is_some_and(|(db,device)|db.persist_attempt(&device.id,start).is_ok());
-                            if !saved {
-                                start.fail(Phase::NotSent,"Cannot persist the start request; no start command was sent");
-                            } else if client.try_publish(&request,QoS::AtMostOnce,false,start.command().to_string()).is_err() {
-                                start.fail(Phase::NotSent,"MQTT publish was not queued; no start command was sent");
-                            }
-                        }
-                        persist(inventory.as_ref(),Some(start));
-                    }
+                    send_start(&mut state, &id, same_connection, &client, &request, &config, inventory.as_ref());
+                    log_phase(&printer, &mut last_phase, &state);
                 }
                 _ = tick.tick() => {
                     let mut state = state.lock().await;
                     let synchronized = state.status(now()).synchronized;
+                    let mut timed_out = false;
                     if let Some(start) = &mut state.start {
                         let pending = matches!(start.phase, Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing);
                         start.tick(now(), config.start_timeout);
                         if !synchronized { start.disconnected(); }
-                        persist(inventory.as_ref(),Some(start));
-                        // Drop this client's queue so timed-out writes cannot be sent later.
-                        if pending && start.phase == Phase::Unknown { break; }
+                        timed_out = pending && start.phase == Phase::Unknown;
                     }
+                    persist(inventory.as_ref(), &mut state);
+                    log_phase(&printer, &mut last_phase, &state);
+                    // Drop this client's queue so timed-out writes cannot be sent later.
+                    if timed_out { break if synchronized { "start_timeout" } else { "unsynchronized" }; }
                 }
                 _ = refresh.tick() => {
-                    if subscribed && !state.lock().await.status(now()).synchronized && request_snapshot(&client, &request).is_err() { break; }
+                    if subscribed && !state.lock().await.status(now()).synchronized && request_snapshot(&client, &request).is_err() { break "publish"; }
                 }
             }
-        }
+        };
         {
             let mut state = state.lock().await;
+            let epoch = state.epoch;
             state.disconnected();
-            persist(inventory.as_ref(), state.start.as_ref());
+            if state.link.failed(reason, now()) {
+                tracing::warn!(
+                    printer,
+                    epoch,
+                    reason,
+                    failures = state.link.failures,
+                    "P1 MQTT disconnected; retrying every 5 seconds (repeats are summarized every 10 minutes)"
+                );
+            }
+            persist(inventory.as_ref(), &mut state);
+            log_phase(&printer, &mut last_phase, &state);
         }
-        tracing::warn!(
-            "P1 MQTT disconnected; check address, access code and pinned certificate; retrying"
-        );
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
@@ -1029,5 +1265,123 @@ mod tests {
             fields.remove(key);
             assert!(Config::parse(|name| fields.get(name).map(|s| (*s).to_owned())).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use rumqttc::{ConnectReturnCode, ConnectionError, StateError};
+    use std::io::{Error as IoError, ErrorKind};
+
+    #[test]
+    fn connection_errors_map_to_safe_categories_without_their_text() {
+        for (error, expected) in [
+            (
+                ConnectionError::Io(IoError::from(ErrorKind::ConnectionRefused)),
+                "refused",
+            ),
+            (
+                ConnectionError::Io(IoError::from(ErrorKind::TimedOut)),
+                "timeout",
+            ),
+            (
+                ConnectionError::Io(IoError::from(ErrorKind::ConnectionReset)),
+                "closed",
+            ),
+            (
+                ConnectionError::Io(IoError::from(ErrorKind::UnexpectedEof)),
+                "closed",
+            ),
+            (
+                ConnectionError::Io(IoError::from(ErrorKind::HostUnreachable)),
+                "unreachable",
+            ),
+            (
+                ConnectionError::Io(IoError::other("access-code-secret")),
+                "io",
+            ),
+            (ConnectionError::NetworkTimeout, "timeout"),
+            (ConnectionError::FlushTimeout, "timeout"),
+            (
+                ConnectionError::ConnectionRefused(ConnectReturnCode::NotAuthorized),
+                "auth",
+            ),
+            (
+                ConnectionError::ConnectionRefused(ConnectReturnCode::BadUserNamePassword),
+                "auth",
+            ),
+            (
+                ConnectionError::ConnectionRefused(ConnectReturnCode::ServiceUnavailable),
+                "refused",
+            ),
+            (
+                ConnectionError::MqttState(StateError::AwaitPingResp),
+                "keepalive",
+            ),
+            (
+                ConnectionError::MqttState(StateError::ConnectionAborted),
+                "closed",
+            ),
+            (
+                ConnectionError::MqttState(StateError::Io(IoError::from(ErrorKind::TimedOut))),
+                "timeout",
+            ),
+            (
+                ConnectionError::MqttState(StateError::WrongPacket),
+                "protocol",
+            ),
+            (
+                ConnectionError::MqttState(StateError::Deserialization(
+                    rumqttc::mqttbytes::Error::Io(IoError::from(ErrorKind::UnexpectedEof)),
+                )),
+                "closed",
+            ),
+            (
+                ConnectionError::Io(IoError::new(
+                    ErrorKind::InvalidData,
+                    rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding),
+                )),
+                "tls",
+            ),
+        ] {
+            assert_eq!(classify(&error), expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn phase_changes_are_reported_once_per_attempt_and_phase() {
+        let mut last = None;
+        let mut a = Attempt::new("p".into(), "j".into(), 0, "PLA".into());
+        assert_eq!(transition(&mut last, None), None);
+        assert_eq!(
+            transition(&mut last, Some(&a)),
+            Some((None, Phase::Uploading))
+        );
+        assert_eq!(transition(&mut last, Some(&a)), None);
+        a.sent(1);
+        assert_eq!(
+            transition(&mut last, Some(&a)),
+            Some((Some(Phase::Uploading), Phase::AwaitingConfirmation))
+        );
+        let b = Attempt::new("p".into(), "j".into(), 0, "PLA".into());
+        assert_eq!(
+            transition(&mut last, Some(&b)),
+            Some((None, Phase::Uploading))
+        );
+    }
+
+    #[test]
+    fn save_errors_keep_only_their_category() {
+        assert_eq!(
+            save_kind(&Error::Unavailable("Database operation failed")),
+            "database"
+        );
+        assert_eq!(
+            save_kind(&Error::Conflict("Execution is no longer active")),
+            "conflict"
+        );
+        assert_eq!(save_kind(&Error::Io(std::io::Error::other("x"))), "io");
+        assert_eq!(save_kind(&Error::NotFound), "other");
     }
 }

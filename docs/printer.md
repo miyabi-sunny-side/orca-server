@@ -187,10 +187,39 @@ AMS IDは0〜255を保持し、各trayは0〜3です。在席ビットで確認�
 再接続は5秒おきです。接続中に未同期・情報不足となった場合は、5分おきに全状態を再要求します。
 報告が60秒以上途切れた状態は`stale`です。その後に差分だけを受けても同期完了へ戻しません。
 
+## 診断API
+
+`GET /api/printers/{id}/diagnostics`は、DBへ入らずに「本体が何を報告し、どの記録と条件が復旧を止めているか」を調べる読み取り専用のJSONです。
+他のAPIと同じアクセス境界で提供します。状態・AMS・DB・キュー世代を変更せず、MQTTも送りません。未登録のIDは404、DBを読めない場合は503です。
+
+| 項目 | 内容 |
+| --- | --- |
+| `observed_at`、`version`、`service_epoch`、`printer_id`、`queue_generation` | 取得時刻（Unix秒）、アプリ版、プロセスごとのキューepoch、対象、キュー世代。 |
+| `connection` | `state`（状態APIと同じ）、接続`epoch`、`connected_at`・`disconnected_at`、`disconnect_reason`、同期までの連続失敗数`failures`、接続後の初回同期`synchronized_at`、最新の全状態`snapshot_at`、最新報告`report_at`、`synchronized`。未観測は`null`。 |
+| `printer` | 本体の`state`、`error`（`0300-8010`形式）、対象識別子`name`・`file`、`ready_to_print`。 |
+| `job`、`recovery_attempt` | DBの現在ジョブ（`id`、`state`、`attempt_id`、`last_error`）と、削除後の継続に使う停止対象。 |
+| `attempt.memory`、`attempt.stored` | メモリとDBの試行。`phase`、`message`、`sent_at`、`observed_printing`、`connection_lost`、停止証拠`failure`。 |
+| `decision` | キューAPIと同じ判定の`allowed`（next/retry/discard）と`reasons`、参照した根拠`evidence`（`fresh`、`full_snapshot`、`current_connection`、`identity`＝`none`/`target`/`other`、`terminal`）。 |
+| `saves` | 最後の保存失敗（`at`、`operation`＝`attempt`/`ams`、`kind`）、失敗中か、連続回数。メモリとDBが食い違う手掛かり。 |
+| `upload_failure` | 最後のFTPS失敗の時刻と段階（`tls`、`connect`、`login`、`protection`、`binary_mode`、`transfer`、`size`、`timeout`）。 |
+
+時刻は取得した瞬間のメモリとDBの値で、観測の世代は`queue_generation`と`connection.epoch`で区別します。
+アクセスコード・証明書・Webhook URL・MQTTパケット・G-codeやモデルは返しません。任意のSQLやファイル読取り、復旧操作の入口にはなりません。
+
+## ログ
+
+状態変化は`printer`、`job`、`attempt`、接続`epoch`で関連付けられます。
+
+- `P1 MQTT connected`、`P1 status synchronized`（再接続までの失敗数`failures`、本体の状態とエラー）。
+- `P1 MQTT disconnected`は理由`reason`（`closed`、`timeout`、`refused`、`auth`、`tls`、`unreachable`、`keepalive`、`protocol`、`io`、`subscribe`、`publish`、`start_timeout`、`unsynchronized`）付きです。同じ理由の繰り返しは、初回・理由の変化・10分ごとの集約だけを記録します。
+- `Print attempt phase changed`（`from`、`to`、理由）、`Queue recovery decision changed`（可否と理由）。
+- `Print observation could not be saved`／`saved again`、`AMS observation ...`（保存失敗の分類と回復）。
+- `FTPS transfer failed`（失敗段階`stage`）。
+
 ## 接続できない場合
 
-`connection`とサーバーログを確認し、IP・シリアル・アクセスコード・証明書・到達できるポートを照合してください。
-MQTTパケットやFTPSの応答、ライブラリのエラー詳細は、秘密値の混入を避けるためログへ出しません。
+`connection`、[診断API](#診断api)の`connection.disconnect_reason`、サーバーログを確認し、IP・シリアル・アクセスコード・証明書・到達できるポートを照合してください。
+MQTTパケットやFTPSの応答、ライブラリのエラー詳細は、秘密値の混入を避けるためログへ出さず、安全な分類だけを残します。
 
 実装は[Bambu Studioの状態処理](https://github.com/bambulab/BambuStudio/blob/77b9dd94d1e3c432d5e74a18ab8de146ccf3b7c7/src/slic3r/GUI/DeviceManager.cpp)と、
 [ha-bambulabのLAN接続](https://github.com/greghesp/ha-bambulab/blob/cd67ed90e08561175a831f35b45773fe427996d7/custom_components/bambu_lab/pybambu/bambu_client.py)、

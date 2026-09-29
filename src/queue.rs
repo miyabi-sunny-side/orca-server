@@ -722,6 +722,8 @@ pub(crate) fn sync_files(path: &std::path::Path) -> Result<()> {
 
 pub(crate) struct Service {
     pub(crate) lock: Mutex<()>,
+    /// Last logged recovery decision; only changes are logged.
+    decision: Mutex<Option<Value>>,
     epoch: String,
     store: Store,
     device: Device,
@@ -739,6 +741,7 @@ impl Service {
     ) -> Self {
         Self {
             lock: Mutex::new(()),
+            decision: Mutex::new(None),
             epoch: uuid::Uuid::new_v4().to_string(),
             store,
             device,
@@ -763,18 +766,28 @@ impl Service {
     }
     pub(crate) async fn read(&self, plate_id: Option<&str>) -> Result<Value> {
         let (_observation, status) = self.printer.observed_status().await?;
-        let c = self.store.db.connection()?;
-        let list = jobs(&c, &self.device.id)?;
+        let view = self.view(&*self.store.db.connection()?, &status, plate_id)?;
+        let decision = json!({"current":view["current"]["id"],"allowed":view["allowed"],"recovery":view["recovery"]});
+        let mut last = self.decision.lock().await;
+        if last.as_ref() != Some(&decision) {
+            tracing::info!(printer = %self.device.id, job = %decision["current"], allowed = %decision["allowed"], recovery = %decision["recovery"], "Queue recovery decision changed");
+            *last = Some(decision);
+        }
+        Ok(view)
+    }
+    /// The queue as seen from one printer status; shared by the page, MCP and diagnostics.
+    fn view(&self, c: &Connection, status: &Status, plate_id: Option<&str>) -> Result<Value> {
+        let list = jobs(c, &self.device.id)?;
         let current = list.iter().find(|j| j.state != "queued");
         let mut waiting = Vec::new();
         for job in list.iter().filter(|j| j.state == "queued") {
             let mut value = json!(job);
             value["estimate"] =
-                crate::estimates::view(&c, job, self.slicer.as_ref().map(|s| s.profiles.as_ref()))?;
-            let plate = crate::plates::load(&c, &job.plate_id)?;
+                crate::estimates::view(c, job, self.slicer.as_ref().map(|s| s.profiles.as_ref()))?;
+            let plate = crate::plates::load(c, &job.plate_id)?;
             value["name"] = json!(plate.name);
             value["plate_version"] = json!(plate.version);
-            value["plate_deleted"] = json!(crate::plates::is_deleted(&c, &job.plate_id)?);
+            value["plate_deleted"] = json!(crate::plates::is_deleted(c, &job.plate_id)?);
             for key in [
                 "required_machine_profile_key",
                 "filament_id",
@@ -784,13 +797,13 @@ impl Service {
                 value[key] = json!(plate.conditions)[key].clone();
             }
             value["ams_slot_id"] = Value::Null;
-            let hold = self.plan(&c, &plate, &status).map(|spec| {
+            let hold = self.plan(c, &plate, status).map(|spec| {
                 value["ams_slot_id"] = json!(spec.ams_slot_id);
             });
             value["hold_reason"] = hold.err().map_or(Value::Null, |e| json!(message(&e)));
             waiting.push(value);
         }
-        let next_recovery = next_recovery(&c, &self.device.id, &status);
+        let next_recovery = next_recovery(c, &self.device.id, status);
         let next = next_recovery.is_ok()
             && current.is_none_or(|j| j.state == "awaiting_removal")
             && waiting.first().is_some_and(|j| j["hold_reason"].is_null());
@@ -800,11 +813,11 @@ impl Service {
                 .as_ref()
                 .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?
                 .profiles;
-            retry_execution(&c, &self.device, j, &status, profiles)
+            retry_execution(c, &self.device, j, status, profiles)
         });
         let discard = current
             .filter(|j| matches!(j.state.as_str(), "needs_attention" | "awaiting_removal"))
-            .map(|j| recovery_state(&c, j, &status));
+            .map(|j| recovery_state(c, j, status));
         let recovery = json!({
             "next_reason": next_recovery.as_ref().err().map(message),
             "retry_reason": retry.as_ref().and_then(|r| r.as_ref().err()).map(message),
@@ -813,16 +826,16 @@ impl Service {
         let retry = retry.is_some_and(|r| r.is_ok());
         let discard = discard.is_some_and(|r| r.is_ok());
         let admission = plate_id.map(|id| -> Result<Value> {
-            let plate = crate::plates::load(&c, id)?;
-            let result = self.admission(&c, &plate, &status);
+            let plate = crate::plates::load(c, id)?;
+            let result = self.admission(c, &plate, status);
             Ok(json!({"plate_version":plate.version,"allowed":result.is_ok(),"reason":result.err().map(|e|message(&e))}))
         }).transpose()?;
         let current_view = current
             .map(|job| -> Result<Value> {
                 let mut value = json!(job);
-                value["plate_deleted"] = json!(crate::plates::is_deleted(&c, &job.plate_id)?);
+                value["plate_deleted"] = json!(crate::plates::is_deleted(c, &job.plate_id)?);
                 value["estimate"] = crate::estimates::view(
-                    &c,
+                    c,
                     job,
                     self.slicer.as_ref().map(|s| s.profiles.as_ref()),
                 )?;
@@ -841,8 +854,91 @@ impl Service {
             })
             .transpose()?;
         Ok(
-            json!({"epoch":self.epoch,"generation":generation(&c,&self.device.id)?,"request_id":uuid::Uuid::new_v4().to_string(),"current":current_view,"admission":admission,"waiting":waiting,"printer":status,"recovery":recovery,"allowed":{"next":next,"retry":retry,"discard":discard}}),
+            json!({"epoch":self.epoch,"generation":generation(c,&self.device.id)?,"request_id":uuid::Uuid::new_v4().to_string(),"current":current_view,"admission":admission,"waiting":waiting,"printer":status,"recovery":recovery,"allowed":{"next":next,"retry":retry,"discard":discard}}),
         )
+    }
+    /// The same decision as `read` with the facts behind it. Writes nothing: no AMS
+    /// observation, and the single read transaction is rolled back.
+    pub(crate) async fn diagnostics(&self) -> Result<Value> {
+        let observed = self.printer.diagnostics().await;
+        let status = &observed.status;
+        let mut c = self.store.db.connection()?;
+        let tx = c.transaction()?;
+        let view = self.view(&tx, status, None)?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT e.attempt_json FROM print_jobs j JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('queued','completed','cancelled')",
+                [&self.device.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let recovery_attempt: Option<String> = tx.query_row(
+            "SELECT recovery_attempt FROM printers WHERE id=?1",
+            [&self.device.id],
+            |r| r.get(0),
+        )?;
+        drop(tx);
+        let stored: Option<Value> = stored
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(std::io::Error::other)?;
+        let memory = status.start.as_ref().map(|a| json!(a));
+        let facts = |a: &Value| {
+            json!({"id":a["id"],"job_id":a["job_id"],"phase":a["phase"],"message":a["message"],
+                "sent_at":a["sent_at"],"observed_printing":a["observed_printing"],
+                "connection_lost":a.get("connection_lost").cloned().unwrap_or(json!(false)),"failure":a["failure"]})
+        };
+        let target = view["current"]["attempt_id"].as_str().unwrap_or("");
+        let reported = [&status.print.name, &status.print.file]
+            .into_iter()
+            .any(Option::is_some);
+        let identity = if !reported {
+            "none"
+        } else if !target.is_empty() && status.matches_attempt(target) {
+            "target"
+        } else {
+            "other"
+        };
+        let link = &observed.link;
+        Ok(json!({
+            "observed_at": crate::printer::now(),
+            "version": env!("CARGO_PKG_VERSION"),
+            "service_epoch": self.epoch,
+            "printer_id": self.device.id,
+            "queue_generation": view["generation"],
+            "connection": {
+                "state": status.connection, "epoch": observed.epoch,
+                "connected_at": link.connected_at, "disconnected_at": link.disconnected_at,
+                "disconnect_reason": link.disconnect_reason, "failures": link.failures,
+                "synchronized_at": link.synchronized_at, "snapshot_at": link.snapshot_at,
+                "report_at": status.updated_at, "synchronized": status.synchronized,
+            },
+            "printer": {
+                "state": status.print.state, "error": status.print.error.map(crate::print_start::error_code),
+                "name": status.print.name, "file": status.print.file, "ready_to_print": status.ready_to_print,
+            },
+            "job": view["current"].as_object().map(|j| json!({"id":j["id"],"state":j["state"],"attempt_id":j["attempt_id"],"last_error":j["last_error"]})),
+            "attempt": {
+                "memory": memory.as_ref().map(facts),
+                "stored": stored.as_ref().map(facts),
+            },
+            "recovery_attempt": recovery_attempt,
+            "decision": {
+                "allowed": view["allowed"],
+                "reasons": view["recovery"],
+                "evidence": {
+                    "fresh": status.synchronized,
+                    "full_snapshot": link.snapshot_at.is_some(),
+                    "current_connection": memory.as_ref().map(|a| a.get("connection_lost").is_none()),
+                    "identity": identity,
+                    "terminal": identity == "target" && matches!(status.print.state.as_deref(), Some("FAILED" | "FINISH")),
+                },
+            },
+            "saves": observed.saves,
+            "upload_failure": observed.upload_failure.map(|(at, stage)| json!({"at":at,"stage":stage})),
+        }))
     }
     pub(crate) async fn apply(self: &Arc<Self>, command: Command) -> Result<Value> {
         let _guard = self.lock.lock().await;
