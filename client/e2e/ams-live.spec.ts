@@ -46,8 +46,8 @@ test("compact AMS selection preserves editing during polling and changes start p
   await page.getByText("自動補充", { exact: true }).click();
   await expect(page.getByText("プリンターが非対応と報告しています。", { exact: true })).toBeVisible();
   await request.post(c.control, { data: { print: { command: "push_status", msg: 1, support_filament_backup: true, home_flag: 0 } } });
-  await page.getByRole("button", { name: "状態を更新", exact: true }).click();
-  await page.getByRole("button", { name: "有効にする", exact: true }).click();
+  // The ordinary 5-second view refresh shows the reported support; no printer request is needed.
+  await page.getByRole("button", { name: "有効にする", exact: true }).click({ timeout: 12000 });
   await expect(page.getByRole("status")).toContainText("設定を送信しました");
   await expect(page.getByText("無効", { exact: true })).toBeVisible();
   await request.post(c.control, { data: { print: { command: "push_status", msg: 1, home_flag: 1024 } } });

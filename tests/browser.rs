@@ -41,6 +41,11 @@ fn support_interface() {
 }
 #[test]
 #[ignore = "requires Chromium"]
+fn ams_refresh() {
+    ams::ams_refresh();
+}
+#[test]
+#[ignore = "requires Chromium"]
 fn ams_priority() {
     ams::ams_priority(true);
 }

@@ -249,3 +249,50 @@ pub fn nozzle_material() {
     assert_eq!(rig.broker.prints().len(), 1);
     rig.ftp.check();
 }
+
+/// The AMS page's "状態を更新" through the real server to the isolated printer and back.
+#[allow(dead_code)] // Only the Chromium target runs this scenario.
+pub fn ams_refresh() {
+    let mut rig = Rig::new("ams-refresh-browser");
+    rig.launch();
+    rig.seed();
+    let mut white = rig.full.clone();
+    white["print"]["ams"]["tray_exist_bits"] = json!("b");
+    white["print"]["ams"]["ams"][0]["tray"][1] =
+        json!({"id":"1","tray_type":"PLA","tray_color":"FFFFFFFF"});
+    let mut reading = white.clone();
+    reading["print"]["ams"]["tray_reading_bits"] = json!("8");
+    reading["print"]["ams"]["tray_read_done_bits"] = json!("3");
+    let reply = rig.broker.pushall_reply.clone();
+    let records = rig.broker.records.clone();
+    let actions = rig.broker.actions.clone();
+    let control = HttpPeer::new(move |method, _, body| {
+        if method == "POST" {
+            let value: Value = serde_json::from_slice(body).unwrap();
+            if value.get("reply").is_some() {
+                *reply.lock().unwrap() = (!value["reply"].is_null())
+                    .then(|| serde_json::to_vec(&value["reply"]).unwrap());
+            }
+            if let Some(report) = value.get("send") {
+                actions
+                    .send(Action::Report(
+                        serde_json::to_vec(report).unwrap(),
+                        false,
+                        format!("device/{}/report", crate::common::peers::SERIAL),
+                    ))
+                    .unwrap();
+            }
+            if value["disconnect"] == true {
+                actions.send(Action::Disconnect).unwrap();
+            }
+        }
+        let pushes = records.lock().unwrap().requests.len();
+        (200, serde_json::to_vec(&json!({"pushes":pushes})).unwrap())
+    });
+    rig.browser(
+        "E2E_AMS_REFRESH_CONTEXT",
+        &json!({"control":control.base,"white":white,"reading":reading}),
+        None,
+    );
+    rig.check();
+}

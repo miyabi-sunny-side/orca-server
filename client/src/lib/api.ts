@@ -132,6 +132,20 @@ export async function request<T>(
         : "キューを操作できませんでした。プレートやプリンターの状態を確認してください。";
     throw new ApiError(response.status, message);
   }
+  if (/^\/api\/printers\/[^/]+\/ams\/refresh$/.test(path)) {
+    const messages: Record<number, string> = {
+      404: "プリンターが見つかりません。プリンター一覧から開き直してください。",
+      409: "前回の状態取得がまだ終わっていません。完了を待ってください。",
+      502: "プリンターに接続できないため、最新の状態を取得できません。プリンターの電源とネットワーク、接続設定を確認してください。",
+      503: "プリンターから状態は届きましたが、サーバーに保存できませんでした。サーバーの保存先とログを確認してください。",
+      504: "プリンターから最新の状態が届きませんでした。プリンターの電源とネットワークを確認してください。",
+    };
+    throw new ApiError(
+      response.status,
+      messages[response.status] ??
+        "プリンターの最新状態を取得できませんでした。",
+    );
+  }
   if (
     path.startsWith("/api/filaments") ||
     path.split("?")[0] === "/api/plate-filaments" ||

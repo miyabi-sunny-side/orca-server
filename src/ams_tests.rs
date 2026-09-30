@@ -300,3 +300,124 @@ fn power_up_reading_keeps_every_loaded_slot_once_it_is_read() {
     );
     assert_eq!(order(&db).len(), 2, "both black slots can print");
 }
+
+/// Reports 14308→14331 observed on 2026-09-30 after a restart with black in slots 1·2 and white in 4.
+#[test]
+#[allow(clippy::too_many_lines)] // One logged report sequence, kept in order.
+fn logged_restart_sequence_settles_on_black_one_two_and_white_four() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+    seed(&db);
+    let mut state = State::new(true);
+    state.connected();
+    let tray = |id: &str, color: &str| json!({"id":id,"tray_type":"PLA","tray_color":color,"tray_info_idx":"GFA01","tag_uid":format!("tag-{id}")});
+    let unread = |id: &str| json!({"id":id});
+    let black = "000000FF";
+    let white = "FFFFFFFF";
+    let loaded = json!([
+        tray("0", black),
+        tray("1", black),
+        unread("2"),
+        tray("3", white)
+    ]);
+    let report = |msg: u64, trays: Value, bits: Value| {
+        let mut ams = json!({"ams":[{"id":"0","tray":trays}]});
+        ams.as_object_mut()
+            .unwrap()
+            .extend(bits.as_object().unwrap().clone());
+        json!({"print":{"command":"push_status","msg":msg,"gcode_state":"IDLE","print_error":0,"ams":ams}})
+    };
+    observe(
+        &db,
+        &mut state,
+        &report(
+            0,
+            loaded.clone(),
+            json!({"tray_exist_bits":"b","tray_read_done_bits":"b"}),
+        ),
+    );
+    let assigned = |db: &Database| -> Vec<Option<String>> {
+        db.ams_slots("p")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.filament_id)
+            .collect()
+    };
+    let expected = vec![
+        Some("black".to_owned()),
+        Some("black".to_owned()),
+        None,
+        Some("white".to_owned()),
+    ];
+    assert_eq!(assigned(&db), expected, "before the restart");
+
+    // 14308: full report, every tray id-only while reading starts.
+    observe(
+        &db,
+        &mut state,
+        &report(
+            0,
+            json!([unread("0"), unread("1"), unread("2"), unread("3")]),
+            json!({"tray_exist_bits":"b","tray_reading_bits":"1","tray_read_done_bits":"0"}),
+        ),
+    );
+    let present: Vec<_> = db
+        .ams_slots("p")
+        .unwrap()
+        .iter()
+        .map(|s| s.reported.present)
+        .collect();
+    assert_eq!(present, [Some(true), Some(true), Some(false), Some(true)]);
+    // 14313, 14320, 14328: diffs without tray_exist_bits as each slot is read.
+    observe(
+        &db,
+        &mut state,
+        &report(
+            1,
+            json!([tray("0", black), unread("1"), unread("2"), unread("3")]),
+            json!({"tray_reading_bits":"2","tray_read_done_bits":"1"}),
+        ),
+    );
+    observe(
+        &db,
+        &mut state,
+        &report(
+            1,
+            json!([tray("0", black), tray("1", black), unread("2"), unread("3")]),
+            json!({"tray_reading_bits":"8","tray_read_done_bits":"3"}),
+        ),
+    );
+    observe(
+        &db,
+        &mut state,
+        &report(1, loaded.clone(), json!({"tray_read_done_bits":"b"})),
+    );
+    // 14331: reading finished.
+    observe(
+        &db,
+        &mut state,
+        &report(1, loaded, json!({"tray_reading_bits":"0"})),
+    );
+    assert_eq!(assigned(&db), expected);
+    let present: Vec<_> = db
+        .ams_slots("p")
+        .unwrap()
+        .iter()
+        .map(|s| s.reported.present)
+        .collect();
+    assert_eq!(present, [Some(true), Some(true), Some(false), Some(true)]);
+    assert_eq!(db.resolve_slots("p", "white", "machine").unwrap().len(), 1);
+
+    // An explicit removal still clears the slot.
+    observe(
+        &db,
+        &mut state,
+        &report(
+            1,
+            json!([tray("0", black), tray("1", black), unread("2"), unread("3")]),
+            json!({"tray_exist_bits":"3"}),
+        ),
+    );
+    assert_eq!(assigned(&db)[3], None);
+    assert_eq!(db.ams_slots("p").unwrap()[3].reported.present, Some(false));
+}

@@ -574,9 +574,11 @@ pub(crate) fn planned(
 pub(crate) fn message(error: &Error) -> String {
     match error {
         Error::Slicer(message) => message.clone(),
-        Error::Invalid(s) | Error::Unavailable(s) | Error::Conflict(s) | Error::Upstream(s) => {
-            (*s).into()
-        }
+        Error::Invalid(s)
+        | Error::Unavailable(s)
+        | Error::Conflict(s)
+        | Error::Upstream(s)
+        | Error::NoReply(s) => (*s).into(),
         Error::Timeout => "Slicing timed out".into(),
         _ => "Preparation failed; check source data and server storage".into(),
     }

@@ -363,6 +363,9 @@ impl Config {
     }
 }
 
+/// How long a manual refresh waits for the printer's full report.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -384,6 +387,10 @@ enum Request {
         epoch: u64,
         response: oneshot::Sender<Result<()>>,
     },
+    /// Ask the printer for a full report; answers the connection epoch and report count at sending.
+    Snapshot {
+        response: oneshot::Sender<Result<(u64, u64)>>,
+    },
 }
 pub(crate) struct Diagnostics {
     pub status: crate::printer_state::Status,
@@ -400,6 +407,8 @@ pub struct Printer {
     state: Arc<Mutex<State>>,
     config: Option<Config>,
     starts: mpsc::Sender<Request>,
+    /// One manual full-report request at a time per printer.
+    refreshing: Arc<Mutex<()>>,
     _observation: Option<Arc<Observation>>,
     inventory: Option<(crate::database::Database, crate::database::Device)>,
 }
@@ -438,9 +447,80 @@ impl Printer {
             state,
             config,
             starts,
+            refreshing: Arc::default(),
             _observation: observation,
             inventory,
         })
+    }
+
+    /// Ask the printer itself for a full report and wait until a newer full AMS report from the
+    /// same connection has been applied and saved. Sending alone is not completion.
+    pub(crate) async fn refresh_ams(&self) -> Result<crate::printer_state::FullAms> {
+        use crate::printer_state::{Refresh, refresh_state};
+        let _one = self
+            .refreshing
+            .try_lock()
+            .map_err(|_| Error::Conflict("An AMS refresh is already in progress"))?;
+        if self.config.is_none() {
+            return Err(Error::Upstream("Printer connection is not configured"));
+        }
+        let (response, receiver) = oneshot::channel();
+        self.starts
+            .try_send(Request::Snapshot { response })
+            .map_err(|_| Error::Conflict("Printer command is busy; retry"))?;
+        let (epoch, floor) = tokio::time::timeout(Duration::from_secs(5), receiver)
+            .await
+            .map_err(|_| Error::Upstream("Printer connection did not accept the request"))?
+            .map_err(|_| Error::Upstream("Printer connection closed"))??;
+        let deadline = tokio::time::Instant::now() + REFRESH_TIMEOUT;
+        loop {
+            let seen = self.state.lock().await.full_ams_seen.clone();
+            let notified = seen.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let outcome = {
+                let state = self.state.lock().await;
+                refresh_state(state.epoch, state.full_ams.as_ref(), epoch, floor)
+            };
+            let printer = self.inventory.as_ref().map_or("", |(_, d)| d.id.as_str());
+            match outcome {
+                Refresh::Done(full) => {
+                    tracing::info!(
+                        printer,
+                        epoch,
+                        report = full.report,
+                        reading = full.reading,
+                        "Manual AMS refresh completed"
+                    );
+                    return Ok(full);
+                }
+                Refresh::Failed(reason) => {
+                    tracing::warn!(printer, epoch, reason, "Manual AMS refresh failed");
+                    return Err(if reason == "save" {
+                        Error::Unavailable(
+                            "The full report arrived but could not be saved; check server storage",
+                        )
+                    } else {
+                        Error::Upstream(
+                            "Printer connection changed before the full report arrived; retry",
+                        )
+                    });
+                }
+                Refresh::Pending => {}
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                // A disconnect also ends the wait; report it rather than a timeout.
+                let state = self.state.lock().await;
+                if let Refresh::Pending =
+                    refresh_state(state.epoch, state.full_ams.as_ref(), epoch, floor)
+                {
+                    tracing::warn!(printer, epoch, "Manual AMS refresh timed out");
+                    return Err(Error::NoReply(
+                        "The printer did not send a full report in time",
+                    ));
+                }
+            }
+        }
     }
 
     pub async fn status(&self) -> crate::printer_state::Status {
@@ -690,6 +770,7 @@ async fn on_report(
             ignored_before,
         );
     }
+    let mut saved = true;
     if applied && let Some((db, device)) = inventory {
         let (db, device, observed) = (db.clone(), device.clone(), state.status(now()));
         match crate::plate_api::blocking(move || observe(&db, &device, &observed, "mqtt", report))
@@ -701,6 +782,7 @@ async fn on_report(
                 }
             }
             Err(error) => {
+                saved = false;
                 if state.saves.failed("ams", save_kind(&error), now()) {
                     tracing::warn!(
                         printer,
@@ -711,6 +793,20 @@ async fn on_report(
                 }
             }
         }
+    }
+    if applied
+        && let Some(summary) = summary
+            .as_ref()
+            .filter(|s| s["full"] == true && s["ams"] == "object")
+    {
+        state.full_ams = Some(crate::printer_state::FullAms {
+            report,
+            epoch: state.epoch,
+            at: now(),
+            saved,
+            reading: crate::printer_state::still_reading(summary),
+        });
+        state.full_ams_seen.notify_waiters();
     }
     if let Some(value) = &value
         && let Some(start) = &mut state.start
@@ -790,6 +886,55 @@ fn observe(
             }
             Err(error)
         }
+    }
+}
+
+/// Record a lost connection; repeated identical failures are summarized.
+fn connection_ended(
+    printer: &str,
+    state: &mut State,
+    reason: &'static str,
+    inventory: Option<&(crate::database::Database, crate::database::Device)>,
+    last_phase: &mut Option<(String, Phase)>,
+) {
+    let epoch = state.epoch;
+    state.disconnected();
+    if state.link.failed(reason, now()) {
+        tracing::warn!(
+            printer,
+            epoch,
+            reason,
+            failures = state.link.failures,
+            "P1 MQTT disconnected; retrying every 5 seconds (repeats are summarized every 10 minutes)"
+        );
+    }
+    persist(inventory, state);
+    log_phase(printer, last_phase, state);
+}
+
+/// A manual full-report request on the current connection: its epoch and report count at sending.
+async fn manual_snapshot(
+    printer: &str,
+    state: &Mutex<State>,
+    client: &AsyncClient,
+    topic: &str,
+    subscribed: bool,
+) -> Result<(u64, u64)> {
+    if !subscribed {
+        return Err(Error::Upstream(
+            "Printer is not connected; check its power and network",
+        ));
+    }
+    let marks = {
+        let s = state.lock().await;
+        (s.epoch, s.reports)
+    };
+    if snapshot(printer, state, client, topic, "manual").await {
+        Ok(marks)
+    } else {
+        Err(Error::Upstream(
+            "Full report request was not sent; check the printer connection",
+        ))
     }
 }
 
@@ -1094,10 +1239,18 @@ async fn run(
                     Err(error) => break classify(&error),
                 },
                 Some(command) = starts.recv() => {
+                    let command = match command {
+                        Request::Snapshot { response } => {
+                            let _ = response.send(manual_snapshot(&printer, &state, &client, &request, subscribed).await);
+                            continue;
+                        }
+                        other => other,
+                    };
                     let mut state = state.lock().await;
                     let status=state.status(now());
                     let (id,epoch)=match command {
                         Request::Start(id,epoch) => (id,epoch),
+                        Request::Snapshot { .. } => unreachable!("handled before locking"),
                         Request::AutoRefill{enabled,epoch,response} => {
                             let result=if response.is_closed() || !subscribed || state.epoch!=epoch || !status.synchronized || status.auto_refill.supported!=Some(true) {
                                 Err(Error::Conflict("Printer connection or auto refill support changed"))
@@ -1132,22 +1285,13 @@ async fn run(
                 }
             }
         };
-        {
-            let mut state = state.lock().await;
-            let epoch = state.epoch;
-            state.disconnected();
-            if state.link.failed(reason, now()) {
-                tracing::warn!(
-                    printer,
-                    epoch,
-                    reason,
-                    failures = state.link.failures,
-                    "P1 MQTT disconnected; retrying every 5 seconds (repeats are summarized every 10 minutes)"
-                );
-            }
-            persist(inventory.as_ref(), &mut state);
-            log_phase(&printer, &mut last_phase, &state);
-        }
+        connection_ended(
+            &printer,
+            &mut *state.lock().await,
+            reason,
+            inventory.as_ref(),
+            &mut last_phase,
+        );
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }

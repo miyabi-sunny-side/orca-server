@@ -138,6 +138,8 @@ pub struct Peer {
     pub received: Arc<AtomicBool>,
     pub allow_options: Arc<AtomicBool>,
     pub gate: Arc<AtomicBool>,
+    /// When set, every `pushall` is answered with this report, as a printer does.
+    pub pushall_reply: Arc<Mutex<Option<Vec<u8>>>>,
     stopped: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     serial: String,
@@ -165,6 +167,7 @@ impl Peer {
             received: Arc::default(),
             allow_options: Arc::default(),
             gate: Arc::default(),
+            pushall_reply: Arc::default(),
             stopped: Arc::default(),
             thread: None,
             serial: serial.to_owned(),
@@ -176,6 +179,7 @@ impl Peer {
         let gate = peer.gate.clone();
         let serial = serial.to_owned();
         let allow_options = peer.allow_options.clone();
+        let pushall_reply = peer.pushall_reply.clone();
         peer.thread = Some(thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 match socket.accept() {
@@ -202,6 +206,7 @@ impl Peer {
                                 &records,
                                 &stopped,
                                 &allow_options,
+                                &pushall_reply,
                             )
                         };
                         if let Err(e) = outcome
@@ -284,6 +289,7 @@ fn mqtt_session(
     records: &Mutex<Records>,
     stopped: &AtomicBool,
     allow_options: &AtomicBool,
+    pushall_reply: &Mutex<Option<Vec<u8>>>,
 ) -> io::Result<()> {
     let (header, login) = read_packet(peer)?;
     if header != 0x10
@@ -350,6 +356,12 @@ fn mqtt_session(
                 return Err(invalid("invalid pushall"));
             }
             seen.requests.push(value);
+            if let Some(reply) = pushall_reply.lock().unwrap().clone() {
+                let mut body = u16::try_from(report.len()).unwrap().to_be_bytes().to_vec();
+                body.extend(report.as_bytes());
+                body.extend(reply);
+                peer.write_all(&packet(0x30, &body))?;
+            }
         } else if value["print"]["command"] == "print_option"
             && allow_options.load(Ordering::SeqCst)
         {

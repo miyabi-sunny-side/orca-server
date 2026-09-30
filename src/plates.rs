@@ -15,6 +15,8 @@ pub enum Error {
     Unavailable(&'static str),
     Conflict(&'static str),
     Timeout,
+    /// A device did not answer in time (504 with this message).
+    NoReply(&'static str),
     NotFound,
     Io(io::Error),
 }

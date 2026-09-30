@@ -249,6 +249,9 @@ pub struct State {
     pub snapshot_request: Option<(u64, &'static str, bool)>,
     /// Latest AMS exist/reading/read-done bits as reported (log projection).
     pub ams_bits: Option<Value>,
+    /// Latest full report with the AMS, and a wake-up for requests waiting on one.
+    pub full_ams: Option<FullAms>,
+    pub full_ams_seen: std::sync::Arc<tokio::sync::Notify>,
     pub link: Link,
     pub saves: Saves,
     /// Latest FTPS failure: time and the stage that failed.
@@ -276,6 +279,8 @@ impl State {
             ams_report_at: None,
             snapshot_request: None,
             ams_bits: None,
+            full_ams: None,
+            full_ams_seen: std::sync::Arc::default(),
             link: Link::default(),
             saves: Saves::default(),
             upload_failure: None,
@@ -304,6 +309,7 @@ impl State {
         link.synchronized_at = None;
         let saves = std::mem::take(&mut self.saves);
         let upload_failure = self.upload_failure.take();
+        let full_ams = (self.full_ams.take(), self.full_ams_seen.clone());
         let counts = (
             self.reports,
             self.ignored,
@@ -323,6 +329,7 @@ impl State {
             self.snapshot_request,
             self.ams_bits,
         ) = counts;
+        (self.full_ams, self.full_ams_seen) = full_ams;
         self.link = link;
         self.saves = saves;
         self.upload_failure = upload_failure;
@@ -332,6 +339,8 @@ impl State {
     }
     pub fn disconnected(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
+        // Requests waiting for a report from this connection end now.
+        self.full_ams_seen.notify_waiters();
         if let Some(start) = &mut self.start {
             start.disconnected();
             start.lost_connection();
@@ -609,6 +618,61 @@ impl Tray {
         update(&mut self.remaining_percent, raw, "remain", percent);
         self.last_seen_at = Some(now);
     }
+}
+
+/// The latest full report that carried the AMS, as applied and saved on one connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FullAms {
+    pub report: u64,
+    pub epoch: u64,
+    pub at: u64,
+    /// The AMS observation from this report was committed to the database.
+    pub saved: bool,
+    /// The AMS was still reading tray materials when it sent this report.
+    pub reading: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refresh {
+    Pending,
+    Done(FullAms),
+    Failed(&'static str),
+}
+
+/// Progress of a full-report request sent at report `floor` on connection `epoch`.
+/// Replies carry no request id, so only a newer full AMS report on that connection counts.
+pub fn refresh_state(
+    current_epoch: u64,
+    latest: Option<&FullAms>,
+    epoch: u64,
+    floor: u64,
+) -> Refresh {
+    if current_epoch != epoch {
+        return Refresh::Failed("connection");
+    }
+    match latest {
+        Some(full) if full.epoch == epoch && full.report > floor => {
+            if full.saved {
+                Refresh::Done(*full)
+            } else {
+                Refresh::Failed("save")
+            }
+        }
+        _ => Refresh::Pending,
+    }
+}
+
+/// Whether a report summary shows trays still being read. Unknown progress is not claimed.
+pub fn still_reading(summary: &Value) -> bool {
+    let bits = |key: &str| {
+        summary[key]
+            .as_str()
+            .and_then(|s| u16::from_str_radix(s, 16).ok())
+    };
+    bits("reading_bits").is_some_and(|b| b != 0)
+        || bits("exist_bits")
+            .zip(bits("read_done_bits"))
+            .is_some_and(|(exist, done)| exist & !done != 0)
 }
 
 /// A short hex/decimal field as reported, or `"invalid"`; never arbitrary text.
@@ -1355,5 +1419,73 @@ mod ams_trace_tests {
         ));
         assert_eq!(state.reports, 7);
         assert_eq!(state.ignored_count, 6);
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn material_reading_is_ongoing_until_every_present_tray_is_read() {
+        let bits = |exist: Option<&str>, reading: Option<&str>, done: Option<&str>| {
+            let mut s = json!({"ams":"object"});
+            for (key, value) in [
+                ("exist_bits", exist),
+                ("reading_bits", reading),
+                ("read_done_bits", done),
+            ] {
+                if let Some(v) = value {
+                    s[key] = json!(v);
+                }
+            }
+            s
+        };
+        assert!(still_reading(&bits(Some("b"), Some("1"), Some("0"))));
+        assert!(
+            still_reading(&bits(Some("b"), Some("0"), Some("3"))),
+            "slot 4 not read yet"
+        );
+        assert!(!still_reading(&bits(Some("b"), Some("0"), Some("b"))));
+        assert!(
+            !still_reading(&bits(Some("b"), None, None)),
+            "unknown progress is not claimed"
+        );
+        assert!(!still_reading(&bits(Some("b"), Some("invalid"), Some("b"))));
+    }
+
+    #[test]
+    fn a_refresh_completes_only_with_a_newer_full_ams_report_on_the_same_connection() {
+        let full = |report, epoch, saved| FullAms {
+            report,
+            epoch,
+            at: 1,
+            saved,
+            reading: false,
+        };
+        assert_eq!(refresh_state(3, None, 3, 10), Refresh::Pending);
+        assert_eq!(
+            refresh_state(3, Some(&full(10, 3, true)), 3, 10),
+            Refresh::Pending,
+            "not newer"
+        );
+        assert_eq!(
+            refresh_state(3, Some(&full(12, 2, true)), 3, 10),
+            Refresh::Pending,
+            "older connection"
+        );
+        assert_eq!(
+            refresh_state(3, Some(&full(12, 3, true)), 3, 10),
+            Refresh::Done(full(12, 3, true))
+        );
+        assert_eq!(
+            refresh_state(3, Some(&full(12, 3, false)), 3, 10),
+            Refresh::Failed("save")
+        );
+        assert_eq!(
+            refresh_state(4, Some(&full(12, 3, true)), 3, 10),
+            Refresh::Failed("connection")
+        );
     }
 }

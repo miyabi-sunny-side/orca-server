@@ -69,6 +69,7 @@ impl IntoResponse for Error {
             Self::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Timeout => (StatusCode::GATEWAY_TIMEOUT, "OrcaSlicer timed out"),
+            Self::NoReply(message) => (StatusCode::GATEWAY_TIMEOUT, message),
             Self::NotFound => (StatusCode::NOT_FOUND, "Requested item not found"),
             Self::Io(error) => {
                 tracing::error!(%error, "plate storage operation failed");

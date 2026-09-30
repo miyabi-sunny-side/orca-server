@@ -10,6 +10,13 @@
     busy = $state(false);
   let requested = $state<boolean | null>(null),
     message = $state("");
+  // Explicit re-read from the printer, separate from the 5-second view refresh.
+  let fetching = $state(false),
+    fetched = $state(""),
+    fetchError = $state("");
+  // Views are applied in request order, so a poll started earlier cannot hide a newer re-read.
+  let issued = 0,
+    shown = 0;
   const controller = new AbortController();
   let refreshing: Promise<void> | undefined;
   let confirmation: ReturnType<typeof setTimeout> | undefined;
@@ -17,6 +24,7 @@
   async function refresh() {
     if (refreshing) return refreshing;
     refreshing = (async () => {
+      const seq = ++issued;
       try {
         const [p, a] = await Promise.all([
           request<Printer>(`/api/printers/${id}`, {
@@ -28,6 +36,8 @@
         ]);
         if (controller.signal.aborted) return;
         printer = p;
+        if (seq < shown) return;
+        shown = seq;
         inventory = a;
         if (
           requested !== null &&
@@ -69,6 +79,35 @@
       clearTimeout(confirmation);
     };
   });
+  async function fetchFromPrinter() {
+    if (fetching) return;
+    fetching = true;
+    fetched = "";
+    fetchError = "";
+    error = "";
+    try {
+      const view = await request<
+        AmsInventory & { refresh: { report_at: number; reading: boolean } }
+      >(`/api/printers/${id}/ams/refresh`, {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      shown = ++issued;
+      inventory = view;
+      const time = new Date(view.refresh.report_at * 1000).toLocaleTimeString(
+        "ja-JP",
+        { hour: "2-digit", minute: "2-digit", second: "2-digit" },
+      );
+      fetched = view.refresh.reading
+        ? `${time}にプリンターの最新状態を反映しました。AMSはまだ材料を読み取り中です。読み取り後にもう一度更新してください。`
+        : `${time}にプリンターの最新状態を反映しました。`;
+    } catch (cause) {
+      if (!controller.signal.aborted) fetchError = (cause as Error).message;
+    } finally {
+      if (!controller.signal.aborted) fetching = false;
+    }
+  }
   async function mutate(path: string, data: unknown) {
     if (busy) return false;
     busy = true;
@@ -121,13 +160,21 @@
     <h1>{printer?.name ?? "プリンター"} · AMS</h1>
     <button
       class="btn"
-      disabled={busy}
-      onclick={() => {
-        error = "";
-        void refresh();
-      }}>状態を更新</button
+      disabled={busy || fetching}
+      aria-busy={fetching}
+      onclick={fetchFromPrinter}>状態を更新</button
     >
   </div>
+  {#if fetching}<p class="fetch" role="status">
+      <span class="spinner" aria-hidden="true"
+      ></span>プリンターへ最新の状態を要求しています…
+    </p>
+  {:else if fetchError}<div class="notice">
+      <p role="alert">
+        {fetchError}「状態を更新」から再試行できます。
+      </p>
+    </div>
+  {:else if fetched}<p class="fetch" role="status">{fetched}</p>{/if}
   {#if error}<div class="notice"><p role="alert">{error}</p></div>{/if}
   {#if loading}<p class="state" role="status">読み込んでいます…</p>
   {:else if inventory}
@@ -188,6 +235,9 @@
 <style lang="sass">
   .page-heading
     margin-top: var(--sp-3)
+  .fetch
+    font-size: var(--fs-sm)
+    color: var(--c-muted)
   .slots
     list-style: none
     padding: 0
