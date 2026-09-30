@@ -178,6 +178,7 @@ AMSの各unitは`id`、`humidity`、`trays`を持ちます。湿度は機器が�
 trayは`id`、`present`、`material`、`color`、`remaining_percent`のほか、材料ID・銘柄・タグ・温度範囲・最終観測時刻を持ちます。
 台帳との対応と永続化は[材料管理ガイド](filaments.md)を参照してください。
 在席状態が不明なら`present`は`null`、空のトレイでは材料情報を解除します。色はRRGGBBAAです。
+在席は本体の`tray_exist_bits`だけで判断します。電源投入後の読取中はIDだけのtrayが届きますが、それは材料情報が未取得という意味で、取り外しとは扱いません。差分では変化のないビットが省略されるため、読み取られたtrayの材料はそのまま反映します。
 AMS IDは0〜255を保持し、各trayは0〜3です。在席ビットで確認できるのは従来AMSのunit 0〜3です。
 未確認のIDは印刷用の選択肢へ加えません。
 `current_tray`は`unit × 4 + tray`、254は外部スプール、255は選択なしです。

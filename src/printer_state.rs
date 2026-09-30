@@ -526,12 +526,10 @@ impl State {
                             });
                         }
                         let tray = unit.trays.iter_mut().find(|tray| tray.id == id).unwrap();
+                        // An id-only tray has no material data (for example, not read yet).
+                        // Presence comes only from tray_exist_bits, as in BambuStudio: diffs omit
+                        // unchanged bits, so clearing a bit here would later erase the read tray.
                         if raw.len() == 1 {
-                            if !report.contains_key("tray_exist_bits")
-                                && let Some(mask) = &mut self.tray_bits
-                            {
-                                *mask &= !tray_bit(unit.id, id).unwrap_or(0);
-                            }
                             *tray = Tray {
                                 id,
                                 present: Some(false),
@@ -867,7 +865,12 @@ mod tests {
             12,
         );
         let tray = &state.status(12).ams.unwrap().units[0].trays[0];
-        assert_eq!(tray.present, Some(false));
+        assert_eq!(
+            tray.present,
+            Some(true),
+            "presence comes from tray_exist_bits"
+        );
+        assert!(tray.material.is_none());
         assert!(
             tray.tag_uid.is_none() && tray.profile_id.is_none() && tray.temperature_max.is_none()
         );
@@ -931,10 +934,13 @@ mod tests {
             json!({"command":"push_status","msg":1,"ams":{"ams":[{"id":"0","tray":[{"id":"1"}]}]}}),
             101,
         );
+        let tray = &state.status(101).ams.unwrap().units[0].trays[1];
         assert_eq!(
-            state.status(101).ams.unwrap().units[0].trays[1].present,
-            Some(false)
+            tray.present,
+            Some(true),
+            "presence comes from tray_exist_bits"
         );
+        assert_eq!(tray.material, None, "an id-only tray has no material data");
         push(&mut state, full(), 101);
         push(
             &mut state,

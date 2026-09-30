@@ -233,3 +233,70 @@ fn saved_observations_name_each_assignment_change_and_its_reason() {
     assert!(absent.changes.iter().all(|c| c.reason == "unreported"));
     assert_eq!(absent.saved, 3, "the empty slot also loses its presence");
 }
+
+/// P1S power-up: slots are read one by one. Unread slots are reported with only their id,
+/// while `tray_exist_bits` (feed sensors) is already final and so is absent from later diffs.
+#[test]
+fn power_up_reading_keeps_every_loaded_slot_once_it_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+    seed(&db);
+    let mut state = State::new(true);
+    state.connected();
+    let black = |id: &str| json!({"id":id,"tray_type":"PLA","tray_color":"000000FF","tray_info_idx":"GFA01","tag_uid":format!("black-{id}")});
+    let white = json!({"id":"3","tray_type":"PLA","tray_color":"FFFFFFFF","tray_info_idx":"GFA01","tag_uid":"white-3"});
+    let unread = |id: &str| json!({"id":id});
+    let diff = |trays: Value, bits: Value| {
+        let mut ams = json!({"ams":[{"id":"0","tray":trays}]});
+        ams.as_object_mut()
+            .unwrap()
+            .extend(bits.as_object().unwrap().clone());
+        json!({"print":{"command":"push_status","msg":1,"ams":ams}})
+    };
+    observe(
+        &db,
+        &mut state,
+        &json!({"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,
+        "ams":{"tray_exist_bits":"b","tray_reading_bits":"1","tray_read_done_bits":"0",
+            "ams":[{"id":"0","tray":[unread("0"),unread("1"),unread("2"),unread("3")]}]}}}),
+    );
+    observe(
+        &db,
+        &mut state,
+        &diff(
+            json!([black("0"), unread("1"), unread("2"), unread("3")]),
+            json!({"tray_reading_bits":"2","tray_read_done_bits":"1"}),
+        ),
+    );
+    observe(
+        &db,
+        &mut state,
+        &diff(
+            json!([black("0"), black("1"), unread("2"), unread("3")]),
+            json!({"tray_reading_bits":"8","tray_read_done_bits":"3"}),
+        ),
+    );
+    observe(
+        &db,
+        &mut state,
+        &diff(
+            json!([black("0"), black("1"), unread("2"), white]),
+            json!({"tray_reading_bits":"0","tray_read_done_bits":"b"}),
+        ),
+    );
+    let slots = db.ams_slots("p").unwrap();
+    let seen: Vec<_> = slots
+        .iter()
+        .map(|s| (s.slot_index, s.reported.present, s.filament_id.as_deref()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (0, Some(true), Some("black")),
+            (1, Some(true), Some("black")),
+            (2, Some(false), None),
+            (3, Some(true), Some("white"))
+        ]
+    );
+    assert_eq!(order(&db).len(), 2, "both black slots can print");
+}

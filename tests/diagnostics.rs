@@ -273,3 +273,43 @@ fn ams_reports_are_traced_from_receipt_to_committed_assignments() {
     until(|| rig.slot(0)["reported"]["present"] == true, 12);
     rig.check();
 }
+
+#[test]
+fn slots_read_one_by_one_after_power_up_stay_loaded() {
+    let mut rig = Rig::new("ams-power-up-reading");
+    rig.launch();
+    rig.seed();
+    let requests = rig.broker.requests().len();
+    rig.broker.action(Action::Disconnect);
+    until(|| rig.broker.requests().len() > requests, 20);
+    let loaded = rig.full["print"]["ams"]["ams"][0]["tray"].clone();
+    let trays = |read: &[usize]| -> Value {
+        (0..4)
+            .map(|i| {
+                if read.contains(&i) {
+                    loaded[i].clone()
+                } else {
+                    json!({"id":i.to_string()})
+                }
+            })
+            .collect()
+    };
+    let mut report = rig.full.clone();
+    report["print"]["ams"]["ams"][0]["tray"] = trays(&[]);
+    report["print"]["ams"]["tray_reading_bits"] = json!("1");
+    rig.broker.send(&report);
+    until(|| rig.slot(0)["reported"]["material"].is_null(), 12);
+    for read in [&[0][..], &[0, 3][..]] {
+        rig.broker
+            .send(&json!({"print":{"command":"push_status","msg":1,
+            "ams":{"ams":[{"id":"0","tray":trays(read)}],"tray_read_done_bits":"9"}}}));
+    }
+    until(|| rig.slot(3)["reported"]["material"] == "PLA", 12);
+    for index in [0, 3] {
+        let slot = rig.slot(index);
+        assert_eq!(slot["reported"]["present"], true, "slot {index}");
+        assert_eq!(slot["reported"]["material"], "PLA", "slot {index}");
+    }
+    assert_eq!(rig.slot(1)["reported"]["present"], false);
+    rig.check();
+}
