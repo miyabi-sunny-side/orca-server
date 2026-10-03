@@ -430,6 +430,7 @@ impl Printer {
         let state = Arc::new(Mutex::new(initial));
         let (starts, receiver) = mpsc::channel(1);
         let observation = if let Some(config) = &config {
+            crate::journal::secret(&config.access_code);
             Some(Arc::new(Observation(
                 tokio::spawn(run(
                     config.options()?,
@@ -686,12 +687,13 @@ impl Printer {
         drop(state);
         let printer = self.clone();
         let transfer = attempt.clone();
+        let id = device.id.clone();
         tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                Duration::from_mins(5),
-                upload(&config, &transfer.filename(), &bytes),
-            )
-            .await;
+            let file = transfer.filename();
+            let ftps = |body| crate::journal::event(&id, Some(epoch), "ftps", body);
+            ftps(serde_json::json!({"event":"upload","file":file,"bytes":bytes.len()}));
+            let result =
+                tokio::time::timeout(Duration::from_mins(5), upload(&config, &file, &bytes)).await;
             let mut state = printer.state.lock().await;
             let Some(start) = state.start.as_mut().filter(|s| s.id == transfer.id) else {
                 return;
@@ -701,6 +703,7 @@ impl Printer {
                 Ok(Err(step)) => Some(step),
                 Err(_) => Some("timeout"),
             };
+            ftps(serde_json::json!({"event":"result","file":file,"failed_stage":failed}));
             if failed.is_some() {
                 start.fail(
                     Phase::UploadFailed,
@@ -739,6 +742,7 @@ async fn on_report(
     inventory: Option<&(crate::database::Database, crate::database::Device)>,
     payload: &[u8],
 ) {
+    crate::journal::report(printer, state.epoch, payload);
     let value = serde_json::from_slice::<serde_json::Value>(payload).ok();
     let summary = value.as_ref().and_then(crate::printer_state::ams_summary);
     let before = summary.as_ref().and_then(|_| state.status(now()).ams);
@@ -894,10 +898,17 @@ fn connection_ended(
     printer: &str,
     state: &mut State,
     reason: &'static str,
+    detail: Option<&str>,
     inventory: Option<&(crate::database::Database, crate::database::Device)>,
     last_phase: &mut Option<(String, Phase)>,
 ) {
     let epoch = state.epoch;
+    crate::journal::event(
+        printer,
+        Some(epoch),
+        "connection",
+        serde_json::json!({"event":"disconnected","reason":reason,"detail":detail}),
+    );
     state.disconnected();
     if state.link.failed(reason, now()) {
         tracing::warn!(
@@ -948,6 +959,7 @@ async fn snapshot(
 ) -> bool {
     let sent = request_snapshot(client, topic).is_ok();
     let mut state = state.lock().await;
+    crate::journal::request(printer, state.epoch, SNAPSHOT, sent);
     state.snapshot_request = Some((now(), trigger, sent));
     tracing::info!(
         printer,
@@ -971,6 +983,7 @@ fn send_start(
     inventory: Option<&(crate::database::Database, crate::database::Device)>,
 ) {
     let status = state.status(now());
+    let state_epoch = state.epoch;
     let Some(start) = state
         .start
         .as_mut()
@@ -994,18 +1007,23 @@ fn send_start(
         start.sent(now());
         let saved =
             inventory.is_some_and(|(db, device)| db.persist_attempt(&device.id, start).is_ok());
-        if !saved {
+        if saved {
+            let command = start.command().to_string();
+            let queued = client
+                .try_publish(request, QoS::AtMostOnce, false, command.clone())
+                .is_ok();
+            let printer = inventory.map_or("", |(_, device)| device.id.as_str());
+            crate::journal::request(printer, state_epoch, command.as_bytes(), queued);
+            if !queued {
+                start.fail(
+                    Phase::NotSent,
+                    "MQTT publish was not queued; no start command was sent",
+                );
+            }
+        } else {
             start.fail(
                 Phase::NotSent,
                 "Cannot persist the start request; no start command was sent",
-            );
-        } else if client
-            .try_publish(request, QoS::AtMostOnce, false, start.command().to_string())
-            .is_err()
-        {
-            start.fail(
-                Phase::NotSent,
-                "MQTT publish was not queued; no start command was sent",
             );
         }
     }
@@ -1168,25 +1186,45 @@ fn transition(
     Some((before, start.phase))
 }
 
+const SNAPSHOT: &[u8] =
+    br#"{"pushing":{"sequence_id":"0","command":"pushall","version":1,"push_target":1}}"#;
+
 fn request_snapshot(
     client: &AsyncClient,
     topic: &str,
 ) -> std::result::Result<(), rumqttc::ClientError> {
-    client.try_publish(
-        topic,
-        QoS::AtMostOnce,
-        false,
-        br#"{"pushing":{"sequence_id":"0","command":"pushall","version":1,"push_target":1}}"#
-            .to_vec(),
-    )
+    client.try_publish(topic, QoS::AtMostOnce, false, SNAPSHOT.to_vec())
 }
 
-fn queue_refill(client: &AsyncClient, topic: &str, enabled: bool) -> Result<()> {
+fn queue_refill(
+    client: &AsyncClient,
+    topic: &str,
+    enabled: bool,
+    printer: &str,
+    epoch: u64,
+) -> Result<()> {
     let sequence = (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string();
-    let payload = serde_json::json!({"print":{"command":"print_option","sequence_id":sequence,"auto_switch_filament":enabled}});
-    client
-        .try_publish(topic, QoS::AtMostOnce, false, payload.to_string())
-        .map_err(|_| Error::Unavailable("Setting request was not queued"))
+    let payload = serde_json::json!({"print":{"command":"print_option","sequence_id":sequence,"auto_switch_filament":enabled}}).to_string();
+    let queued = client
+        .try_publish(topic, QoS::AtMostOnce, false, payload.clone())
+        .is_ok();
+    crate::journal::request(printer, epoch, payload.as_bytes(), queued);
+    queued
+        .then_some(())
+        .ok_or(Error::Unavailable("Setting request was not queued"))
+}
+
+/// The TLS library's own description of a failed handshake; it carries no packets or credentials.
+fn tls_detail(error: &rumqttc::ConnectionError) -> Option<String> {
+    use rumqttc::{ConnectionError, StateError};
+    match error {
+        ConnectionError::Tls(e) => Some(e.to_string()),
+        ConnectionError::Io(e) | ConnectionError::MqttState(StateError::Io(e)) => e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+            .map(ToString::to_string),
+        _ => None,
+    }
 }
 
 async fn run(
@@ -1212,21 +1250,24 @@ async fn run(
         let mut subscribed = false;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         // Why this connection ended, as a safe category.
-        let reason = loop {
+        let (reason, detail) = loop {
             tokio::select! {
                 event = events.poll() => match event {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                         let mut state = state.lock().await;
                         state.connected();
                         state.link.connected(now());
+                        crate::journal::event(&printer, Some(state.epoch), "connection", serde_json::json!({"event":"connected"}));
                         tracing::info!(printer, epoch = state.epoch, "P1 MQTT connected; requesting a full report");
                         drop(state);
-                        if client.try_subscribe(&report, QoS::AtMostOnce).is_err() { break "subscribe"; }
+                        if client.try_subscribe(&report, QoS::AtMostOnce).is_err() { break ("subscribe", None); }
                     }
                     Ok(Event::Incoming(Incoming::SubAck(ack))) => {
-                        if ack.return_codes.len() != 1 || !matches!(ack.return_codes[0], SubscribeReasonCode::Success(_)) { break "subscribe"; }
+                        let ok = ack.return_codes.len() == 1 && matches!(ack.return_codes[0], SubscribeReasonCode::Success(_));
+                        crate::journal::event(&printer, Some(state.lock().await.epoch), "connection", serde_json::json!({"event":"subscribed","ok":ok}));
+                        if !ok { break ("subscribe", None); }
                         subscribed = true;
-                        if !snapshot(&printer, &state, &client, &request, "subscribed").await { break "publish"; }
+                        if !snapshot(&printer, &state, &client, &request, "subscribed").await { break ("publish", None); }
                         refresh.reset();
                     }
                     Ok(Event::Incoming(Incoming::Publish(message))) if subscribed && message.topic == report && !message.retain => {
@@ -1236,7 +1277,7 @@ async fn run(
                     }
                     Ok(_) => {},
                     // Never log library errors or packets: they may contain credentials.
-                    Err(error) => break classify(&error),
+                    Err(error) => break (classify(&error), tls_detail(&error)),
                 },
                 Some(command) = starts.recv() => {
                     let command = match command {
@@ -1255,7 +1296,7 @@ async fn run(
                             let result=if response.is_closed() || !subscribed || state.epoch!=epoch || !status.synchronized || status.auto_refill.supported!=Some(true) {
                                 Err(Error::Conflict("Printer connection or auto refill support changed"))
                             } else {
-                                queue_refill(&client,&request,enabled)
+                                queue_refill(&client,&request,enabled,&printer,state.epoch)
                             };
                             let _=response.send(result);
                             continue;
@@ -1278,10 +1319,10 @@ async fn run(
                     persist(inventory.as_ref(), &mut state);
                     log_phase(&printer, &mut last_phase, &state);
                     // Drop this client's queue so timed-out writes cannot be sent later.
-                    if timed_out { break if synchronized { "start_timeout" } else { "unsynchronized" }; }
+                    if timed_out { break (if synchronized { "start_timeout" } else { "unsynchronized" }, None); }
                 }
                 _ = refresh.tick() => {
-                    if subscribed && !state.lock().await.status(now()).synchronized && !snapshot(&printer, &state, &client, &request, "refresh").await { break "publish"; }
+                    if subscribed && !state.lock().await.status(now()).synchronized && !snapshot(&printer, &state, &client, &request, "refresh").await { break ("publish", None); }
                 }
             }
         };
@@ -1289,6 +1330,7 @@ async fn run(
             &printer,
             &mut *state.lock().await,
             reason,
+            detail.as_deref(),
             inventory.as_ref(),
             &mut last_phase,
         );

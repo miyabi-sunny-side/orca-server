@@ -231,6 +231,7 @@ pub fn start(store: &Store) -> Result<Option<tokio::task::JoinHandle<()>>> {
     let Some(value) = env("DISCORD_WEBHOOK_URL")? else {
         return Ok(None);
     };
+    crate::journal::secret(&value);
     let webhook = webhook_url(&value)?;
     let public = env("ORCA_PUBLIC_URL")?
         .as_deref()

@@ -208,6 +208,47 @@ AMS IDは0〜255を保持し、各trayは0〜3です。在席ビットで確認�
 時刻は取得した瞬間のメモリとDBの値で、観測の世代は`queue_generation`と`connection.epoch`で区別します。
 アクセスコード・証明書・Webhook URL・MQTTパケット・G-codeやモデルは返しません。任意のSQLやファイル読取り、復旧操作の入口にはなりません。
 
+## 通信記録API
+
+`GET /api/journal`は、本体との通信とアプリの警告を記録順に返します。本番で何が届き、何を送ったかを、別の端末からcurlやブラウザで確認できます。
+他のAPIと同じアクセス境界で提供し、読み取り専用です。画面やMCPからは使いません。
+
+```sh
+curl 'http://127.0.0.1:3000/api/journal?printer=p1&kind=report&limit=20'
+```
+
+| 引数 | 内容 |
+| --- | --- |
+| `printer` | プリンターID。CLIの記録は空文字列です。 |
+| `kind` | `report`（受信報告）、`request`（送信要求）、`connection`、`ftps`、`cli`、`log`。 |
+| `direction` | `in`（受信）または`out`（送信）。`report`と`request`だけが方向を持ちます。 |
+| `since`、`until` | Unixミリ秒。両端を含みます。 |
+| `limit` | 1〜1000件、既定100件。条件に合う新しい側から数え、古い順に返します。 |
+
+応答は`{"entries":[...],"truncated":bool}`です。`truncated`が`true`なら、より古い記録が残っています。最初の記録の`at`より前を`until`に指定して遡ります。
+不正な引数は400です。各記録は連番`seq`、時刻`at`（Unixミリ秒）、`printer`、接続`epoch`、`kind`と内容`body`を持ちます。
+
+| `kind` | `body` |
+| --- | --- |
+| `report` | 受信したJSONそのもの（JSONでなければ文字列）。 |
+| `request` | 送信した要求（全状態要求、印刷開始、自動補充の設定。`sequence_id`を含む）。`queued`は送信キューへ入ったか。 |
+| `connection` | `event`＝`connected`、`subscribed`（`ok`）、`disconnected`（[ログ](#ログ)と同じ`reason`、TLSの失敗なら`detail`）。 |
+| `ftps` | `event`＝`upload`（`file`、`bytes`）、`result`（失敗段階`failed_stage`、成功なら`null`）。 |
+| `cli` | OrcaSlicerの`plate`、`phase`、終了状態`status`（`timeout`を含む）、所要秒`seconds`、標準出力・標準エラーの末尾2KiB。 |
+| `log` | アプリのwarn以上のログ。`level`、`target`、各項目と`message`。 |
+
+記録は`PLATES_DIR`の`journal/`へJSON Linesで書き、再起動後も残ります。SQLiteやそのバックアップには含みません。
+合計は`JOURNAL_MAX_BYTES`（既定128MiB）以下で、8分割したファイルを古いものから削除します。起動ごとに新しいファイルから書き始めます。
+
+アクセスコード・Webhook URLの値と、名前に`access_code`・`password`・`passwd`を含む項目は`[redacted]`へ置き換えてから保存します。
+証明書、G-codeやモデルの中身、通信ライブラリ自身のログ（CONNECTの認証情報を含み得るため）は記録しません。
+受信報告はタグUID、tray UUIDなど本体が送った値をそのまま含みます。
+
+### 本番の記録を再現する
+
+`orca_server::journal::reports`は、記録または応答のJSONから受信報告を順に取り出します。
+隔離したMQTTの相手からこれを流し直すと、本番で届いた順の報告を開発環境で再現できます。例は`tests/journal.rs`の再生テストです。
+
 ## ログ
 
 状態変化は`printer`、`job`、`attempt`、接続`epoch`で関連付けられます。
@@ -226,12 +267,12 @@ AMSの受信から材料割当の保存までは、同じ受信番号`report`で
 - `AMS assignment changed`: transactionのcommit後に、呼出元`source`（`mqtt`、画面・キュー取得の`status`、`inventory`、`resolve`）、元の報告`report`・`report_at`、スロットごとの割当前後・割当元と理由`reason`（`new_slot`、`identity_changed`、`rematched`、`unreported`）。
 
 「届いていない」と「届いたが変化なし・無視」は、診断APIの`observation.reports`・`ams_reports`・`last_ignored`と、`LOG_LEVEL=debug`での上記debug行で区別します。
-タグUID、tray UUID、機器シリアル、アクセスコードは記録しません。サーバーが受信していないことだけでは、本体の未送信と経路での欠落を区別できません。
+これらのログ行にはタグUID、tray UUID、機器シリアル、アクセスコードを出しません。サーバーが受信していないことだけでは、本体の未送信と経路での欠落を区別できません。
 
 ## 接続できない場合
 
-`connection`、[診断API](#診断api)の`connection.disconnect_reason`、サーバーログを確認し、IP・シリアル・アクセスコード・証明書・到達できるポートを照合してください。
-MQTTパケットやFTPSの応答、ライブラリのエラー詳細は、秘密値の混入を避けるためログへ出さず、安全な分類だけを残します。
+`connection`、[診断API](#診断api)の`connection.disconnect_reason`、[通信記録](#通信記録api)の`connection`と`ftps`、サーバーログを確認し、IP・シリアル・アクセスコード・証明書・到達できるポートを照合してください。
+ライブラリのログとFTPSの応答は、秘密値の混入を避けるため出さず、安全な分類だけを残します。TLSの失敗はTLSライブラリの説明を`detail`へ残します。
 
 実装は[Bambu Studioの状態処理](https://github.com/bambulab/BambuStudio/blob/77b9dd94d1e3c432d5e74a18ab8de146ccf3b7c7/src/slic3r/GUI/DeviceManager.cpp)と、
 [ha-bambulabのLAN接続](https://github.com/greghesp/ha-bambulab/blob/cd67ed90e08561175a831f35b45773fe427996d7/custom_components/bambu_lab/pybambu/bambu_client.py)、

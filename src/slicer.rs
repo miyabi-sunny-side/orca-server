@@ -205,6 +205,14 @@ impl Slicer {
                 tracing::error!(%plate, %phase, %error, "cannot start OrcaSlicer");
                 Error::Unavailable("Cannot start OrcaSlicer; check server logs")
             })?;
+        let started = std::time::Instant::now();
+        let cli = |body: serde_json::Value| {
+            let mut body = body;
+            body["plate"] = plate.into();
+            body["phase"] = phase.into();
+            body["seconds"] = started.elapsed().as_secs_f64().into();
+            crate::journal::event("", None, "cli", body);
+        };
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
         let result = tokio::time::timeout(self.timeout, async {
@@ -217,6 +225,7 @@ impl Slicer {
         .await;
         let Ok((status, stdout, stderr)) = result else {
             child.kill().await?;
+            cli(serde_json::json!({"status":"timeout"}));
             tracing::error!(%plate, %phase, "OrcaSlicer timed out and was killed");
             return Err(Error::Timeout);
         };
@@ -224,6 +233,13 @@ impl Slicer {
         let stdout = stdout?;
         let stderr = stderr?;
         tracing::info!(%plate, %phase, %status, "OrcaSlicer exited");
+        // The tail is where the CLI states why it failed; model data never reaches its streams.
+        let tail = |s: &str| s[s.floor_char_boundary(s.len().saturating_sub(2048))..].to_owned();
+        cli(serde_json::json!({
+            "status": status.to_string(),
+            "stdout_tail": tail(&stdout),
+            "stderr_tail": tail(&stderr),
+        }));
         if !status.success() {
             return Err(Error::Slicer(format!(
                 "OrcaSlicer {phase}: {} ({status}; reference {plate})",

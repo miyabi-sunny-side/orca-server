@@ -21,6 +21,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | 環境変数 | 既定値 | 内容 |
 | --- | --- | --- |
 | `PORT` | `3000` | 待受ポート。1〜65535の整数。不正な値では起動しません。 |
+| `JOURNAL_MAX_BYTES` | `134217728` | [通信記録](printer.md#通信記録api)の上限バイト数。8以上の整数。不正な値では起動しません。 |
 | `LOG_LEVEL` | `info` | `off`、`error`、`warn`、`info`、`debug`、`trace`。不正な値は`info`です。 |
 | `PLATES_DIR` | `data/plates` | プレートとSQLite台帳の保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
 | `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。モデル一覧・SCAD参照の保存/更新・試算と印刷時の取得に必要です。 |

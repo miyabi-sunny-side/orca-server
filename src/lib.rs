@@ -5,6 +5,7 @@ mod estimates;
 mod filament;
 mod file_import;
 mod history;
+pub mod journal;
 #[cfg(test)]
 #[allow(clippy::duplicate_mod)] // The isolated notification scenario also compiles shared fixtures.
 #[path = "../tests/common/legacy_schema.rs"]
@@ -75,6 +76,7 @@ struct HealthResponse {
 pub fn app() -> Router {
     let api = Router::new()
         .route("/health", get(api_health))
+        .route("/journal", get(journal::api))
         .route(
             "/about",
             get(|| async {

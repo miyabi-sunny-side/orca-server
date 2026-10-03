@@ -3,6 +3,13 @@ use tracing_subscriber::{
     prelude::*,
 };
 
+/// Protocol libraries may log malformed packets, credentials, or raw peer replies.
+fn ours(metadata: &tracing::Metadata<'_>) -> bool {
+    !["rumqttc", "suppaftp", "reqwest", "hyper", "h2"]
+        .iter()
+        .any(|prefix| metadata.target().starts_with(prefix))
+}
+
 pub fn init() {
     let level = match std::env::var("LOG_LEVEL").as_deref() {
         Ok("off") => LevelFilter::OFF,
@@ -12,16 +19,16 @@ pub fn init() {
         Ok("trace") => LevelFilter::TRACE,
         _ => LevelFilter::INFO,
     };
-    // Protocol libraries may log malformed packets, credentials, or raw peer replies.
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
                 .with_filter(level)
-                .with_filter(filter_fn(|metadata| {
-                    !["rumqttc", "suppaftp", "reqwest", "hyper", "h2"]
-                        .iter()
-                        .any(|prefix| metadata.target().starts_with(prefix))
-                })),
+                .with_filter(filter_fn(ours)),
+        )
+        .with(
+            orca_server::journal::Layer
+                .with_filter(LevelFilter::WARN)
+                .with_filter(filter_fn(ours)),
         )
         .init();
 }

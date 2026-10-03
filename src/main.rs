@@ -16,6 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let root = std::path::PathBuf::from(
         std::env::var_os("PLATES_DIR").unwrap_or_else(|| "data/plates".into()),
     );
+    orca_server::journal::open(&root)?;
     let plates = orca_server::plates::Store::open(&root)?;
     let _notifications = orca_server::notifications::start(&plates)?;
     let source = match std::env::var("SCAD_LIVE_URL") {
