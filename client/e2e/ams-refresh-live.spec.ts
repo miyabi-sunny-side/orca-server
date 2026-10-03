@@ -25,12 +25,12 @@ test("状態を更新 asks the printer, waits for its report and keeps the page 
 
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto("/printers");
-  await page.getByRole("link", { name: "AMSの材料" }).first().click();
+  await page.getByRole("link", { name: "AMS", exact: true }).first().click();
   await expect(page).toHaveURL(/\/printers\/p1\/ams$/);
   const row = (n: number) =>
     page.getByRole("listitem").filter({ has: page.getByRole("button", { name: `AMS 0 スロット ${n}の詳細`, exact: true }) });
   const refresh = page.getByRole("button", { name: "状態を更新", exact: true });
-  const fetching = page.getByRole("status").filter({ hasText: "プリンターへ最新の状態を要求しています" });
+  const fetching = page.getByRole("status").filter({ hasText: "本体から取得しています" });
   const done = page.getByRole("status").filter({ hasText: "プリンターの最新状態を反映しました" });
   await expect(row(2).getByRole("button", { name: /材料を選択/ })).toContainText("空");
 
@@ -98,7 +98,6 @@ test("状態を更新 asks the printer, waits for its report and keeps the page 
   await control({ disconnect: true });
   const alert = page.getByRole("alert").filter({ hasText: "プリンターに接続できないため" });
   await expect(alert).toBeVisible();
-  await expect(alert).toContainText("「状態を更新」から再試行できます");
   await expect(refresh).toBeEnabled();
   await shoot("failed");
   await control({ reply: c.white });

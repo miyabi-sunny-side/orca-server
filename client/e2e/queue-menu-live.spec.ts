@@ -64,7 +64,7 @@ test("queue copies preserve the plate and running attempt, survive source remova
     await request.get(`/api/plates/${context.plate.id}`)
   ).json();
   expect(saved.models[0].quantity).toBe(10);
-  await page.getByRole("button", { name: "空のプレートで印刷を開始" }).click();
+  await page.getByRole("button", { name: "印刷", exact: true }).click();
   await expect
     .poll(async () => (await peer()).prints.length, { timeout: 60_000 })
     .toBe(1);
@@ -93,7 +93,7 @@ test("queue copies preserve the plate and running attempt, survive source remova
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "同じ要求を再確認" })
+    .getByRole("button", { name: "結果を再確認" })
     .click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(sent).toHaveLength(2);

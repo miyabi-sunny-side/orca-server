@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { request, type Plate, type Filament } from "../lib/api";
+  import Icon from "../lib/Icon.svelte";
   import StlPreview from "../lib/StlPreview.svelte";
   import PlateEditor from "../lib/PlateEditor.svelte";
   import PlateQueueAdd from "../lib/PlateQueueAdd.svelte";
@@ -65,14 +66,17 @@
             />{/key}
         {/if}
         {#if plate.imported}
-          <p>
-            <a
-              href={`/api/plates/${plate.id}/original`}
-              download={plate.imported.file_name}>元の3MFを取得</a
-            >
+          <p class="file-row">
             <span class="caption"
               >{plate.imported.file_name} · {plate.imported.selection
                 .name}</span
+            >
+            <a
+              class="icon-btn"
+              href={`/api/plates/${plate.id}/original`}
+              download={plate.imported.file_name}
+              aria-label="元の3MFを取得"
+              title="元の3MFを取得"><Icon name="download" /></a
             >
           </p>
         {/if}
@@ -115,11 +119,13 @@
             </p>
           </div>
           <button
-            class="btn"
+            class="icon-btn large"
             disabled={queueBusy}
+            aria-label="構成を編集"
+            title="構成を編集"
             onclick={() => {
               editing = true;
-            }}>構成を編集</button
+            }}><Icon name="pencil" /></button
           >
           <ul class="plate-list">
             {#each plate.models as model}<li class="plate-row">
@@ -129,26 +135,20 @@
                   onclick={() => (selectedModelId = model.id)}
                 >
                   <strong>{model.name}</strong><span>{model.quantity}個</span>
-                  <span class="caption"
-                    >{selectedModel?.id === model.id
-                      ? "表示中"
-                      : "形状を見る"}</span
-                  >
                 </button>
                 {#if model.source}<span class="caption"
-                    >SCAD参照: {model.source}</span
+                    >SCAD: {model.source}</span
                   >{:else}<a
+                    class="icon-btn"
                     href={`/api/plates/${plate.id}/files/${model.id}`}
                     download={model.name}
-                    >{plate.imported?.model_id === model.id
+                    aria-label={plate.imported?.model_id === model.id
                       ? "確認用STLを取得"
-                      : "アップロードした元STLを取得"}</a
+                      : "アップロードした元STLを取得"}
+                    ><Icon name="download" /></a
                   >{/if}
               </li>{/each}
           </ul>
-          <p class="caption">
-            保存すると最新モデルから試算します。条件の編集は未準備の待機分へ反映されます。印刷はキューで手動開始します。
-          </p>
         {/if}
       </div>
       {#if !editing && selectedModel}<StlPreview
@@ -198,6 +198,10 @@
     .detail-layout:not(.editing)
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)
 
+  .file-row
+    display: flex
+    align-items: center
+    gap: var(--sp-2)
   .conditions
     margin-bottom: var(--sp-3)
     overflow-wrap: anywhere

@@ -270,12 +270,10 @@
       >
     </p>{/if}
   {#if pending && !busy}<div class="notice">
-      <p>
-        追加の結果が不明です。キューを確認し、同じ要求の結果を再確認してください。
-      </p>
+      <p>追加の結果が不明です</p>
       <div class="actions">
-        <button class="btn" onclick={() => void add()}>同じ要求を再確認</button
-        ><a href={`/queue?printer_id=${encodeURIComponent(pending.printerId)}`}
+        <button class="btn" onclick={() => void add()}>結果を再確認</button><a
+          href={`/queue?printer_id=${encodeURIComponent(pending.printerId)}`}
           >キューを見る</a
         >
       </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../lib/Icon.svelte";
   import { onMount } from "svelte";
   import {
     request,
@@ -511,10 +512,16 @@
           >
         </li>{/each}
     </ul>
-    <a href="/printers">プリンターとAMSを確認</a>
   {:else if product}
-    <p class="caption">{product.vendor} · {product.material}</p>
-    <a href={`/filaments/${id}/edit`}>共通情報を編集</a>
+    <p class="caption product-line">
+      {product.vendor} · {product.material}
+      <a
+        class="icon-btn"
+        href={`/filaments/${id}/edit`}
+        aria-label="共通情報を編集"
+        title="共通情報を編集"><Icon name="pencil" /></a
+      >
+    </p>
     <div class="page-heading">
       <h2>色</h2>
       <a class="btn primary" href={`/filaments/${id}/colors/new`}>色を追加</a>
@@ -534,7 +541,7 @@
     </ul>
     <section class="settings">
       <div class="page-heading">
-        <h2>全色に共通の機種別設定</h2>
+        <h2>機種別設定</h2>
         <a class="btn" href={`/filaments/${id}/settings/new`}>設定を追加</a>
       </div>
       {#if !settings.length}<p class="help">
@@ -596,6 +603,10 @@
 </section>
 
 <style lang="sass">
+  .product-line
+    display: flex
+    align-items: center
+    gap: var(--sp-2)
   .page-heading
     margin-top: var(--sp-3)
   h1, .settings, .colors

@@ -123,7 +123,6 @@
     }}
   /></label
 >
-<p class="caption">STLは複数選べます。3MFは1ファイルずつ取り込みます。</p>
 {#if plates.length > 1}
   <label class="field"
     ><span>取り込むプレート</span><select
@@ -188,9 +187,6 @@
     gap: var(--sp-5)
     > div
       min-width: 0
-  .caption
-    margin-top: calc(-1 * var(--sp-2))
-    margin-bottom: var(--sp-4)
   @media (min-width: 768px)
     .import-layout
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)

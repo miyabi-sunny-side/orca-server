@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Icon from "../lib/Icon.svelte";
   import StrengthFields from "../lib/StrengthFields.svelte";
   import { emptyStrength } from "../lib/plate";
   import {
@@ -245,9 +246,6 @@
             >{/each}
         </select>
       </label>
-      <p class="caption">
-        この機器の設定とAMS材料を初期入力に使います。保存済みの条件は変わりません。
-      </p>
       {#if defaultSaved}<p role="status">
           初期値に使うプリンターを保存しました。
         </p>{/if}
@@ -278,10 +276,8 @@
           >
           <p class="caption">
             {printer.machine?.model ?? printer.machine_profile_key} · {printer
-              .machine?.nozzle_diameter ?? "—"} mm
-          </p>
-          <p class="caption">
-            {printer.nozzle_material === "hardened_steel"
+              .machine?.nozzle_diameter ?? "—"} mm · {printer.nozzle_material ===
+            "hardened_steel"
               ? "焼入れ鋼"
               : printer.nozzle_material === "stainless_steel"
                 ? "ステンレス"
@@ -294,10 +290,19 @@
               設定したプロファイルまたは接続情報を確認してください。
             </p>{/if}
           <div class="actions">
-            <a class="btn" href={`/printers/${printer.id}/ams`}>AMSの材料</a>
-            <a class="btn" href={`/queue?printer_id=${printer.id}`}
-              >印刷キュー</a
-            ><a href={`/printers/${printer.id}`}>設定を編集</a>
+            <a class="btn" href={`/printers/${printer.id}/ams`}>AMS</a>
+            <a class="btn" href={`/queue?printer_id=${printer.id}`}>キュー</a>
+            <a
+              class="icon-btn large"
+              href={`/printers/${printer.id}/control`}
+              aria-label={`${printer.name}の本体操作`}
+              title="本体の操作"><Icon name="sliders" /></a
+            ><a
+              class="icon-btn large"
+              href={`/printers/${printer.id}`}
+              aria-label={`${printer.name}の設定を編集`}
+              title="設定を編集"><Icon name="pencil" /></a
+            >
           </div>
         </li>{/each}
     </ul>
@@ -336,9 +341,6 @@
             ><option value="hardened_steel">焼入れ鋼</option></select
           ></label
         >
-        <p class="help">
-          装着したノズルを登録します。交換後はプリンター本体の設定も合わせてください。
-        </p>
         {#if original?.status.nozzle_diameter}<p class="caption">
             本体の申告値: {original.status.nozzle_diameter} mm{original.status
               .nozzle_material
@@ -354,9 +356,6 @@
             >
           </div>{/if}
         <h2>新規プレートの初期値</h2>
-        <p class="caption">
-          印刷中も変更できます。保存済みの条件や進行中の印刷には反映しません。
-        </p>
         <label class="field"
           ><span>既定の工程</span><select
             bind:value={settings.default_process_profile_key}
@@ -379,83 +378,81 @@
               >{/each}</select
           ></label
         >
-        <h2>LAN接続</h2>
-        <label class="field"
-          ><span>IPアドレス</span><input
-            bind:value={settings.host}
-            required
-            placeholder="192.168.1.50"
-            autocomplete="off"
-          /></label
-        >
-        <label class="field"
-          ><span>シリアル番号</span><input
-            bind:value={settings.serial}
-            required
-            maxlength="64"
-            autocomplete="off"
-          /></label
-        >
-        <label class="field"
-          ><span>LANアクセスコード</span><input
-            type="password"
-            bind:value={settings.access_code}
-            required={!id}
-            maxlength="128"
-            autocomplete="new-password"
-          /></label
-        >
-        <label class="field"
-          ><span>TLS証明書（PEM）</span><textarea
-            bind:value={settings.tls_certificate}
-            required={!id}
-            rows="5"
-            spellcheck={false}
-            placeholder="-----BEGIN CERTIFICATE-----"></textarea></label
-        >
-        <p class="help">
-          接続先の証明書を照合します。{id
-            ? "アクセスコードと証明書は、空欄のまま保存すると現在の値を維持します。"
-            : "プリンターから取得し、接続先を確認した証明書を入力してください。"}
-        </p>
-        <details class="settings-details">
-          <summary>接続の詳細</summary>
+        <details class="settings-details" open={!id}>
+          <summary>LAN接続</summary>
           <label class="field"
-            ><span>MQTTポート</span><input
-              type="number"
-              min="1"
-              max="65535"
-              bind:value={settings.mqtt_port}
+            ><span>IPアドレス</span><input
+              bind:value={settings.host}
               required
+              placeholder="192.168.1.50"
+              autocomplete="off"
             /></label
           >
           <label class="field"
-            ><span>FTPSポート</span><input
-              type="number"
-              min="1"
-              max="65535"
-              bind:value={settings.ftps_port}
+            ><span>シリアル番号</span><input
+              bind:value={settings.serial}
               required
+              maxlength="64"
+              autocomplete="off"
             /></label
           >
           <label class="field"
-            ><span>カメラのポート</span><input
-              type="number"
-              min="1"
-              max="65535"
-              bind:value={settings.camera_port}
-              required
+            ><span>LANアクセスコード</span><input
+              type="password"
+              bind:value={settings.access_code}
+              required={!id}
+              maxlength="128"
+              autocomplete="new-password"
             /></label
           >
           <label class="field"
-            ><span>印刷開始の確認待ち時間（秒）</span><input
-              type="number"
-              min="1"
-              max="3600"
-              bind:value={settings.start_timeout_secs}
-              required
-            /></label
+            ><span>TLS証明書（PEM）</span><textarea
+              bind:value={settings.tls_certificate}
+              required={!id}
+              rows="5"
+              spellcheck={false}
+              placeholder="-----BEGIN CERTIFICATE-----"></textarea></label
           >
+          {#if id}<p class="caption">空欄の項目は現在の値を維持します</p>{/if}
+          <details class="settings-details">
+            <summary>接続の詳細</summary>
+            <label class="field"
+              ><span>MQTTポート</span><input
+                type="number"
+                min="1"
+                max="65535"
+                bind:value={settings.mqtt_port}
+                required
+              /></label
+            >
+            <label class="field"
+              ><span>FTPSポート</span><input
+                type="number"
+                min="1"
+                max="65535"
+                bind:value={settings.ftps_port}
+                required
+              /></label
+            >
+            <label class="field"
+              ><span>カメラのポート</span><input
+                type="number"
+                min="1"
+                max="65535"
+                bind:value={settings.camera_port}
+                required
+              /></label
+            >
+            <label class="field"
+              ><span>印刷開始の確認待ち時間（秒）</span><input
+                type="number"
+                min="1"
+                max="3600"
+                bind:value={settings.start_timeout_secs}
+                required
+              /></label
+            >
+          </details>
         </details>
       </fieldset>
       {#if busy}<p role="status">保存しています…</p>{/if}
@@ -467,10 +464,9 @@
       </div>
     </form>
     {#if id}<div class="delete-area">
-        <button class="btn" disabled={busy} onclick={() => void remove()}
-          >プリンターを削除</button
+        <button class="btn danger" disabled={busy} onclick={() => void remove()}
+          >削除</button
         >
-        <p class="help">印刷中やキューにジョブがある機器は削除できません。</p>
       </div>{/if}
   {/if}
 </section>

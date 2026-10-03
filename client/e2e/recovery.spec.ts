@@ -13,7 +13,7 @@ for (const width of [320, 900]) for (const colorScheme of ['dark', 'light'] as c
     await page.locator('.current-job').waitFor();
     if (process.env.E2E_EVIDENCE_DIR) await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/initial-${width}-${colorScheme}.png`});
     await expect(page.locator('.job-details:visible')).toHaveCount(0);
-    const retry = page.getByRole('button', {name:'取り外した・最初から再印刷',exact:true});
+    const retry = page.getByRole('button', {name:'再印刷',exact:true});
     await expect(retry).toBeVisible(); await expect(retry).toBeEnabled();
     await expect(page.getByRole('checkbox')).toHaveCount(0);
     if (process.env.E2E_EVIDENCE_DIR) await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/recovery-${width}-${colorScheme}.png`});

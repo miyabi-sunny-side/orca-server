@@ -449,12 +449,7 @@
           </li>{/each}
       </ul>
       <p class="caption">
-        {#if upload?.selection}選んだプレート全体を一組として扱います。{/if}
-        合計 {total}
-        {upload?.selection ? "組" : "個"} / 最大64{upload?.selection
-          ? "組"
-          : "個"}。
-        {#if selected.some((m) => m.source)}SCADモデルは試算時と印刷開始時に最新データを取得します。{/if}
+        合計 {total} / 64{upload?.selection ? "組" : "個"}
       </p>
       {#if rolesReading}<p class="caption" role="status">
           モデルの材料を確認しています…

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { request, type Printer, type AmsInventory } from "../lib/api";
   import AmsSlot from "../lib/AmsSlot.svelte";
+  import Icon from "../lib/Icon.svelte";
   const id = window.location.pathname.split("/")[2];
   let printer = $state<Printer>(),
     inventory = $state<AmsInventory>();
@@ -159,33 +160,28 @@
   <div class="page-heading">
     <h1>{printer?.name ?? "プリンター"} · AMS</h1>
     <button
-      class="btn"
+      class="icon-btn large"
       disabled={busy || fetching}
       aria-busy={fetching}
-      onclick={fetchFromPrinter}>状態を更新</button
+      aria-label="状態を更新"
+      title="本体から状態を取得"
+      onclick={fetchFromPrinter}><Icon name="refresh-cw" /></button
     >
   </div>
   {#if fetching}<p class="fetch" role="status">
-      <span class="spinner" aria-hidden="true"
-      ></span>プリンターへ最新の状態を要求しています…
+      <span class="spinner" aria-hidden="true"></span>本体から取得しています…
     </p>
   {:else if fetchError}<div class="notice">
-      <p role="alert">
-        {fetchError}「状態を更新」から再試行できます。
-      </p>
+      <p role="alert">{fetchError}</p>
     </div>
   {:else if fetched}<p class="fetch" role="status">{fetched}</p>{/if}
   {#if error}<div class="notice"><p role="alert">{error}</p></div>{/if}
   {#if loading}<p class="state" role="status">読み込んでいます…</p>
   {:else if inventory}
     {#if !inventory.current}<div class="notice">
-        <p role="status">
-          現在の装填状態は未確認です。接続後の報告を待ってください。
-        </p>
+        <p role="status">装填状態は未確認です</p>
       </div>{/if}
-    {#if !inventory.slots.length}<p class="state">
-        AMSの情報はまだありません。プリンターとAMSの接続を確認してください。
-      </p>{/if}
+    {#if !inventory.slots.length}<p class="state">AMSの報告はありません</p>{/if}
     <ul class="slots">
       {#each inventory.slots as slot (slot.id)}<AmsSlot
           {slot}
@@ -226,13 +222,22 @@
       </p>
     </details>
   {/if}
-  <p>
-    <a href="/filaments">材料台帳を開く</a> ·
-    <a href={`/printers/${id}`}>プリンター構成を編集</a>
+  <p class="links">
+    <a href="/filaments">材料台帳</a>
+    <a
+      class="icon-btn"
+      href={`/printers/${id}`}
+      aria-label="プリンターの設定"
+      title="プリンターの設定"><Icon name="settings" /></a
+    >
   </p>
 </section>
 
 <style lang="sass">
+  .links
+    display: flex
+    align-items: center
+    gap: var(--sp-3)
   .page-heading
     margin-top: var(--sp-3)
   .fetch

@@ -45,7 +45,7 @@ test("without an AMS the external spool is chosen, starts without the AMS and sh
   await expect(menu.getByRole("button", { name: "AMSで印刷" })).toBeEnabled();
   await page.keyboard.press("Escape");
 
-  await page.getByRole("button", { name: "空のプレートで印刷を開始" }).click();
+  await page.getByRole("button", { name: "印刷", exact: true }).click();
   await expect.poll(async () => (await peer()).prints.length).toBe(1);
   expect((await peer()).prints[0].use_ams).toBe(false);
 
@@ -54,7 +54,7 @@ test("without an AMS the external spool is chosen, starts without the AMS and sh
   await report({ state: "FAILED", print_error: 0x0300_8010 });
   await expect(page.getByText("0300-8010").first()).toBeVisible();
   await expect(
-    page.getByText("ホットエンド冷却ファンの回転異常です"),
+    page.getByText("ホットエンド冷却ファンの回転異常").first(),
   ).toBeVisible();
   for (const scheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: scheme });

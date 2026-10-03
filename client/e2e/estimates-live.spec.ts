@@ -64,9 +64,7 @@ test("saved plate calculation, failure recovery and normal print share one resul
     await capture(`shared-queue-${colorScheme}`);
     expect((await peer()).prints).toHaveLength(before.prints.length);
   }
-  await page
-    .getByRole("button", { name: "空のプレートで印刷を開始", exact: true })
-    .click();
+  await page.getByRole("button", { name: "印刷", exact: true }).click();
   await expect
     .poll(async () => (await peer()).prints.length)
     .toBe(before.prints.length + 1);

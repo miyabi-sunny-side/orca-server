@@ -13,8 +13,8 @@
   import {
     estimateText,
     failureMessage,
+    errorLine,
     failureLines,
-    failureHelp,
     queueFailure,
     jobStatus,
     moveIndex,
@@ -369,14 +369,17 @@
 {#snippet issue()}
   {#if error || readError}<div class="notice">
       <p role="alert">{error || readError}</p>
-      {#if pending}<p>
-          送信結果が不明です。同じ操作を重ねず、同じ要求の結果を確認します。
-        </p>
-        <button class="btn" disabled={busy} onclick={() => void send()}
-          >同じ要求を再確認</button
+      {#if pending}<button
+          class="btn"
+          disabled={busy}
+          onclick={() => void send()}>結果を再確認</button
         >
-      {:else}<button class="btn" disabled={busy} onclick={() => void refresh()}
-          >最新状態を読み直す</button
+      {:else}<button
+          class="icon-btn large"
+          disabled={busy}
+          aria-label="読み直す"
+          title="読み直す"
+          onclick={() => void refresh()}><Icon name="refresh-cw" /></button
         >{/if}
     </div>{/if}
 {/snippet}
@@ -423,6 +426,11 @@
     {#if reason}<p class="failure" role="alert">
         {failureMessage(reason, job, material)}
       </p>{/if}
+    {#if job.failure}{#each failureLines(job.failure).lines as line (line)}<p
+          class="caption"
+        >
+          {line}
+        </p>{/each}{/if}
     {#if job.plate_deleted}<p>
         一覧から削除済み · このジョブは継続できます
       </p>{/if}
@@ -430,15 +438,17 @@
       {#if job.filament_id && (reason === "Selected build plate temperature is missing or zero for this material" || reason === "Configure this material for the required machine and nozzle first" || reason?.includes("Build plate does not support the selected material"))}<a
           class="btn"
           href={`/filaments/${job.filament_id}?machine=${encodeURIComponent(job.required_machine_profile_key ?? "")}&return_queue=${encodeURIComponent(printerId)}&return_job=${job.id}`}
-          >材料の温度を設定</a
+          >温度を設定</a
         >{/if}
       {#if !job.plate_deleted}<a
-          class="btn"
-          href={`/plates/${job.plate_id}?edit=1`}>プレートの条件を編集</a
+          class="icon-btn large"
+          href={`/plates/${job.plate_id}?edit=1`}
+          aria-label="プレートの条件を編集"
+          title="プレートの条件を編集"><Icon name="pencil" /></a
         >{/if}
       {#if job.feed !== "external"}<a
           class="btn"
-          href={`/printers/${printerId}/ams`}>AMSを確認</a
+          href={`/printers/${printerId}/ams`}>AMS</a
         >{/if}
       {#if job.state === "queued"}
         {#if job.estimate?.state === "failed"}<button
@@ -448,11 +458,12 @@
             >再試算</button
           >{/if}
         <button
-          class="btn"
+          class="icon-btn large"
           {disabled}
           aria-label={`${job.name}をキューから削除`}
+          title="キューから削除"
           onclick={() => void send({ type: "remove", job_id: job.id })}
-          >キューから削除</button
+          ><Icon name="trash" /></button
         >
       {/if}
     </div>
@@ -468,7 +479,13 @@
       aria-label="本体の操作"
       title="本体の操作"><Icon name="sliders" /></a
     >
-    <a bind:this={settingsLink} href={`/printers/${printerId}`}>設定</a>
+    <a
+      bind:this={settingsLink}
+      class="icon-btn"
+      href={`/printers/${printerId}`}
+      aria-label="プリンターの設定"
+      title="プリンターの設定"><Icon name="settings" /></a
+    >
   </div>
   {#if queue?.printer.synchronized && liveLine(queue.printer.live)}<p
       class="caption live-line"
@@ -527,28 +544,19 @@
       {/if}
     {/if}
     {#if reported}
-      {@const failure = failureLines(reported.failure)}
-      {@const help = failureHelp(reported.failure.code)}
-      <div
-        class="failure device-failure"
-        role="status"
-        aria-label="本体が報告した失敗"
-      >
-        <p class="caption">
-          {reported.current ? "現在の本体エラー" : "保存された印刷の報告"}
-        </p>
-        <p><strong>{failure.title}</strong></p>
-        {#each failure.lines as line (line)}<p>{line}</p>{/each}
-        {#if help}
-          <p>{help.description}</p>
-          <a href={help.url} target="_blank" rel="noopener noreferrer"
-            >公式のエラー解説を開く（別タブ）</a
-          >
-        {/if}
-        {#if reported.current}<p>
-            本体のエラーを解消してから、印刷の状態を確認してください。
-          </p>{/if}
-      </div>
+      {@const line = errorLine(reported.failure)}
+      <p class="failure device-failure" role="status">
+        <span class="tag">{reported.current ? "現在" : "前回"}</span>
+        <strong>{line.text}</strong>
+        {#if line.help}<a
+            class="icon-btn"
+            href={line.help}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="公式のエラー解説（別タブ）"
+            title="公式のエラー解説"><Icon name="external-link" /></a
+          >{/if}
+      </p>
     {/if}
     {#if queue.current?.state === "needs_attention"}
       <div class="actions">
@@ -560,7 +568,7 @@
               type: "retry",
               expected_job: queue!.current!.id,
               cleared: true,
-            })}>取り外した・最初から再印刷</button
+            })}>再印刷</button
         >
         <button
           class="btn"
@@ -570,7 +578,7 @@
               type: "discard",
               expected_job: queue!.current!.id,
               cleared: true,
-            })}>取り外した・現在のジョブを除く</button
+            })}>除外</button
         >
       </div>
       {#if !reported?.current && queue.recovery?.retry_reason}
@@ -599,10 +607,7 @@
                 expected_job: queue!.waiting[0].id,
                 removed_job: queue!.current?.id ?? null,
                 cleared: true,
-              })}
-            >{queue.current
-              ? "取り外した・次を印刷"
-              : "空のプレートで印刷を開始"}</button
+              })}>{queue.current ? "次を印刷" : "印刷"}</button
           >
         </div>
         {#if !queue.allowed.next && queue.recovery?.next_reason}<p
@@ -844,16 +849,17 @@
   .failure
     color: var(--c-danger)
   .device-failure
+    display: flex
+    flex-wrap: wrap
+    align-items: center
+    gap: var(--sp-2)
     margin: var(--sp-3) 0
     padding-left: var(--sp-3)
     border-left: 2px solid var(--c-danger)
     overflow-wrap: anywhere
-    p
-      margin: 0 0 var(--sp-2)
-    a
-      display: inline-flex
-      align-items: center
-      min-height: 44px
+    .tag
+      font-size: var(--fs-xs)
+      color: var(--c-muted)
   .actions .btn
     min-height: 44px
     white-space: normal

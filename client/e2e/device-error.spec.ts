@@ -35,7 +35,8 @@ for (const width of [320, 375, 900])
       await expect(failure).toBeVisible();
       await expect(failure).toContainText("0300-8010");
       await expect(failure).toContainText("ホットエンド冷却ファン");
-      await expect(failure).toContainText("PAUSE");
+      await expect(failure).toContainText("現在");
+      await expect(failure).not.toContainText("PAUSE");
       await expect(failure).toBeInViewport();
       await expect(page.getByText(/前の開始結果が不明です/)).toHaveCount(0);
       const help = failure.getByRole("link", { name: /公式/ });
@@ -56,12 +57,16 @@ for (const width of [320, 375, 900])
       await opened.waitForLoadState();
       expect(opened.url()).toBe(url);
       await opened.close();
+      await page.locator(".current-job > summary").click();
+      await expect(page.locator(".current-job")).toContainText(
+        "本体の状態: PAUSE",
+      );
       await page.reload();
       await expect(failure).toContainText("0300-8010");
       await expect(page.locator(".current-job")).not.toHaveAttribute("open");
       await expect(
         page.getByRole("button", {
-          name: "取り外した・最初から再印刷",
+          name: "再印刷",
           exact: true,
         }),
       ).toBeDisabled();
@@ -109,8 +114,8 @@ test("unmanaged and unknown errors remain visible, while stale reports are label
   });
   Object.assign(q, { current: job });
   Object.assign(q.printer, { connection: "disconnected", synchronized: false });
-  await expect(failure).toContainText("保存された印刷の報告");
-  await expect(failure).toContainText("コード未取得");
+  await expect(failure).toContainText("前回");
+  await expect(failure).toContainText("印刷停止");
   await expect(failure).not.toContainText("FFFF-1234");
   await expect(failure.getByRole("link")).toHaveCount(0);
   expect(commands).toHaveLength(0);

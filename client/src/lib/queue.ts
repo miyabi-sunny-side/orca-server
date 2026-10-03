@@ -282,6 +282,26 @@ export function failureHelp(code?: string) {
     url: `https://e.bambulab.com/index.php?${new URLSearchParams({ e: hex, s: "device_hms", lang: "ja" })}`,
   };
 }
+const knownCodes: Record<string, string> = {
+  // BambuStudio da8b44ee resources/hms/hms_en_094.json
+  "03008010": "ホットエンド冷却ファンの回転異常",
+};
+/** One place for a failure: the raw code with a verified short meaning, and the official help. */
+export function errorLine(failure: Failure): {
+  text: string;
+  help: string | null;
+} {
+  const hex = failure.code?.replaceAll("-", "").toUpperCase();
+  if (!failure.code || !hex)
+    return {
+      text: failure.kind === "rejected" ? "開始拒否" : "印刷停止",
+      help: null,
+    };
+  return {
+    text: `${failure.code} ${knownCodes[hex] ?? "意味は未確認"}`,
+    help: failureHelp(failure.code)?.url ?? null,
+  };
+}
 /** BambuStudio HMS.cpp get_hms_wiki_url with the long `%08X%08X` code; no device ID is sent. */
 export function hmsHelp(code: string): string | null {
   const hex = code.replaceAll("_", "").toUpperCase();
@@ -293,7 +313,7 @@ export const phaseText = {
   preparing: "準備中",
   printing: "印刷中",
   awaiting_removal: "完了 · 取り外し待ち",
-  needs_attention: "確認が必要です",
+  needs_attention: "要確認",
 };
 export const failureText: Record<string, string> = {
   "Wait for a matching terminal report for the previous start":
@@ -419,8 +439,6 @@ export function jobStatus(job: Job, printer?: Printer): string {
       parts.push(`残り約${printer.print.remaining_minutes}分`);
     return parts.join(" · ");
   }
-  if (job.state === "needs_attention" && job.failure)
-    return `${failureKinds[job.failure.kind].title} · ${failureCode(job.failure) ?? "コード未取得"}`;
   return phaseText[job.state];
 }
 export function failureMessage(

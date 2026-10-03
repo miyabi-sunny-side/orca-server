@@ -90,7 +90,7 @@ test('material CRUD, temperatures, manual mapping and stale observations',async(
   await expect.poll(async()=>((await (await request.get(`/api/printers/${c.printer}/ams`)).json()).slots[0].reported.color)).toBe('FFFFFFFF');
   await page.getByRole('button',{name:'状態を更新'}).click();await selector.click();await gfOption.click();
   await expect(selector).toContainText('ガラス繊維入りPETG');
-  await request.post(c.control,{data:{disconnect:true}});await expect(page.getByRole('status')).toContainText('現在の装填状態は未確認',{timeout:12000});
+  await request.post(c.control,{data:{disconnect:true}});await expect(page.getByRole('status')).toContainText('装填状態は未確認',{timeout:12000});
   await page.setViewportSize({width:375,height:812});await page.screenshot({path:join(output,'ams-disconnected.png'),fullPage:true});
   await selector.click();await expect(gfOption).toBeDisabled();await expect(first.getByRole('button',{name:'指定を解除',exact:true})).toBeEnabled();
   await first.getByRole('button',{name:'キャンセル'}).click();await request.post(c.control,{data:{full:true}});

@@ -55,7 +55,7 @@ test("history re-add uses current inputs, repairs admission and retries one requ
     button.click();
     button.click();
   });
-  const retry = dialog.getByRole("button", { name: "同じ要求を再確認" });
+  const retry = dialog.getByRole("button", { name: "結果を再確認" });
   await expect(retry).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();

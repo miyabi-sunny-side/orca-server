@@ -181,7 +181,7 @@ test("lost response reuses one command; subsequent explicit duplication adds aga
   await expect(duplicate(page)).toBeEnabled();
   f.lose();
   await duplicate(page).click();
-  const retry = menu(page).getByRole("button", { name: "同じ要求を再確認" });
+  const retry = menu(page).getByRole("button", { name: "結果を再確認" });
   await expect(retry).toBeVisible();
   await expect(duplicate(page)).toBeDisabled();
   await retry.click();

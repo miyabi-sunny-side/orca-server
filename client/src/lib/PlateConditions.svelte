@@ -143,14 +143,6 @@
           ? `/printers/${defaults.default_printer_id}/ams`
           : "/printers"}>設定を確認</a
       >
-    </p>
-    <p class="caption">
-      未設定でも保存できます。印刷キューへ追加する前に不足項目を設定してください。
-    </p>
-  {:else}<p class="caption">
-      必要な項目だけ変更できます。次回以降の初期値は<a href="/printers"
-        >プリンター設定</a
-      >で変更します。
     </p>{/if}
   <label class="field"
     ><span>要求する機種・ノズル</span><select
@@ -253,7 +245,6 @@
           changed("support_interface_filament_id");
         }}
       />
-      <p class="caption">サポートの支柱には、最初のフィラメントを使います。</p>
     {/if}
   </details>
   <details class="settings-details">

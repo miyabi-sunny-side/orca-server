@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Icon from "./Icon.svelte";
   import type { createThreeViewer } from "./three-viewer";
   let {
     url,
@@ -60,26 +61,25 @@
   {#if loading}<p role="status">モデルを読み込んでいます…</p>{/if}
   {#if error}<p role="alert">{error}</p>{/if}
   {#if dimensions}<p class="dimensions" role="status">{dimensions}</p>{/if}
-  {#if !passive}<div class="actions">
-      <button class="btn" disabled={!dimensions} onclick={() => viewer?.fit()}
-        >全体を表示</button
-      >
-      <button
-        class="btn"
-        disabled={!dimensions}
-        onclick={() => viewer?.zoom(0.8)}>拡大</button
-      >
-      <button
-        class="btn"
-        disabled={!dimensions}
-        onclick={() => viewer?.zoom(1.25)}>縮小</button
-      >
-      {#if viewer}<button class="btn" onclick={() => attempt++}>読み直す</button
+  {#if !passive}<div
+      class="actions"
+      role="group"
+      aria-label="表示の操作（ドラッグで回転・ホイールで拡大縮小）"
+    >
+      {#each [["maximize", "全体を表示", () => viewer?.fit()], ["zoom-in", "拡大", () => viewer?.zoom(0.8)], ["zoom-out", "縮小", () => viewer?.zoom(1.25)]] as const as [icon, label, act] (icon)}<button
+          class="icon-btn large"
+          disabled={!dimensions}
+          aria-label={label}
+          title={label}
+          onclick={act}><Icon name={icon} /></button
+        >{/each}
+      {#if viewer}<button
+          class="icon-btn large"
+          aria-label="読み直す"
+          title="読み直す"
+          onclick={() => attempt++}><Icon name="refresh-cw" /></button
         >{/if}
-    </div>
-    <p class="caption">
-      ドラッグで回転、ホイールで拡大縮小。表示はモデル単体です。配置・スライス結果ではありません。
-    </p>{/if}
+    </div>{/if}
 </aside>
 
 <style lang="sass">

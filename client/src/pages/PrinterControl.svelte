@@ -3,6 +3,7 @@
   import { controlText, request, sendControl, type Printer } from "../lib/api";
   import {
     errorCode,
+    errorLine,
     hmsHelp,
     jobControls,
     liveLine,
@@ -256,8 +257,22 @@
     {/if}
     {#if status.live.hms.length || status.print.error}
       <ul class="codes" aria-label="本体のエラー">
-        {#if status.print.error}<li>
-            print_error {errorCode(status.print.error)}
+        {#if status.print.error}
+          {@const line = errorLine({
+            kind: "device_error",
+            field: "print_error",
+            code: errorCode(status.print.error),
+          })}
+          <li>
+            <strong>{line.text}</strong>
+            {#if line.help}<a
+                class="icon-btn"
+                href={line.help}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="公式のエラー解説（別タブ）"
+                ><Icon name="external-link" /></a
+              >{/if}
             <button
               class="btn"
               disabled={busy}

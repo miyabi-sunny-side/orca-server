@@ -9,7 +9,7 @@ test('Cool Plate failure links to the matching common setting, returns to the jo
   const job=page.locator(`#job-${ctx.job}`);
   await job.locator('summary').click();
   await expect(job.getByRole('alert')).toContainText('PETG-GF 黒のCool Plate温度が未設定または0℃');
-  await job.getByRole('link',{name:'材料の温度を設定'}).click();
+  await job.getByRole('link',{name:'温度を設定'}).click();
   await expect(page).toHaveURL(/\/settings\/[^?]+\?.*#bed-temperature$/);
   await expect(page.getByLabel('ベッド初層（℃）',{exact:true})).toHaveValue('0');
   await page.getByLabel('ベッド初層（℃）',{exact:true}).fill('65');

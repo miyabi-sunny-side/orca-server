@@ -34,22 +34,24 @@ for (const width of [320, 375, 900])
       });
       await page.reload();
       const summary = page.locator(".current-job summary");
-      await expect(summary).toContainText(
-        "印刷開始の拒否 · err_code 0500-4003",
-      );
+      await expect(summary).toContainText("要確認");
+      await expect(summary).not.toContainText("0500-4003");
       const failure = page.locator(".device-failure");
       await expect(summary.locator("..")).not.toHaveAttribute("open");
       await expect(failure).toBeVisible();
-      await expect(failure).toContainText("現在の本体エラー");
-      await expect(failure).toContainText("コード: print_error 0500-4003");
+      await expect(failure).toContainText("現在");
+      await expect(failure).toContainText("0500-4003 意味は未確認");
       await expect(failure).not.toContainText(reason.trim());
       q.printer.print.error = 0;
       await page.reload();
-      await expect(failure).toContainText("保存された印刷の報告");
-      await expect(failure).toContainText("印刷開始の拒否");
-      await expect(failure).toContainText("コード: err_code 0500-4003");
-      await expect(failure).toContainText(`理由: ${reason.trim()}`);
-      const box = (await failure.boundingBox())!;
+      await expect(failure).toContainText("前回");
+      await expect(failure).toContainText("0500-4003");
+      await expect(failure).not.toContainText(reason.trim());
+      await summary.click();
+      const details = page.locator(".current-job .job-details");
+      await expect(details).toContainText("コード: err_code 0500-4003");
+      await expect(details).toContainText(`理由: ${reason.trim()}`);
+      const box = (await details.boundingBox())!;
       expect(box.x + box.width).toBeLessThanOrEqual(width);
       expect(
         await page.evaluate(
@@ -57,7 +59,7 @@ for (const width of [320, 375, 900])
         ),
       ).toBe(true);
       const retry = page.getByRole("button", {
-        name: "取り外した・最初から再印刷",
+        name: "再印刷",
         exact: true,
       });
       await retry.scrollIntoViewIfNeeded();
@@ -73,6 +75,7 @@ for (const width of [320, 375, 900])
       });
       q.printer.print.error = 0;
       await page.reload();
-      await expect(summary).toContainText("印刷停止 · コード未取得");
+      await expect(summary).toContainText("要確認");
+      await expect(failure).toContainText("印刷停止");
     });
   }

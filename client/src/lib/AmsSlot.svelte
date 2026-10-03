@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "./Icon.svelte";
   import { tick } from "svelte";
   import type { AmsSlot } from "./api";
   import FilamentSearch from "./FilamentSearch.svelte";
@@ -75,10 +76,13 @@
       ><span aria-hidden="true">▾</span>
     </button>
     <button
-      class="btn toggle"
+      class="icon-btn large toggle"
       aria-label={`${name}の詳細`}
       aria-expanded={expanded}
-      onclick={() => (expanded = !expanded)}>{expanded ? "−" : "+"}</button
+      onclick={() => (expanded = !expanded)}
+      ><span class="chevron" class:open={expanded}
+        ><Icon name="chevron-left" /></span
+      ></button
     >
   </div>
   {#if searching}
@@ -203,6 +207,12 @@
 </li>
 
 <style lang="sass">
+  .chevron
+    display: inline-flex
+    transform: rotate(-90deg)
+    transition: transform 150ms
+    &.open
+      transform: rotate(90deg)
   .ams-slot
     border-bottom: 1px solid var(--c-border)
     padding: var(--sp-2) 0

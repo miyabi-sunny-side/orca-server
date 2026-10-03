@@ -33,9 +33,7 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
   await page.emulateMedia({ colorScheme: "light" });
   await page.setViewportSize({ width: 900, height: 812 });
   await page.goto("/queue?printer_id=p1");
-  await page
-    .getByRole("button", { name: "空のプレートで印刷を開始", exact: true })
-    .click();
+  await page.getByRole("button", { name: "印刷", exact: true }).click();
   await expect.poll(count).toBe(1);
   await report("RUNNING");
   await request.post(control, {
@@ -57,25 +55,18 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
     await page.emulateMedia({ colorScheme: scheme });
     await page.setViewportSize({ width, height: 812 });
     await page.reload();
-    await expect(page.locator(".current-job summary")).toContainText(
-      "印刷エラー · print_error 0300-8010",
-    );
+    await expect(page.locator(".current-job summary")).toContainText("要確認");
     await expect(page.locator(".current-job")).not.toHaveAttribute("open");
     await expect(page.locator(".device-failure")).toBeVisible();
-    await expect(page.locator(".device-failure")).toContainText(
-      "コード: print_error 0300-8010",
-    );
+    await expect(page.locator(".device-failure")).toContainText("0300-8010");
     await expect(page.locator(".device-failure")).toContainText(
       "ホットエンド冷却ファン",
     );
     await expect(
       page.locator(".device-failure").getByRole("link", { name: /公式/ }),
     ).toHaveAttribute("href", /e=03008010/);
-    await expect(page.locator(".device-failure")).toContainText(
-      "本体の状態: PAUSE",
-    );
     await expect(
-      page.getByRole("button", { name: "取り外した・最初から再印刷" }),
+      page.getByRole("button", { name: "再印刷", exact: true }),
     ).toBeVisible();
     await capture(`device-error-${width}-${scheme}`);
   }
@@ -84,9 +75,8 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
   await report("RUNNING");
   await report("FAILED");
   await page.reload();
-  await expect(page.locator(".current-job summary")).toContainText(
-    "印刷停止 · コード未取得",
-  );
+  await expect(page.locator(".current-job summary")).toContainText("要確認");
+  await expect(page.locator(".device-failure")).toContainText("印刷停止");
   await page.locator(".current-job summary").click();
   await page
     .getByRole("link", { name: "プレートの条件を編集", exact: true })
@@ -97,7 +87,7 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
   await expect(page.getByRole("button", { name: "構成を編集" })).toBeVisible();
   await page.goto("/queue?printer_id=p1");
   const retry = page.getByRole("button", {
-    name: "取り外した・最初から再印刷",
+    name: "再印刷",
     exact: true,
   });
   await expect(retry).toBeEnabled();
@@ -111,14 +101,14 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
   await capture("recovery-dark");
   await page
     .getByRole("button", {
-      name: "取り外した・現在のジョブを除く",
+      name: "除外",
       exact: true,
     })
     .click();
   await expect.poll(async () => (await state()).current).toBeNull();
   await page.reload();
   const next = page.getByRole("button", {
-    name: "空のプレートで印刷を開始",
+    name: "印刷",
     exact: true,
   });
   await expect(next).toBeEnabled();

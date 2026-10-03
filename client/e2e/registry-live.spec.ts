@@ -57,7 +57,7 @@ test("persistent printer CRUD, nozzle-specific controls and selected queue", asy
   await page.unroute('**/api/printers/'+saved.id);
   await page.getByRole('button',{name:'保存',exact:true}).click();
   await expect(page).toHaveURL(/\/printers$/);
-  await page.getByRole('link',{name:'印刷キュー',exact:true}).click();
+  await page.getByRole('link',{name:'キュー',exact:true}).click();
   await expect(page).toHaveURL(new RegExp('printer_id='+saved.id));
   await expect(page.getByRole('heading',{name:'Edited printer',exact:true})).toBeVisible();
   const another=await (await request.post('/api/printers',{data:{...settings,serial:'UISECOND',name:'Another printer',access_code:settings.access_code,tls_certificate:pem,mqtt_port:1,ftps_port:1}})).json();
@@ -80,7 +80,7 @@ test("persistent printer CRUD, nozzle-specific controls and selected queue", asy
   await expect(page.getByLabel('機種・装着ノズル径')).toBeFocused();
   await page.screenshot({path:join(output,'edit-text-200.png'),fullPage:true});
   page.once('dialog',dialog=>dialog.accept());
-  await page.getByRole('button',{name:'プリンターを削除'}).click();
+  await page.getByRole('button',{name:'削除',exact:true}).click();
   await expect(page).toHaveURL(/\/printers$/);
   expect((await request.delete('/api/printers/'+another.id)).status()).toBe(204);
   await page.reload();

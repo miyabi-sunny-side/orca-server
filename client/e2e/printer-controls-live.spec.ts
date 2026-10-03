@@ -30,7 +30,7 @@ test("start options, print controls and the printer page act on the printer", as
 
   await page.goto("/");
   await expect(page.getByText("ノズル 212/220℃ · ベッド 60/60℃")).toBeVisible();
-  await page.getByRole("button", { name: "空のプレートで印刷を開始" }).click();
+  await page.getByRole("button", { name: "印刷", exact: true }).click();
   await expect.poll(async () => (await peer()).prints.length).toBe(1);
   await report({ state: "RUNNING" });
   const pause = page.getByRole("button", { name: "一時停止" });
@@ -47,7 +47,7 @@ test("start options, print controls and the printer page act on the printer", as
   await page.getByRole("button", { name: "停止を確定" }).click();
   await report({ state: "FAILED" });
   await expect(
-    page.getByRole("button", { name: "取り外した・最初から再印刷" }),
+    page.getByRole("button", { name: "再印刷", exact: true }),
   ).toBeEnabled();
 
   // The printer page keeps routine actions as icons and everything else collapsed.

@@ -1,6 +1,7 @@
 import { estimateText } from "./queue";
 import {
   defaultFeed,
+  errorLine,
   feedLabel,
   hmsHelp,
   jobControls,
@@ -101,7 +102,7 @@ it("does not present unsynchronized or failed printers as ready", () => {
   ).toBe("プリンターエラー 0300-4001 · 本体を確認してください");
 });
 
-it("shows the saved device failure with its raw code, or says the code is missing", async () => {
+it("keeps the saved failure's details for the expanded job and a short job status", async () => {
   const { failureLines, jobStatus } = await import("./queue");
   const failed = { state: "needs_attention" } as Job;
   expect(
@@ -124,14 +125,12 @@ it("shows the saved device failure with its raw code, or says the code is missin
         code: "0300-4001",
       },
     }),
-  ).toBe("印刷エラー · print_error 0300-4001");
+  ).toBe("要確認");
   expect(failureLines({ kind: "stopped", state: "FAILED" }).lines).toEqual([
     "コード: コード未取得（エラーコード0のFAILED。本体での手動停止も同じ報告です）",
     "本体の状態: FAILED",
   ]);
-  expect(jobStatus({ ...failed, failure: { kind: "stopped" } })).toBe(
-    "印刷停止 · コード未取得",
-  );
+  expect(jobStatus({ ...failed, failure: { kind: "stopped" } })).toBe("要確認");
   expect(
     failureLines({ kind: "rejected", reason: "長い理由".repeat(40) }),
   ).toEqual({
@@ -141,7 +140,8 @@ it("shows the saved device failure with its raw code, or says the code is missin
       `理由: ${"長い理由".repeat(40)}`,
     ],
   });
-  expect(jobStatus({ ...failed, failure: null })).toBe("確認が必要です");
+  // The code is shown once, next to the current job, not again in its summary.
+  expect(jobStatus({ ...failed, failure: null })).toBe("要確認");
 });
 
 it("keeps live errors distinct from saved failures and explains only verified codes", async () => {
@@ -375,4 +375,27 @@ it("names the printer's reported state in Japanese", () => {
   expect(printerStateText("FAILED")).toBe("停止");
   expect(printerStateText("SLICING")).toBe("SLICING");
   expect(printerStateText(null)).toBe("状態不明");
+});
+
+it("shows a failure as one code with a short meaning and a help link", () => {
+  const fan = errorLine({
+    kind: "device_error",
+    field: "print_error",
+    code: "0300-8010",
+  });
+  expect(fan.text).toBe("0300-8010 ホットエンド冷却ファンの回転異常");
+  expect(fan.help).toContain("e=03008010");
+  const unknown = errorLine({
+    kind: "device_error",
+    field: "print_error",
+    code: "0300-400C",
+  });
+  expect(unknown.text).toBe("0300-400C 意味は未確認");
+  expect(errorLine({ kind: "stopped", state: "FAILED" })).toEqual({
+    text: "印刷停止",
+    help: null,
+  });
+  expect(errorLine({ kind: "rejected", reason: "Storage full" }).text).toBe(
+    "開始拒否",
+  );
 });

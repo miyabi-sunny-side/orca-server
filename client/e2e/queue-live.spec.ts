@@ -53,7 +53,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
     await expect(page).toHaveURL(/\/queue\?printer_id=p1$/);
   };
   const confirm = () => page.getByRole("checkbox", { name: "造形物を取り外し、空のビルドプレートを戻しました" });
-  const next = () => page.getByRole("button", { name: /^(空のプレートで印刷を開始|取り外した・次を印刷)$/ });
+  const next = () => page.getByRole("button", { name: /^(印刷|次を印刷)$/ });
   const capture = async (name: string) => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await page.locator(".btn.primary:visible").count()).toBeLessThanOrEqual(1);
@@ -115,7 +115,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
       releaseRead(); await (await delayedResponse).finished();
       await expect(page.getByLabel("現在の印刷")).toContainText(plates[0].name);
     } else if (await page.getByRole("alert").count()) {
-      await page.getByRole("button", { name: "最新状態を読み直す" }).click();
+      await page.getByRole("button", { name: "読み直す" }).click();
     }
     expect((await peer()).prints.at(-1).ams_mapping).toEqual([3]);
     await report("RUNNING");
@@ -124,7 +124,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
     await report("FINISH");
     await expect(page.getByLabel("現在の印刷")).toContainText("取り外し待ち");
     await expect(confirm()).toHaveCount(0);
-    await expect(next()).toHaveText("取り外した・次を印刷");
+    await expect(next()).toHaveText("次を印刷");
     await expect(next()).toBeEnabled();
     expect((await peer()).prints.length).toBe(before + 1);
     await capture(`removal-${colorScheme}`);
@@ -152,8 +152,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
     });
     await next().click();
     if (colorScheme === "dark") {
-      await expect(page.getByText("送信結果が不明です。同じ操作を重ねず、同じ要求の結果を確認します。")).toBeVisible();
-      await page.getByRole("button", { name: "同じ要求を再確認" }).click();
+      await page.getByRole("button", { name: "結果を再確認" }).click();
       await expect(page.getByRole("alert")).toHaveCount(0);
     }
     await expect.poll(async () => (await peer()).prints.length).toBe(before + 2);
@@ -183,7 +182,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
   await next().click();
   await expect(page.getByRole("alert")).toContainText("状態が変わりました");
   staleReads = false;
-  await page.getByRole("button", { name: "最新状態を読み直す" }).click();
+  await page.getByRole("button", { name: "読み直す" }).click();
   await expect(page.getByLabel("現在の印刷")).toContainText(plates[3].name);
   await expect(confirm()).toHaveCount(0);
   await expect(next()).toBeEnabled();
@@ -194,11 +193,11 @@ test("queue starts and continues with one action on mobile and desktop", async (
   // A transfer failure exposes one recovery action without another confirmation.
   await add(2, 3); await request.post(control, { data: { fail_upload: true } });
   await next().click();
-  await expect(page.locator(".current-job summary")).toContainText("確認が必要");
+  await expect(page.locator(".current-job summary")).toContainText("要確認");
   await page.locator(".current-job summary").click();
   await expect(page.getByRole("alert")).toContainText("印刷データを転送できませんでした");
-  await expect(page.getByRole('link',{name:'材料の温度を設定'})).toHaveCount(0);
-  const retry = page.getByRole("button", { name: "取り外した・最初から再印刷", exact: true });
+  await expect(page.getByRole('link',{name:'温度を設定'})).toHaveCount(0);
+  const retry = page.getByRole("button", { name: "再印刷", exact: true });
   await expect(retry).toBeEnabled();
   await expect(confirm()).toHaveCount(0);
   expect((await peer()).prints.length).toBe(6);
