@@ -5,7 +5,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     sign::{CertifiedKey, SingleCertAndKey},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
@@ -122,6 +122,8 @@ pub struct Records {
     pub uploads: Vec<String>,
     pub contents: Vec<Vec<u8>>,
     pub errors: Vec<String>,
+    /// Operator controls (pause, light, temperature…) as received.
+    pub controls: Vec<Value>,
 }
 pub enum Action {
     Disconnect,
@@ -140,6 +142,8 @@ pub struct Peer {
     pub gate: Arc<AtomicBool>,
     /// When set, every `pushall` is answered with this report, as a printer does.
     pub pushall_reply: Arc<Mutex<Option<Vec<u8>>>>,
+    /// The `result` answered to every operator control; `None` leaves controls unanswered.
+    pub control_reply: Arc<Mutex<Option<String>>>,
     stopped: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     serial: String,
@@ -168,6 +172,7 @@ impl Peer {
             allow_options: Arc::default(),
             gate: Arc::default(),
             pushall_reply: Arc::default(),
+            control_reply: Arc::new(Mutex::new(Some("success".into()))),
             stopped: Arc::default(),
             thread: None,
             serial: serial.to_owned(),
@@ -180,6 +185,7 @@ impl Peer {
         let serial = serial.to_owned();
         let allow_options = peer.allow_options.clone();
         let pushall_reply = peer.pushall_reply.clone();
+        let control_reply = peer.control_reply.clone();
         peer.thread = Some(thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 match socket.accept() {
@@ -206,7 +212,7 @@ impl Peer {
                                 &records,
                                 &stopped,
                                 &allow_options,
-                                &pushall_reply,
+                                (&pushall_reply, &control_reply),
                             )
                         };
                         if let Err(e) = outcome
@@ -289,7 +295,7 @@ fn mqtt_session(
     records: &Mutex<Records>,
     stopped: &AtomicBool,
     allow_options: &AtomicBool,
-    pushall_reply: &Mutex<Option<Vec<u8>>>,
+    (pushall_reply, control_reply): (&Mutex<Option<Vec<u8>>>, &Mutex<Option<String>>),
 ) -> io::Result<()> {
     let (header, login) = read_packet(peer)?;
     if header != 0x10
@@ -357,10 +363,7 @@ fn mqtt_session(
             }
             seen.requests.push(value);
             if let Some(reply) = pushall_reply.lock().unwrap().clone() {
-                let mut body = u16::try_from(report.len()).unwrap().to_be_bytes().to_vec();
-                body.extend(report.as_bytes());
-                body.extend(reply);
-                peer.write_all(&packet(0x30, &body))?;
+                publish(peer, &report, &reply)?;
             }
         } else if value["print"]["command"] == "print_option"
             && allow_options.load(Ordering::SeqCst)
@@ -375,6 +378,12 @@ fn mqtt_session(
                 return Err(invalid("invalid print option fields"));
             }
             seen.options.push(value);
+        } else if let Some((section, command)) = control(&value) {
+            seen.controls.push(value.clone());
+            if let Some(result) = control_reply.lock().unwrap().clone() {
+                let answer = json!({section:{"command":command,"sequence_id":value[section]["sequence_id"],"result":result}});
+                publish(peer, &report, &serde_json::to_vec(&answer).unwrap())?;
+            }
         } else {
             if value["print"]["command"] != "project_file" {
                 return Err(invalid("unexpected print command"));
@@ -383,6 +392,41 @@ fn mqtt_session(
         }
     }
     Ok(())
+}
+fn publish(peer: &mut Tls, topic: &str, payload: &[u8]) -> io::Result<()> {
+    let mut body = u16::try_from(topic.len()).unwrap().to_be_bytes().to_vec();
+    body.extend(topic.as_bytes());
+    body.extend(payload);
+    peer.write_all(&packet(0x30, &body))
+}
+/// An operator control as `BambuStudio` sends it: its section and command. The AMS auto refill
+/// option keeps its own guarded path above.
+fn control(value: &Value) -> Option<(&'static str, String)> {
+    const COMMANDS: [&str; 15] = [
+        "pause",
+        "resume",
+        "stop",
+        "print_speed",
+        "gcode_line",
+        "ams_change_filament",
+        "ams_control",
+        "print_option",
+        "ams_user_setting",
+        "calibration",
+        "skip_objects",
+        "clean_print_error",
+        "ledctrl",
+        "ipcam_record_set",
+        "ipcam_timelapse",
+    ];
+    ["print", "system", "camera", "info"]
+        .into_iter()
+        .find_map(|section| {
+            let command = value.get(section)?["command"].as_str()?;
+            let known = COMMANDS.contains(&command) || command == "get_version";
+            (known && value[section].get("auto_switch_filament").is_none())
+                .then(|| (section, command.to_owned()))
+        })
 }
 fn ftp_session(
     peer: &mut Tls,

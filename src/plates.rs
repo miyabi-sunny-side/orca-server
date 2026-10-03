@@ -138,6 +138,10 @@ pub struct Conditions {
     pub support_interface_filament_id: Option<String>,
     #[serde(flatten)]
     pub strength: crate::strength::Strength,
+    /// Bed leveling, flow calibration, timelapse and vibration calibration sent with the start.
+    /// `null` restores the defaults.
+    #[serde(deserialize_with = "crate::bambu::or_default")]
+    pub start_options: crate::bambu::StartOptions,
 }
 impl Conditions {
     pub(crate) fn role_id(&self, role: crate::model_import::Role) -> Result<&str> {
@@ -669,8 +673,8 @@ pub(crate) fn is_deleted(c: &rusqlite::Connection, id: &str) -> Result<bool> {
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
     let (name, version, conditions) = c
-        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled,support_enabled,support_interface_filament_id,secondary_filament_id FROM plates WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)?,support_enabled:r.get(10)?,support_interface_filament_id:r.get(11)?,secondary_filament_id:r.get(12)? }))
+        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled,support_enabled,support_interface_filament_id,secondary_filament_id,start_options_json FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)?,support_enabled:r.get(10)?,support_interface_filament_id:r.get(11)?,secondary_filament_id:r.get(12)?,start_options:r.get::<_,Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }))
         })
         .optional()?
         .ok_or(Error::NotFound)?;
@@ -706,7 +710,7 @@ pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 fn save_conditions(c: &rusqlite::Connection, id: &str, v: &Conditions) -> Result<()> {
-    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9,support_enabled=?10,support_interface_filament_id=?11,secondary_filament_id=?12 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled,v.support_enabled,v.support_interface_filament_id,v.secondary_filament_id])?;
+    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9,support_enabled=?10,support_interface_filament_id=?11,secondary_filament_id=?12,start_options_json=?13 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled,v.support_enabled,v.support_interface_filament_id,v.secondary_filament_id,serde_json::to_string(&v.start_options).map_err(std::io::Error::other)?])?;
     Ok(())
 }
 fn save_roles(
@@ -1174,7 +1178,7 @@ mod tests {
             .unwrap();
         let value = serde_json::to_value(&saved).unwrap();
         assert!(value["conditions"].is_object());
-        assert_eq!(value["conditions"].as_object().unwrap().len(), 10);
+        assert_eq!(value["conditions"].as_object().unwrap().len(), 11);
         assert!(
             value["conditions"]
                 .as_object()
@@ -1183,6 +1187,9 @@ mod tests {
                 .all(|(key, value)| {
                     if ["brim_enabled", "support_enabled"].contains(&key.as_str()) {
                         value == false
+                    } else if key == "start_options" {
+                        *value
+                            == serde_json::to_value(crate::bambu::StartOptions::default()).unwrap()
                     } else {
                         value.is_null()
                     }

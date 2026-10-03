@@ -514,6 +514,8 @@ fn check_creation_defaults(custom: bool) {
                 .all(
                     |(key, value)| if matches!(key.as_str(), "brim_enabled" | "support_enabled") {
                         value == false
+                    } else if key == "start_options" {
+                        value["timelapse"] == true
                     } else {
                         value.is_null()
                     }

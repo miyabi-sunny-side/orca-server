@@ -99,15 +99,13 @@ pub struct Status {
     /// The external spool (`vt_tray`) as reported; the server cannot see what is loaded.
     pub external_spool: Option<Tray>,
     pub auto_refill: AutoRefill,
+    /// Temperatures, fans, light, camera, HMS and options from the merged report.
+    pub live: Value,
 }
 
 impl Status {
     pub(crate) fn matches_attempt(&self, id: &str) -> bool {
-        let name = self.print.name.as_deref().filter(|s| !s.is_empty());
-        let file = self.print.file.as_deref().filter(|s| !s.is_empty());
-        (name.is_some() || file.is_some())
-            && name.is_none_or(|s| s == format!("orca-{id}"))
-            && file.is_none_or(|s| s == format!("orca-{id}.gcode.3mf"))
+        crate::bambu::names_attempt(self.print.name.as_deref(), self.print.file.as_deref(), id)
     }
 
     pub(crate) fn check_stopped(&self, id: &str) -> crate::plates::Result<()> {
@@ -270,6 +268,8 @@ pub struct State {
     external_spool: Option<Tray>,
     auto_refill: AutoRefill,
     tray_bits: Option<u16>,
+    /// The last full `print` report with later differences merged in.
+    document: Map<String, Value>,
 }
 
 impl State {
@@ -303,6 +303,7 @@ impl State {
             external_spool: None,
             auto_refill: AutoRefill::default(),
             tray_bits: None,
+            document: Map::new(),
         }
     }
     pub fn connected(&mut self) {
@@ -403,6 +404,11 @@ impl State {
         } else if !self.synchronized {
             return Err("unsynchronized_diff");
         }
+        if full {
+            self.document.clone_from(report);
+        } else {
+            crate::bambu::merge(&mut self.document, report);
+        }
         if report.contains_key("ams") {
             self.ams_reports += 1;
             self.ams_report_at = Some(now);
@@ -482,6 +488,7 @@ impl State {
             ams: self.ams.clone(),
             external_spool: self.external_spool.clone(),
             auto_refill: self.auto_refill.clone(),
+            live: crate::bambu::live(&self.document),
         }
     }
 

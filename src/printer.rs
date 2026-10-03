@@ -391,6 +391,58 @@ enum Request {
     Snapshot {
         response: oneshot::Sender<Result<(u64, u64)>>,
     },
+    /// Publish an operator control and answer with the printer's reply to it.
+    Control {
+        message: crate::bambu::Message,
+        response: oneshot::Sender<Result<Reply>>,
+    },
+}
+/// What became of one published control.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct Reply {
+    /// `success`, `rejected`, or `none` when no answer arrived in time or the connection ended.
+    pub reply: &'static str,
+    pub reason: Option<String>,
+}
+/// How long a published control waits for the printer's answer.
+const REPLY_TIMEOUT: u64 = 10;
+type Pending = Vec<(crate::bambu::Message, oneshot::Sender<Result<Reply>>, u64)>;
+
+/// Answer every pending control that `report` replies to.
+fn answer(pending: &mut Pending, report: &serde_json::Value) {
+    let mut index = 0;
+    while index < pending.len() {
+        if let Some(result) = crate::bambu::reply(report, &pending[index].0) {
+            let (_, response, _) = pending.swap_remove(index);
+            let _ = response.send(Ok(match result {
+                Ok(()) => Reply {
+                    reply: "success",
+                    reason: None,
+                },
+                Err(reason) => Reply {
+                    reply: "rejected",
+                    reason,
+                },
+            }));
+        } else {
+            index += 1;
+        }
+    }
+}
+/// End controls without an answer: those older than the timeout, or all of them (`now` = MAX).
+fn expire(pending: &mut Pending, now: u64, reason: &str) {
+    let mut index = 0;
+    while index < pending.len() {
+        if now.saturating_sub(pending[index].2) >= REPLY_TIMEOUT {
+            let (_, response, _) = pending.swap_remove(index);
+            let _ = response.send(Ok(Reply {
+                reply: "none",
+                reason: Some(reason.into()),
+            }));
+        } else {
+            index += 1;
+        }
+    }
 }
 pub(crate) struct Diagnostics {
     pub status: crate::printer_state::Status,
@@ -648,6 +700,33 @@ impl Printer {
             .map_err(|_| Error::Unavailable("Printer connection closed"))?
     }
 
+    /// Publish one operator control on the current connection and wait for the printer's answer.
+    /// Sending is not completion: the reply and later reports tell what the printer did.
+    pub(crate) async fn control(&self, control: &crate::bambu::Control) -> Result<Reply> {
+        if self.config.is_none() {
+            return Err(Error::Unavailable("Printer is not configured"));
+        }
+        let sequence = (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string();
+        let message = control.message(&sequence).map_err(Error::Invalid)?;
+        if !self.state.lock().await.status(now()).synchronized {
+            return Err(Error::Conflict(
+                "Wait for a fresh synchronized printer report",
+            ));
+        }
+        let (response, receiver) = oneshot::channel();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            self.starts.send(Request::Control { message, response }),
+        )
+        .await
+        .map_err(|_| Error::Conflict("Printer command is busy"))?
+        .map_err(|_| Error::Unavailable("Printer connection closed"))?;
+        tokio::time::timeout(Duration::from_secs(REPLY_TIMEOUT + 5), receiver)
+            .await
+            .map_err(|_| Error::Unavailable("Printer connection closed"))?
+            .map_err(|_| Error::Unavailable("Printer connection closed"))?
+    }
+
     pub(crate) async fn forget_retired(&self) -> Result<()> {
         let mut state = self.state.lock().await;
         if let (Some((db, device)), Some(attempt)) = (&self.inventory, &state.start) {
@@ -676,7 +755,11 @@ impl Printer {
         if state.start.as_ref().is_some_and(|a| {
             matches!(
                 a.phase,
-                Phase::Uploading | Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing
+                Phase::Uploading
+                    | Phase::AwaitingConfirmation
+                    | Phase::Accepted
+                    | Phase::Printing
+                    | Phase::Paused
             )
         }) {
             return Err(Error::Conflict("A start request is still active"));
@@ -1227,6 +1310,7 @@ fn tls_detail(error: &rumqttc::ConnectionError) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One select loop owns the connection and its requests.
 async fn run(
     options: MqttOptions,
     config: Config,
@@ -1248,6 +1332,7 @@ async fn run(
         let mut refresh = tokio::time::interval(Duration::from_mins(5));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut subscribed = false;
+        let mut pending: Pending = Vec::new();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         // Why this connection ended, as a safe category.
         let (reason, detail) = loop {
@@ -1271,6 +1356,9 @@ async fn run(
                         refresh.reset();
                     }
                     Ok(Event::Incoming(Incoming::Publish(message))) if subscribed && message.topic == report && !message.retain => {
+                        if !pending.is_empty() && let Ok(value) = serde_json::from_slice(&message.payload) {
+                            answer(&mut pending, &value);
+                        }
                         let mut state = state.lock().await;
                         on_report(&printer, &mut state, inventory.as_ref(), &message.payload).await;
                         log_phase(&printer, &mut last_phase, &state);
@@ -1285,13 +1373,25 @@ async fn run(
                             let _ = response.send(manual_snapshot(&printer, &state, &client, &request, subscribed).await);
                             continue;
                         }
+                        Request::Control { message, response } => {
+                            if subscribed {
+                                let payload = message.payload.to_string();
+                                let queued = client.try_publish(&request, QoS::AtMostOnce, false, payload.clone()).is_ok();
+                                crate::journal::request(&printer, state.lock().await.epoch, payload.as_bytes(), queued);
+                                if queued { pending.push((message, response, now())); }
+                                else { let _ = response.send(Err(Error::Unavailable("Control was not queued; check the printer connection"))); }
+                            } else {
+                                let _ = response.send(Err(Error::Conflict("Printer is not connected; check its power and network")));
+                            }
+                            continue;
+                        }
                         other => other,
                     };
                     let mut state = state.lock().await;
                     let status=state.status(now());
                     let (id,epoch)=match command {
                         Request::Start(id,epoch) => (id,epoch),
-                        Request::Snapshot { .. } => unreachable!("handled before locking"),
+                        Request::Snapshot { .. } | Request::Control { .. } => unreachable!("handled before locking"),
                         Request::AutoRefill{enabled,epoch,response} => {
                             let result=if response.is_closed() || !subscribed || state.epoch!=epoch || !status.synchronized || status.auto_refill.supported!=Some(true) {
                                 Err(Error::Conflict("Printer connection or auto refill support changed"))
@@ -1307,11 +1407,12 @@ async fn run(
                     log_phase(&printer, &mut last_phase, &state);
                 }
                 _ = tick.tick() => {
+                    expire(&mut pending, now(), "No reply from the printer within 10 seconds; check the reported state");
                     let mut state = state.lock().await;
                     let synchronized = state.status(now()).synchronized;
                     let mut timed_out = false;
                     if let Some(start) = &mut state.start {
-                        let pending = matches!(start.phase, Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing);
+                        let pending = matches!(start.phase, Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing | Phase::Paused);
                         start.tick(now(), config.start_timeout);
                         if !synchronized { start.disconnected(); }
                         timed_out = pending && start.phase == Phase::Unknown;
@@ -1326,6 +1427,11 @@ async fn run(
                 }
             }
         };
+        expire(
+            &mut pending,
+            u64::MAX,
+            "Connection ended before the printer replied; check the reported state",
+        );
         connection_ended(
             &printer,
             &mut *state.lock().await,

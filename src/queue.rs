@@ -1421,6 +1421,7 @@ impl Service {
                 });
         attempt.id = attempt_id.into();
         attempt.external = execution.settings.external;
+        attempt.options = execution.plate.conditions.start_options;
         self.printer.start(attempt, bytes).await?;
         Ok(())
     }
@@ -1576,7 +1577,7 @@ impl Database {
     pub(crate) fn persist_attempt(&self, pid: &str, attempt: &Attempt) -> Result<()> {
         let state = match attempt.phase {
             Phase::Uploading | Phase::AwaitingConfirmation | Phase::Accepted => "preparing",
-            Phase::Printing => "printing",
+            Phase::Printing | Phase::Paused => "printing",
             Phase::Finished => "awaiting_removal",
             _ => "needs_attention",
         };
@@ -2960,7 +2961,7 @@ mod tests {
             .db
             .connection()
             .unwrap()
-            .execute_batch("DROP TABLE print_history; PRAGMA user_version=15;")
+            .execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; PRAGMA user_version=15;")
             .unwrap();
         let store = Store::open(root.path().join("data")).unwrap();
         store

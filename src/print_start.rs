@@ -12,6 +12,8 @@ pub enum Phase {
     AwaitingConfirmation,
     Accepted,
     Printing,
+    /// The printer reports PAUSE without an error; resume or stop continues the same print.
+    Paused,
     Finished,
     Rejected,
     UploadFailed,
@@ -90,6 +92,9 @@ pub struct Attempt {
     /// Feed from the external spool instead of the AMS.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub external: bool,
+    /// Calibrations and timelapse requested with the start; frozen with the execution.
+    #[serde(default)]
+    pub options: crate::bambu::StartOptions,
     sequence: String,
     sent_at: Option<u64>,
     observed_printing: bool,
@@ -131,6 +136,7 @@ impl Attempt {
             completed_at: None,
             failure: None,
             external: false,
+            options: crate::bambu::StartOptions::default(),
             sequence: (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string(),
             sent_at: None,
             observed_printing: false,
@@ -160,8 +166,9 @@ impl Attempt {
             "file":self.filename(), "subtask_name":self.name(),
             "project_id":"0", "profile_id":"0", "task_id":"0", "subtask_id":"0", "md5":"",
             "use_ams":!self.external, "ams_mapping":mapping, "bed_type":"auto",
-            "timelapse":false, "bed_leveling":true, "flow_cali":false,
-            "vibration_cali":true, "layer_inspect":false
+            "timelapse":self.options.timelapse, "bed_leveling":self.options.bed_leveling,
+            "flow_cali":self.options.flow_calibration,
+            "vibration_cali":self.options.vibration_calibration, "layer_inspect":false
         }})
     }
     pub fn blocks_start(&self) -> bool {
@@ -171,6 +178,7 @@ impl Attempt {
                 | Phase::AwaitingConfirmation
                 | Phase::Accepted
                 | Phase::Printing
+                | Phase::Paused
                 | Phase::Unknown
         )
     }
@@ -188,7 +196,7 @@ impl Attempt {
     pub fn disconnected(&mut self) {
         if matches!(
             self.phase,
-            Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing
+            Phase::AwaitingConfirmation | Phase::Accepted | Phase::Printing | Phase::Paused
         ) {
             self.fail(
                 Phase::Unknown,
@@ -248,6 +256,7 @@ impl Attempt {
             Phase::AwaitingConfirmation
                 | Phase::Accepted
                 | Phase::Printing
+                | Phase::Paused
                 | Phase::Unknown
                 | Phase::Resolved
         ) {
@@ -282,9 +291,7 @@ impl Attempt {
         if report["command"] != "push_status" || !status.synchronized {
             return;
         }
-        let matches = status.print.name.as_deref() == Some(&self.name())
-            || status.print.file.as_deref() == Some(&self.filename());
-        if !matches {
+        if !status.matches_attempt(&self.id) {
             return;
         }
         // The attempt is observed on the current connection again.
@@ -326,10 +333,8 @@ impl Attempt {
                 });
             }
             Some("PAUSE") => {
-                self.fail(
-                    Phase::Unknown,
-                    "Print paused; resume or stop it on the printer",
-                );
+                self.phase = Phase::Paused;
+                self.message = None;
             }
             Some("IDLE") if self.observed_printing => self.fail(
                 Phase::Unknown,
@@ -567,12 +572,10 @@ mod tests {
         status.print.state = Some("PAUSE".into());
         let mut paused = a.clone();
         paused.observe(&report, &status);
-        assert_eq!(paused.phase, Phase::Unknown);
+        assert_eq!(paused.phase, Phase::Paused);
+        assert!(paused.blocks_start());
         assert!(paused.failure.is_none() && paused.notification().is_none());
-        assert_eq!(
-            paused.message.as_deref(),
-            Some("Print paused; resume or stop it on the printer")
-        );
+        assert!(paused.message.is_none());
 
         status.print.state = Some("RUNNING".into());
         errored.observe(&report, &status);
@@ -748,12 +751,17 @@ mod tests {
         status.print.name = Some(a.name());
         status.print.state = Some("RUNNING".into());
         a.observe(&json!({"print":{"command":"push_status"}}), &status);
-        for state in ["PAUSE", "IDLE", "FAILED"] {
+        for (state, phase) in [
+            ("PAUSE", Phase::Paused),
+            ("IDLE", Phase::Unknown),
+            ("FAILED", Phase::Unknown),
+        ] {
             let mut stopped = a.clone();
             status.print.state = Some(state.into());
             stopped.observe(&json!({"print":{"command":"push_status"}}), &status);
-            assert_eq!(stopped.phase, Phase::Unknown);
+            assert_eq!(stopped.phase, phase);
             assert!(stopped.blocks_start());
+            assert_ne!(stopped.phase, Phase::Finished);
         }
     }
 

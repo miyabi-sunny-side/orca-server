@@ -399,7 +399,7 @@ fn isolated_notification_delivery() {
         "another attempt's error is not this failure"
     );
     rig.report("PAUSE");
-    rig.phase("needs_attention");
+    rig.start_phase("paused");
     sleep(1.2);
     assert_eq!(
         webhook.len(),
@@ -408,8 +408,9 @@ fn isolated_notification_delivery() {
     );
     assert!(rig.queue()["current"]["failure"].is_null());
     assert_eq!(
-        rig.queue()["current"]["last_error"],
-        "Print paused; resume or stop it on the printer"
+        rig.queue()["current"]["state"],
+        "printing",
+        "a pause continues the same print"
     );
     coded(&rig, "PAUSE", 0x0300_4001, None);
     until(|| !rig.queue()["current"]["failure"].is_null(), 12);
@@ -466,7 +467,7 @@ fn isolated_notification_delivery() {
     assert_eq!(rows(&rig).len(), before);
     rig.stop(false);
     legacy_schema::queue_v16(&rig.db());
-    rig.db().execute_batch("DROP TABLE print_history; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; ALTER TABLE default_settings DROP COLUMN sparse_infill_pattern; ALTER TABLE default_settings DROP COLUMN sparse_infill_density; ALTER TABLE default_settings DROP COLUMN wall_loops; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=7;").unwrap();
+    rig.db().execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; ALTER TABLE default_settings DROP COLUMN sparse_infill_pattern; ALTER TABLE default_settings DROP COLUMN sparse_infill_density; ALTER TABLE default_settings DROP COLUMN wall_loops; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=7;").unwrap();
     rig.env
         .insert("NOTIFICATION_TEST_ENABLED".into(), "1".into());
     rig.launch();

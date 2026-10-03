@@ -265,7 +265,8 @@ pub fn creation_defaults(browser: bool) {
     assert_eq!(first["default_printer_id"], "p1");
     assert_eq!(
         first["conditions"],
-        json!({"required_machine_profile_key":MACHINE,"filament_id":rig.materials[0]["id"],"process_profile_key":PROCESS,"bed_type":BED,"sparse_infill_pattern":"adaptivecubic","sparse_infill_density":15.0,"wall_loops":2,"brim_enabled":false,"support_enabled":false,"support_interface_filament_id":null})
+        json!({"required_machine_profile_key":MACHINE,"filament_id":rig.materials[0]["id"],"process_profile_key":PROCESS,"bed_type":BED,"sparse_infill_pattern":"adaptivecubic","sparse_infill_density":15.0,"wall_loops":2,"brim_enabled":false,"support_enabled":false,"support_interface_filament_id":null,
+            "start_options":{"bed_leveling":true,"flow_calibration":true,"timelapse":true,"vibration_calibration":false}})
     );
     assert!(first["reason"].is_null());
     let mut settings = printer_settings(&rig.get("/api/printers/p1"));
@@ -304,6 +305,8 @@ pub fn creation_defaults(browser: bool) {
     assert!(old["conditions"].as_object().unwrap().iter().all(|(k, v)| {
         if matches!(k.as_str(), "brim_enabled" | "support_enabled") {
             v == false
+        } else if k == "start_options" {
+            v["timelapse"] == true
         } else {
             v.is_null()
         }
@@ -401,7 +404,7 @@ pub fn creation_defaults(browser: bool) {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        20
+        21
     );
     let db = rig.db();
     let columns: Vec<String> = db

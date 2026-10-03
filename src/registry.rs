@@ -407,6 +407,7 @@ fn state_routes() -> Router<Arc<Registry>> {
         .route("/api/printer/status", get(status))
         .route("/api/printers/{id}/diagnostics", get(diagnostics))
         .route("/api/printers/{id}/ams/refresh", post(refresh_inventory))
+        .route("/api/printers/{id}/control", post(control))
 }
 /// Ask the printer for a full report, then return the inventory built from it.
 async fn refresh_inventory(
@@ -422,6 +423,18 @@ async fn refresh_inventory(
     let Json(mut view) = inventory(State(registry), Path(id)).await?;
     view["refresh"] = json!({"report_at": full.at, "reading": full.reading});
     Ok(Json(view))
+}
+/// Send one operator control (pause, light, temperature…) and return the printer's answer.
+async fn control(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Json(control): Json<crate::bambu::Control>,
+) -> Result<Json<crate::printer::Reply>> {
+    let printer = {
+        let entries = registry.entries.lock().await;
+        entries.get(&id).ok_or(Error::NotFound)?.printer.clone()
+    };
+    printer.control(&control).await.map(Json)
 }
 fn product_routes() -> Router<Arc<Registry>> {
     Router::new()

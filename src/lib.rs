@@ -1,5 +1,6 @@
 mod ams;
 mod artifacts;
+mod bambu;
 mod database;
 mod estimates;
 mod filament;

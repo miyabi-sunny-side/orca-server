@@ -83,7 +83,12 @@ fn completed_history_survives_repeated_reports_cleanup_restart_and_deleted_refer
         rig.report("RUNNING");
         rig.phase("printing");
         rig.report(outcome);
-        rig.phase("needs_attention");
+        // A pause continues the same print; only the stop afterwards needs attention.
+        rig.phase(if outcome == "PAUSE" {
+            "printing"
+        } else {
+            "needs_attention"
+        });
         assert_eq!(rig.get("/api/history"), repeated);
         rig.report("FAILED");
         until(|| rig.queue()["allowed"]["discard"] == true, 12);
