@@ -146,7 +146,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=21 => {}
+            1..=22 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -299,6 +299,11 @@ impl Database {
                 tx.execute_batch("ALTER TABLE printers ADD COLUMN camera_port INTEGER NOT NULL DEFAULT 6000 CHECK(camera_port BETWEEN 1 AND 65535);")?;
             }
             tx.pragma_update(None, "user_version", 21)?;
+        }
+        if version < 22 {
+            // The printer's report decides the feed; the last queue request keeps its replay
+            // identity without the removed per-job choice.
+            tx.execute_batch("ALTER TABLE print_jobs DROP COLUMN feed; UPDATE printers SET queue_request=CASE WHEN json_extract(queue_request,'$.action.type')='feed' THEN NULL ELSE json_remove(queue_request,'$.action.feed') END WHERE queue_request IS NOT NULL; PRAGMA user_version=22;")?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -568,6 +573,55 @@ mod tests {
                     }
                 })
         );
+    }
+    #[test]
+    fn version_22_drops_the_per_job_feed_and_keeps_jobs_and_the_last_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        let add = r#"{"epoch":"e","generation":3,"request_id":"r","action":{"type":"add","plate_id":"p","plate_version":1,"feed":"external"}}"#;
+        db.connection().unwrap().execute_batch(&format!("INSERT INTO plates(id,name) VALUES ('p','P'); INSERT INTO print_jobs(id,printer_id,plate_id,state,position) VALUES ('a','stable-id','p','queued',0),('b','stable-id','p','needs_attention',1); ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams' CHECK(feed IN ('ams','external')); UPDATE print_jobs SET feed='external' WHERE id='b'; UPDATE printers SET queue_request='{add}'; PRAGMA user_version=21;")).unwrap();
+        drop(db);
+        let reopen = || {
+            let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
+            let c = db.connection().unwrap();
+            let jobs: Vec<(String, String)> = c
+                .prepare("SELECT id,state FROM print_jobs ORDER BY position")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let request: Option<String> = c
+                .query_row("SELECT queue_request FROM printers", [], |r| r.get(0))
+                .unwrap();
+            let columns: i64 = c
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('print_jobs') WHERE name='feed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (jobs, request, columns)
+        };
+        let (jobs, request, columns) = reopen();
+        assert_eq!(
+            jobs,
+            [
+                ("a".into(), "queued".into()),
+                ("b".into(), "needs_attention".into())
+            ]
+        );
+        assert_eq!(columns, 0);
+        let request: crate::queue::Command = serde_json::from_str(&request.unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["action"],
+            serde_json::json!({"type":"add","plate_id":"p","plate_version":1})
+        );
+        // A recorded feed change has no replacement; the next request starts afresh.
+        let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        c.execute_batch(r#"ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams'; UPDATE printers SET queue_request='{"epoch":"e","generation":4,"request_id":"s","action":{"type":"feed","job_id":"a","feed":"external"}}'; PRAGMA user_version=21;"#).unwrap();
+        drop(c);
+        assert_eq!(reopen().1, None);
     }
     #[test]
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
@@ -978,7 +1032,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            21
+            22
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

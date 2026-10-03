@@ -22,7 +22,6 @@
     feedLabel,
     jobControls,
     liveLine,
-    type Feed,
     type Job,
     printerText,
     type Action,
@@ -75,7 +74,6 @@
   let menu = $state<{
     id: string;
     plate_id: string;
-    feed: Feed;
     name: string;
     printerId: string;
     index: number;
@@ -96,7 +94,6 @@
     menu = {
       id: job.id,
       plate_id: job.plate_id,
-      feed: job.feed ?? "ams",
       name: job.name,
       printerId,
       index: queue?.waiting.findIndex((j) => j.id === job.id) ?? 0,
@@ -128,7 +125,6 @@
       type: "add",
       plate_id: menuJob.plate_id,
       plate_version: queue.admission.plate_version,
-      feed: menuJob.feed ?? "ams",
     });
   }
 
@@ -152,9 +148,7 @@
     const target = menu?.id;
     const path =
       queuePath +
-      (menu
-        ? `&plate_id=${encodeURIComponent(menu.plate_id)}&feed=${menu.feed}`
-        : "");
+      (menu ? `&plate_id=${encodeURIComponent(menu.plate_id)}` : "");
     try {
       const value = await request<QueueState>(path, {
         signal: controller.signal,
@@ -240,16 +234,9 @@
       }
     }
     const { action: done } = command;
-    if (
-      applied &&
-      (done.type === "add" || done.type === "remove" || done.type === "feed")
-    ) {
+    if (applied && (done.type === "add" || done.type === "remove")) {
       notice =
-        done.type === "add"
-          ? "キューを複製しました"
-          : done.type === "feed"
-            ? `給材元を${feedLabel(done.feed)}に変更しました`
-            : "キューから削除しました";
+        done.type === "add" ? "キューを複製しました" : "キューから削除しました";
       if (menu) await closeMenu();
     }
   }
@@ -689,28 +676,13 @@
         onclick={() => void duplicate()}>キュー複製</button
       >
       <button
-        class="btn"
-        disabled={disabled || !!reasons.feed}
-        onclick={() => {
-          if (menuJob)
-            void send({
-              type: "feed",
-              job_id: menuJob.id,
-              feed: menuJob.feed === "external" ? "ams" : "external",
-            });
-        }}
-        >{feedLabel(
-          menuJob?.feed === "external" ? "ams" : "external",
-        )}で印刷</button
-      >
-      <button
         class="btn danger"
         disabled={disabled || !!reasons.remove}
         onclick={() => {
           if (menuJob) void send({ type: "remove", job_id: menuJob.id });
         }}>キュー削除</button
       >
-      {#each [...new Set([reasons.edit, reasons.duplicate, reasons.feed, reasons.remove].filter(Boolean))] as reason}<p
+      {#each [...new Set([reasons.edit, reasons.duplicate, reasons.remove].filter(Boolean))] as reason}<p
           class="caption"
         >
           {reason}

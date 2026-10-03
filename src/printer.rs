@@ -648,7 +648,16 @@ impl Printer {
         }
         let (db, device) = self.inventory.clone().ok_or(Error::NotFound)?;
         let report = state.reports;
-        let slots = crate::plate_api::blocking(move || {
+        // Rows of an unplugged AMS stay stored for when it returns; list only reported units.
+        let units: Option<Vec<u8>> = current.then(|| {
+            status
+                .ams
+                .iter()
+                .flat_map(|ams| &ams.units)
+                .map(|unit| unit.id)
+                .collect()
+        });
+        let mut slots = crate::plate_api::blocking(move || {
             observe(&db, &device, &status, "inventory", report)?;
             match change {
                 Some(crate::ams::Change::Mapping(id, m)) => {
@@ -665,6 +674,9 @@ impl Printer {
             db.ams_slots(&device.id)
         })
         .await?;
+        if let Some(units) = units {
+            slots.retain(|slot| units.contains(&slot.ams_id));
+        }
         Ok((current, slots))
     }
 

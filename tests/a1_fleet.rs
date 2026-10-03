@@ -147,11 +147,12 @@ fn three_a1_minis_with_and_without_ams_lite_never_cross() {
         201,
     );
     for (i, pid) in ids.iter().enumerate() {
+        // The printer without an AMS lite takes the job for its external spool.
         let feed = if i == 1 { "external" } else { "ams" };
         let added = command(
             &rig,
             pid,
-            json!({"type":"add","plate_id":plate["id"],"plate_version":plate["version"],"feed":feed}),
+            json!({"type":"add","plate_id":plate["id"],"plate_version":plate["version"]}),
         );
         let job = added["waiting"][0].clone();
         assert_eq!(job["feed"], feed);

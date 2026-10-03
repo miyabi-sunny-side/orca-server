@@ -1,6 +1,5 @@
 import { estimateText } from "./queue";
 import {
-  defaultFeed,
   errorLine,
   feedLabel,
   hmsHelp,
@@ -271,29 +270,7 @@ it("summarizes current progress and waiting holds in one status line", async () 
   ).toContain("0℃");
 });
 
-it("defaults the feed to the external spool only when the printer reports no AMS", () => {
-  expect(defaultFeed(null)).toBe("ams");
-  expect(defaultFeed({})).toBe("ams");
-  expect(defaultFeed({ ams: null })).toBe("external");
-  expect(defaultFeed({ ams: { units: [] } })).toBe("external");
-  expect(defaultFeed({ ams: { units: [{ id: 0, trays: [] }] } })).toBe("ams");
-});
-
-it("allows a feed change only for waiting and attention-needed jobs", () => {
-  const admission = { plate_version: 7, allowed: true, reason: null };
-  for (const state of [
-    "queued",
-    "preparing",
-    "printing",
-    "awaiting_removal",
-    "needs_attention",
-  ] as const) {
-    const reasons = menuReasons({ state, plate_deleted: false }, admission);
-    expect(Boolean(reasons.feed)).toBe(
-      state !== "queued" && state !== "needs_attention",
-    );
-  }
-  expect(menuReasons(undefined, null).feed).toBeTruthy();
+it("labels the feed the printer uses", () => {
   expect(feedLabel("external")).toBe("外部スプール");
   expect(feedLabel(undefined)).toBe("AMS");
 });

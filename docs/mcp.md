@@ -167,7 +167,7 @@ FINISH、再起動、画面表示だけでは次の印刷を始めません。�
 | `ams_resolve` | `printer_id`、`filament_id`。現在使用できる候補と開始時の優先slot。 |
 | `ams_prioritize` | `printer_id`、`priority: {filament_id,order:[{id,revision}]}`。現在の同一材料グループ全件を使用順に指定。 |
 | `plate_options` | 任意の`machine`。所持機の機種/ノズル一覧と、指定機種の工程・材料・bed候補。 |
-| `plate_admission` | `printer_id`、`plate_id`、任意の`feed`（`ams`・`external`、既定`ams`）。現在版の`plate_version`、`feed`、`allowed`、`reason`。 |
+| `plate_admission` | `printer_id`、`plate_id`。現在版の`plate_version`、実機が今使う給材元`feed`、`allowed`、`reason`。 |
 | `queue_get` | `printer_id`。現在ジョブ・待機先頭・可否・復旧できない理由・要求に使う識別値。 |
 | `queue_continue` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`next_job: string or null`、`removed_job: string or null`。開始・継続または最後の取り外し完了。 |
 | `printer_control` | `printer_id`、`control`（[本体の操作API](printer.md#本体の操作api)の`action`と項目）。一時停止・停止・温度・照明・ロードなど。利用者が対象機へ明示的に指示した場合だけ使います。 |

@@ -128,8 +128,7 @@ export type QueueState = {
   } | null;
 };
 export type Action =
-  | { type: "add"; plate_id: string; plate_version: number; feed?: Feed }
-  | { type: "feed"; job_id: string; feed: Feed }
+  | { type: "add"; plate_id: string; plate_version: number }
   | { type: "move"; job_id: string; index: number }
   | { type: "remove"; job_id: string }
   | { type: "reestimate"; job_id: string }
@@ -150,21 +149,13 @@ export type Command = {
 export function feedLabel(feed?: Feed) {
   return feed === "external" ? "外部スプール" : "AMS";
 }
-/** A new job uses the external spool when the printer reports no AMS unit; unknown stays AMS. */
-export function defaultFeed(
-  status: { ams?: { units: unknown[] } | null } | null,
-): Feed {
-  return status?.ams === undefined || status.ams?.units.length
-    ? "ams"
-    : "external";
-}
 export function menuReasons(
   job: Pick<Job, "state" | "plate_deleted"> | undefined,
   admission: QueueState["admission"],
 ) {
   if (!job) {
     const reason = "このジョブはキューにありません。";
-    return { edit: reason, duplicate: reason, remove: reason, feed: reason };
+    return { edit: reason, duplicate: reason, remove: reason };
   }
   const edit = job.plate_deleted ? "プレートは一覧から削除されています。" : "";
   const duplicate =
@@ -180,11 +171,7 @@ export function menuReasons(
       : job.state === "awaiting_removal" || job.state === "needs_attention"
         ? "現在のジョブは、造形物を取り外してから取り外し確認の操作で終了してください。"
         : `${phaseText[job.state]}のジョブは削除できません。`;
-  const feed =
-    job.state === "queued" || job.state === "needs_attention"
-      ? ""
-      : `${phaseText[job.state]}のジョブは給材元を変更できません。`;
-  return { edit, duplicate, remove, feed };
+  return { edit, duplicate, remove };
 }
 
 export function slotLabel(slot: number, ams: Ams | null) {

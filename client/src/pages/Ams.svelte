@@ -181,7 +181,11 @@
     {#if !inventory.current}<div class="notice">
         <p role="status">装填状態は未確認です</p>
       </div>{/if}
-    {#if !inventory.slots.length}<p class="state">AMSの報告はありません</p>{/if}
+    {#if !inventory.slots.length}<p class="state">
+        {inventory.current
+          ? "AMS未接続 · 外部スプールで印刷します"
+          : "AMSの報告はありません"}
+      </p>{/if}
     <ul class="slots">
       {#each inventory.slots as slot (slot.id)}<AmsSlot
           {slot}

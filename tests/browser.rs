@@ -278,22 +278,28 @@ fn external_spool() {
     let mut rig = Rig::new("browser-external-spool");
     rig.launch();
     rig.seed();
-    let plate = rig.configure(None, None);
-    // The P1S as observed in production with the AMS detached and an unset external spool.
+    // As in production on 2026-10-03: jobs queued with the AMS, the first fails on an AMS jam.
+    let first = rig.add(3);
+    rig.add(3);
+    rig.next(&first, 200);
+    until(|| rig.broker.prints().len() == 1, 20);
+    rig.report("RUNNING");
+    rig.phase("printing");
+    rig.report("FAILED");
+    rig.phase("needs_attention");
+    // The user unplugs the AMS and inserts the filament into the external spool path.
     rig.full["print"]["ams"] =
         json!({"ams":[],"ams_exist_bits":"0","tray_exist_bits":"0","tray_now":"254"});
     rig.full["print"]["vt_tray"] = json!({"id":"254","tray_type":"","tray_color":"00000000"});
-    rig.broker.send(&rig.full);
-    until(|| rig.queue()["printer"]["external_spool"]["id"] == 254, 12);
+    rig.report("FAILED");
+    until(|| rig.queue()["allowed"]["retry"] == true, 12);
     let control = rig.control();
-    rig.browser(
-        "E2E_EXTERNAL_CONTEXT",
-        &json!({"plate":plate["id"]}),
-        Some(&control),
-    );
+    rig.browser("E2E_EXTERNAL_CONTEXT", &json!({}), Some(&control));
     let prints = rig.broker.prints();
-    assert_eq!(prints.len(), 1);
-    assert_eq!(prints[0]["use_ams"], false);
+    assert_eq!(prints.len(), 3);
+    assert_eq!(prints[0]["use_ams"], true);
+    assert_eq!(prints[1]["use_ams"], false);
+    assert_eq!(prints[2]["use_ams"], false);
 }
 
 #[test]

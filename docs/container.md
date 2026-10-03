@@ -121,8 +121,9 @@ docker logs orca-server
 稼働中のDBファイルだけをコピーしないでください。SCAD元データはscad-live側でも保管します。
 アップロード元STLは同じDBに含まれるため、DBの復元で再利用できます。
 
-現在のSQLite schema versionは21です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
+現在のSQLite schema versionは22です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
 version 20でジョブの給材元（`print_jobs.feed`、既存行は`ams`）、21でプレートの開始オプション（`plates.start_options_json`、既存行は既定）と機器のカメラのポート（`printers.camera_port`、既定6000）を追加しました。
+version 22でジョブごとの給材元`print_jobs.feed`を削除しました（給材元は実機の報告で決まります）。最後のキュー要求に残る`feed`も取り除き、ジョブ・実行記録・履歴はそのまま残します。
 プレート・キューには`plates`、`plate_items`、`print_jobs`を使います。
 初期設定は`default_settings`、通知は`print_notifications`で保持します。
 製品と色の分離では既存材料IDとキューを保持し、全設定が一致する製品だけをまとめます。[材料の移行条件](filaments.md#保存と移行)を確認してください。

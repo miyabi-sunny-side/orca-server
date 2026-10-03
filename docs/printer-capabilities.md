@@ -13,9 +13,9 @@ LAN印刷とカメラは[ha-bambulab cd67ed9](https://github.com/greghesp/ha-bam
 
 | 機能 | 状態 | 入口・根拠 |
 | --- | --- | --- |
-| AMSから印刷 | 実装 | キューの給材`ams`。指定材料のslotを使用順で解決。 |
-| 外部スプールから印刷 | 実装 | キューの給材`external`。`use_ams:false`で開始（SelectMachine.cpp、ha-bambulab）。 |
-| AMSを外した後の継続 | 実装 | AMSの消失で既存ジョブを切り替えず、行メニューで給材を変更。 |
+| AMSから印刷 | 実装 | AMSを報告する実機。指定材料のslotを使用順で解決。 |
+| 外部スプールから印刷 | 実装 | AMSを報告しない実機。`use_ams:false`で開始（SelectMachine.cpp、ha-bambulab）。 |
+| AMSを外した後の継続 | 実装 | 待機・要確認のジョブはそのまま外部スプールで印刷。 |
 | ロード・アンロード | 実装 | 操作`load`（slot 0〜15、外部254）・`unload`。`ams_change_filament`。 |
 | AMSのエラー後の再試行・完了 | 実装 | 操作`ams`（`resume`・`reset`・`done`）。`ams_control`。 |
 | 材料切れ時の標準自動補充 | 実装 | AMS画面の自動補充（`print_option.auto_switch_filament`）。 |

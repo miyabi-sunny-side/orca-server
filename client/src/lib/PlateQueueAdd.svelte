@@ -2,13 +2,7 @@
   import { onMount } from "svelte";
   import { ApiError, request, type Plate, type Printer } from "./api";
   import { choosePrinter, destinations, emptyConditions } from "./plate";
-  import {
-    defaultFeed,
-    failureText,
-    type Command,
-    type Feed,
-    type QueueState,
-  } from "./queue";
+  import { failureText, type Command, type QueueState } from "./queue";
   let {
     plate = $bindable(),
     paused = false,
@@ -26,9 +20,7 @@
   } = $props();
   const id = $derived(plate.id);
   let printers = $state<Printer[]>([]),
-    printerId = $state(""),
-    feed = $state<Feed>("ams"),
-    feedChosen = false;
+    printerId = $state("");
   let queue = $state<QueueState>(),
     readError = $state(""),
     reading = $state(false),
@@ -70,8 +62,7 @@
       queue.admission.plate_version !== plate?.version,
   );
   const pendingKey = $derived(`orca-plate-pending:${id}`),
-    printerKey = $derived(`orca-plate-printer:${id}`),
-    feedKey = $derived(`orca-plate-feed:${id}`);
+    printerKey = $derived(`orca-plate-printer:${id}`);
   const controller = new AbortController();
   let sequence = 0;
   async function refresh() {
@@ -90,13 +81,9 @@
           destinations(p, conditions.required_machine_profile_key),
           printerId,
         );
-      if (pending?.command.action.type === "add")
-        feed = pending.command.action.feed ?? "ams";
-      else if (!feedChosen)
-        feed = defaultFeed(p.find((d) => d.id === printerId)?.status ?? null);
       const value = printerId
         ? await request<QueueState>(
-            `/api/queue?printer_id=${encodeURIComponent(printerId)}&plate_id=${id}&feed=${feed}`,
+            `/api/queue?printer_id=${encodeURIComponent(printerId)}&plate_id=${id}`,
             { signal: controller.signal },
           )
         : undefined;
@@ -132,17 +119,6 @@
     }
     void refresh();
   }
-  function rememberFeed() {
-    queue = undefined;
-    notice = "";
-    feedChosen = true;
-    try {
-      localStorage.setItem(feedKey, feed);
-    } catch {
-      /* Selection remains usable for this page. */
-    }
-    void refresh();
-  }
   function savePending() {
     try {
       if (pending) sessionStorage.setItem(pendingKey, JSON.stringify(pending));
@@ -164,7 +140,6 @@
             type: "add",
             plate_id: plate.id,
             plate_version: plate.version,
-            feed,
           },
         },
       };
@@ -208,18 +183,16 @@
   onMount(() => {
     try {
       printerId = preferredPrinter || localStorage.getItem(printerKey) || "";
-      const savedFeed = localStorage.getItem(feedKey);
-      if (savedFeed === "ams" || savedFeed === "external") {
-        feed = savedFeed;
-        feedChosen = true;
-      }
       const saved = JSON.parse(sessionStorage.getItem(pendingKey) ?? "null");
       if (
         saved?.command?.action?.type === "add" &&
         saved.command.action.plate_id === id &&
         typeof saved.printerId === "string"
-      )
+      ) {
+        // Requests saved before v0.1.64 carried a per-job feed the server no longer takes.
+        delete saved.command.action.feed;
         pending = saved;
+      }
     } catch {
       /* Ignore invalid browser storage. */
     }
@@ -248,16 +221,6 @@
   {:else if candidates.length === 1}<p class="caption">
       追加先: {candidates[0].name}
     </p>{/if}
-  {#if candidates.length}<label class="field"
-      ><span>給材</span><select
-        bind:value={feed}
-        onchange={rememberFeed}
-        disabled={busy || !!pending || reading}
-        ><option value="ams">AMS</option><option value="external"
-          >外部スプール</option
-        ></select
-      ></label
-    >{/if}
   <div class="actions">
     <button class="btn primary" {disabled} onclick={() => void add()}
       >{label}</button
@@ -283,8 +246,8 @@
       {#if !importHold}
         <div class="actions">
           {#if !printerId}<a href="/printers">プリンターを確認</a
-            >{:else if feed === "ams"}<a href={`/printers/${printerId}/ams`}
-              >AMSを確認</a
+            >{:else if queue?.admission?.feed !== "external"}<a
+              href={`/printers/${printerId}/ams`}>AMSを確認</a
             >{/if}
         </div>
       {/if}

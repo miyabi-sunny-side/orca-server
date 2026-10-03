@@ -227,7 +227,15 @@ fn ams_reports_are_traced_from_receipt_to_committed_assignments() {
     let mut without_ams = rig.full.clone();
     without_ams["print"].as_object_mut().unwrap().remove("ams");
     rig.broker.send(&without_ams);
-    until(|| rig.slot(0)["filament_id"].is_null(), 12);
+    until(
+        || array(&rig.get("/api/printers/p1/ams")["slots"]).is_empty(),
+        12,
+    );
+    let mapped = rig.rows(
+        "SELECT filament_id FROM ams_slots WHERE ams_id=0 AND slot_index=0",
+        &[],
+    );
+    assert_eq!(mapped, vec![vec![rusqlite::types::Value::Null]]);
 
     let text = log(&rig);
     assert!(

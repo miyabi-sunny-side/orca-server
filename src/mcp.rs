@@ -133,9 +133,6 @@ struct PrinterControl {
 struct Admission {
     printer_id: String,
     plate_id: String,
-    /// "ams" (default) or "external" for the printer's external spool.
-    #[serde(default)]
-    feed: Option<String>,
 }
 
 #[derive(Clone)]
@@ -539,7 +536,7 @@ impl Tools {
         answer(self.machine_options(a.machine.as_deref()).await)
     }
     #[tool(
-        description = "Read queue admission for a saved plate on an explicit physical printer and feed (ams by default, or external for the external spool), including its current version, allowed flag and reason. Saving a plate does not imply it can be queued. This never enqueues or starts printing.",
+        description = "Read queue admission for a saved plate on an explicit physical printer, including its current version, the feed the printer uses now (the AMS while one is attached, else the external spool), allowed flag and reason. Saving a plate does not imply it can be queued. This never enqueues or starts printing.",
         annotations(read_only_hint = true)
     )]
     async fn plate_admission(&self, Parameters(a): Parameters<Admission>) -> CallToolResult {
@@ -547,11 +544,7 @@ impl Tools {
             self.api(
                 Method::GET,
                 &["api", "queue"],
-                &[
-                    ("printer_id", &a.printer_id),
-                    ("plate_id", &a.plate_id),
-                    ("feed", a.feed.as_deref().unwrap_or("ams")),
-                ],
+                &[("printer_id", &a.printer_id), ("plate_id", &a.plate_id)],
                 None,
             )
             .await
