@@ -3,7 +3,9 @@
   import { onMount, tick } from "svelte";
   import {
     ApiError,
+    controlText,
     request,
+    sendControl,
     type Printer as Device,
     type Filament,
     type AmsInventory,
@@ -18,6 +20,8 @@
     moveIndex,
     menuReasons,
     feedLabel,
+    jobControls,
+    liveLine,
     type Feed,
     type Job,
     printerText,
@@ -47,6 +51,27 @@
   });
   const controller = new AbortController();
   const disabled = $derived(busy || !!pending || !!readError || !queue);
+  let controlling = $state(false),
+    stopArmed = $state(false),
+    controlNotice = $state("");
+  /** Pause, resume or stop the print on the printer itself; the queue follows its reports. */
+  async function printControl(action: "pause" | "resume" | "stop") {
+    if (action === "stop" && !stopArmed) {
+      stopArmed = true;
+      setTimeout(() => (stopArmed = false), 4000);
+      return;
+    }
+    stopArmed = false;
+    controlling = true;
+    try {
+      controlNotice = controlText(await sendControl(printerId, { action }));
+    } catch (e) {
+      controlNotice = (e as Error).message;
+    } finally {
+      controlling = false;
+      void refresh();
+    }
+  }
   let menu = $state<{
     id: string;
     plate_id: string;
@@ -437,8 +462,19 @@
 <section class="printer-queue" aria-label={`${printer.name}のキュー`}>
   <div class="printer-heading">
     <h2>{printer.name}</h2>
+    <a
+      class="icon-btn"
+      href={`/printers/${printerId}/control`}
+      aria-label="本体の操作"
+      title="本体の操作"><Icon name="sliders" /></a
+    >
     <a bind:this={settingsLink} href={`/printers/${printerId}`}>設定</a>
   </div>
+  {#if queue?.printer.synchronized && liveLine(queue.printer.live)}<p
+      class="caption live-line"
+    >
+      {liveLine(queue.printer.live)}
+    </p>{/if}
   {#if !menu}{@render issue()}{/if}
   {#if notice}<p class="queue-notice" role="status">{notice}</p>{/if}
   {#if queue}
@@ -458,6 +494,37 @@
           {@render summary(queue.current)}
           {@render details(queue.current)}
         </details>{/key}
+      {#if queue.current.state === "printing"}
+        {@const can = jobControls(queue.printer.print.state)}
+        <div class="print-controls" role="group" aria-label="印刷の操作">
+          {#if can.resume}<button
+              class="icon-btn large"
+              aria-label="再開"
+              title="再開"
+              disabled={controlling}
+              onclick={() => void printControl("resume")}
+              ><Icon name="play" /></button
+            >{:else}<button
+              class="icon-btn large"
+              aria-label="一時停止"
+              title="一時停止"
+              disabled={controlling || !can.pause}
+              onclick={() => void printControl("pause")}
+              ><Icon name="pause" /></button
+            >{/if}
+          <button
+            class={stopArmed ? "btn danger" : "icon-btn large"}
+            aria-label={stopArmed ? "停止を確定" : "停止"}
+            title="停止"
+            disabled={controlling || !can.stop}
+            onclick={() => void printControl("stop")}
+            >{#if stopArmed}停止を確定{:else}<Icon name="square" />{/if}</button
+          >
+          {#if controlNotice}<span class="caption" role="status"
+              >{controlNotice}</span
+            >{/if}
+        </div>
+      {/if}
     {/if}
     {#if reported}
       {@const failure = failureLines(reported.failure)}
@@ -664,14 +731,20 @@
 
   .printer-queue
     margin-bottom: var(--sp-5)
+  .print-controls
+    display: flex
+    flex-wrap: wrap
+    align-items: center
+    gap: var(--sp-2)
+  .live-line
+    margin: 0
   .printer-heading
     display: flex
-    align-items: baseline
-    justify-content: space-between
+    align-items: center
     gap: var(--sp-3)
     margin-bottom: var(--sp-3)
     h2
-      margin: 0
+      margin: 0 auto 0 0
       font-size: var(--fs-xl)
       overflow-wrap: anywhere
     a

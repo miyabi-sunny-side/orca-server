@@ -2,6 +2,7 @@
   import Header from "./lib/Header.svelte";
   import Filaments from "./pages/Filaments.svelte";
   import Ams from "./pages/Ams.svelte";
+  import PrinterControl from "./pages/PrinterControl.svelte";
   import Printers from "./pages/Printers.svelte";
   import History from "./pages/History.svelte";
   import Queue from "./pages/Queue.svelte";
@@ -17,6 +18,7 @@
 <Header />
 <main>
   {#if /^\/printers\/[^/]+\/ams$/.test(path)}<Ams />
+  {:else if /^\/printers\/[^/]+\/control$/.test(path)}<PrinterControl />
   {:else if path === "/filaments" || path.startsWith("/filaments/")}<Filaments
     />
   {:else if path === "/printers" || path.startsWith("/printers/")}<Printers />

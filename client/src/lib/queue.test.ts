@@ -1,5 +1,14 @@
 import { estimateText } from "./queue";
-import { defaultFeed, feedLabel, menuReasons, type Job } from "./queue";
+import {
+  defaultFeed,
+  feedLabel,
+  hmsHelp,
+  jobControls,
+  liveLine,
+  menuReasons,
+  printerStateText,
+  type Job,
+} from "./queue";
 import { describe, expect, it } from "vitest";
 import { slotLabel, printerText, type Printer } from "./queue";
 const printer: Printer = {
@@ -264,6 +273,7 @@ it("summarizes current progress and waiting holds in one status line", async () 
 
 it("defaults the feed to the external spool only when the printer reports no AMS", () => {
   expect(defaultFeed(null)).toBe("ams");
+  expect(defaultFeed({})).toBe("ams");
   expect(defaultFeed({ ams: null })).toBe("external");
   expect(defaultFeed({ ams: { units: [] } })).toBe("external");
   expect(defaultFeed({ ams: { units: [{ id: 0, trays: [] }] } })).toBe("ams");
@@ -286,4 +296,83 @@ it("allows a feed change only for waiting and attention-needed jobs", () => {
   expect(menuReasons(undefined, null).feed).toBeTruthy();
   expect(feedLabel("external")).toBe("外部スプール");
   expect(feedLabel(undefined)).toBe("AMS");
+});
+
+it("summarizes live temperatures and layers in one short line", () => {
+  expect(
+    liveLine({
+      temperatures: {
+        nozzle: 212.4,
+        nozzle_target: 220,
+        bed: 60,
+        bed_target: 60,
+        chamber: 31,
+      },
+      layer: { current: 12, total: 337 },
+    }),
+  ).toBe("ノズル 212/220℃ · ベッド 60/60℃ · 層 12/337");
+  expect(
+    liveLine({
+      temperatures: {
+        nozzle: 27,
+        nozzle_target: 0,
+        bed: 24,
+        bed_target: 0,
+        chamber: 5,
+      },
+      layer: { current: 0, total: 0 },
+    }),
+  ).toBe("ノズル 27℃ · ベッド 24℃");
+  expect(liveLine(undefined)).toBe("");
+  expect(
+    liveLine({
+      temperatures: {
+        nozzle: null,
+        nozzle_target: null,
+        bed: null,
+        bed_target: null,
+        chamber: null,
+      },
+      layer: { current: null, total: null },
+    }),
+  ).toBe("");
+});
+
+it("offers pause or resume only for the matching printer state", () => {
+  expect(jobControls("RUNNING")).toEqual({
+    pause: true,
+    resume: false,
+    stop: true,
+  });
+  expect(jobControls("PREPARE")).toEqual({
+    pause: true,
+    resume: false,
+    stop: true,
+  });
+  expect(jobControls("PAUSE")).toEqual({
+    pause: false,
+    resume: true,
+    stop: true,
+  });
+  for (const state of ["IDLE", "FINISH", "FAILED", null])
+    expect(jobControls(state)).toEqual({
+      pause: false,
+      resume: false,
+      stop: false,
+    });
+});
+
+it("links HMS codes to the official help without a device ID", () => {
+  expect(hmsHelp("0300_0D00_0001_0004")).toBe(
+    "https://e.bambulab.com/index.php?e=03000D0000010004&s=device_hms&lang=ja",
+  );
+  expect(hmsHelp("bad")).toBeNull();
+});
+
+it("names the printer's reported state in Japanese", () => {
+  expect(printerStateText("RUNNING")).toBe("印刷中");
+  expect(printerStateText("PAUSE")).toBe("一時停止中");
+  expect(printerStateText("FAILED")).toBe("停止");
+  expect(printerStateText("SLICING")).toBe("SLICING");
+  expect(printerStateText(null)).toBe("状態不明");
 });

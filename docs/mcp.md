@@ -170,6 +170,7 @@ FINISH、再起動、画面表示だけでは次の印刷を始めません。�
 | `plate_admission` | `printer_id`、`plate_id`、任意の`feed`（`ams`・`external`、既定`ams`）。現在版の`plate_version`、`feed`、`allowed`、`reason`。 |
 | `queue_get` | `printer_id`。現在ジョブ・待機先頭・可否・復旧できない理由・要求に使う識別値。 |
 | `queue_continue` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`next_job: string or null`、`removed_job: string or null`。開始・継続または最後の取り外し完了。 |
+| `printer_control` | `printer_id`、`control`（[本体の操作API](printer.md#本体の操作api)の`action`と項目）。一時停止・停止・温度・照明・ロードなど。利用者が対象機へ明示的に指示した場合だけ使います。 |
 | `queue_retry` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`expected_job: string`。要確認ジョブを固定済み条件から新しい試行で再印刷。 |
 
 `plate_admission`は、条件の不足、実機との不一致、未同期や該当材料の未装填など、通常のキュー追加と同じ判断を返します。

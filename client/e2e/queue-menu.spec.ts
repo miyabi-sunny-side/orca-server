@@ -93,7 +93,7 @@ for (const width of [375, 900])
         .evaluateAll((nodes) =>
           nodes.map((n) => n.getBoundingClientRect().width),
         );
-      expect(widths).toHaveLength(3);
+      expect(widths).toHaveLength(4);
       expect(new Set(widths).size).toBe(1);
       if (process.env.E2E_EVIDENCE_DIR)
         await page.screenshot({
@@ -119,11 +119,13 @@ for (const width of [375, 900])
         type: "add",
         plate_id: q.waiting[0].plate_id,
         plate_version: 7,
+        feed: "ams",
       });
       expect(commands[1].action).toEqual({
         type: "add",
         plate_id: q.current.plate_id,
         plate_version: 7,
+        feed: "ams",
       });
       await expect(page.locator(".waiting-job")).toHaveCount(10);
       await expect(page.locator(".job-details:visible")).toHaveCount(0);
@@ -300,6 +302,7 @@ test("late admission for the previous menu cannot authorize or disable another j
     type: "add",
     plate_id: second.plate_id,
     plate_version: 7,
+    feed: "ams",
   });
 });
 

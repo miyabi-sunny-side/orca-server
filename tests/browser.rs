@@ -295,3 +295,64 @@ fn external_spool() {
     assert_eq!(prints.len(), 1);
     assert_eq!(prints[0]["use_ams"], false);
 }
+
+#[test]
+#[ignore = "requires Chromium"]
+fn printer_controls() {
+    let mut rig = Rig::new("browser-printer-controls");
+    let jpeg = fixture("camera.jpg");
+    let (port, _) = common::peers::camera(rig.root.path(), common::peers::frame(&jpeg));
+    rig.env.insert("P1_CAMERA_PORT".into(), port.to_string());
+    rig.ftp
+        .records
+        .lock()
+        .unwrap()
+        .files
+        .insert("/timelapse/video_1.mp4".into(), vec![0; 2048]);
+    rig.full["print"]["nozzle_temper"] = json!(212.4);
+    rig.full["print"]["nozzle_target_temper"] = json!(220);
+    rig.full["print"]["bed_temper"] = json!(60);
+    rig.full["print"]["bed_target_temper"] = json!(60);
+    rig.full["print"]["lights_report"] = json!([{"node":"chamber_light","mode":"on"}]);
+    rig.full["print"]["hms"] = json!([{"attr":0x0300_0D00_u32,"code":0x0001_0004}]);
+    rig.launch();
+    rig.seed();
+    let plate = rig.configure(None, None);
+    rig.add(3);
+    let control = rig.control();
+    rig.browser(
+        "E2E_DEVICE_CONTEXT",
+        &json!({"plate":plate["id"]}),
+        Some(&control),
+    );
+    let prints = rig.broker.prints();
+    assert_eq!(prints.len(), 1);
+    assert_eq!(prints[0]["timelapse"], false, "the plate option was sent");
+    let commands: Vec<_> = rig
+        .broker
+        .records
+        .lock()
+        .unwrap()
+        .controls
+        .iter()
+        .filter_map(|c| {
+            c.get("print")
+                .or_else(|| c.get("system"))
+                .map(|b| b["command"].clone())
+        })
+        .collect();
+    for expected in ["pause", "resume", "stop", "ledctrl", "ams_filament_setting"] {
+        assert!(
+            commands.contains(&json!(expected)),
+            "{expected}: {commands:?}"
+        );
+    }
+    assert!(
+        !rig.ftp
+            .records
+            .lock()
+            .unwrap()
+            .files
+            .contains_key("/timelapse/video_1.mp4")
+    );
+}

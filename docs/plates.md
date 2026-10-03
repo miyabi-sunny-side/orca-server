@@ -276,8 +276,9 @@ STLアップロードでも、multipartの`conditions`フィールドへ同じJS
 | `brim_enabled` | `true`で外周ブリムを生成、`false`で無効。省略時は`false`。`null`や文字列は不可。 |
 | `support_enabled` | `true`で自動サポートを生成、`false`で無効。省略時は`false`。`null`や文字列は不可。 |
 | `support_interface_filament_id` | 登録材料ID。ON時に省略・`null`なら主材料へ解決します。OFF時も指定値を保持します。 |
+| `start_options` | 開始時に本体へ送る`bed_leveling`・`flow_calibration`・`timelapse`・`vibration_calibration`（真偽値）。省略した項目と`null`はBambuStudioの印刷ダイアログと同じ既定（順に有効・有効・有効・無効）です。 |
 
-ブリム・サポートの有無以外の8項目はDB/APIでnullableです。詳細3項目の`null`は工程の値を継承します。機種未設定なら工程も未設定にします。保存時は登録実機、存在する材料、
+ブリム・サポートの有無と開始オプション以外の8項目はDB/APIでnullableです。開始オプションは準備開始時に固定し、印刷中の変更は次の印刷から使います。詳細3項目の`null`は工程の値を継承します。機種未設定なら工程も未設定にします。保存時は登録実機、存在する材料、
 工程と機種の組合せ、温度設定、ベッド種別を確認します。異なるノズル用profileや未登録機種へ自動変更しません。
 材料の装填と実機の同期は保存条件ではなく、[キュー追加時](queue.md#プレートを追加する)に確認します。
 

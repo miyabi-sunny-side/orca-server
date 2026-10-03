@@ -9,7 +9,21 @@ export type Strength = {
   sparse_infill_density?: number | null;
   wall_loops?: number | null;
 };
+/** Sent with the start; defaults follow BambuStudio's print dialog. */
+export type StartOptions = {
+  bed_leveling: boolean;
+  flow_calibration: boolean;
+  timelapse: boolean;
+  vibration_calibration: boolean;
+};
+export const defaultStartOptions: StartOptions = {
+  bed_leveling: true,
+  flow_calibration: true,
+  timelapse: true,
+  vibration_calibration: false,
+};
 export type PlateConditions = Strength & {
+  start_options?: StartOptions;
   brim_enabled?: boolean;
   support_enabled?: boolean;
   support_interface_filament_id?: string | null;
@@ -225,6 +239,7 @@ export type Printer = {
   nozzle_material: string;
   mqtt_port: number;
   ftps_port: number;
+  camera_port: number;
   start_timeout_secs: number;
   machine: { model: string; nozzle_diameter: string } | null;
   configuration_error: string | null;
@@ -308,3 +323,25 @@ export type AmsInventory = {
     groups: number[] | null;
   };
 };
+
+/** The printer's answer to one control; `none` means it was sent without an answer. */
+export type ControlReply = {
+  reply: "success" | "rejected" | "none";
+  reason: string | null;
+};
+export function sendControl(printerId: string, control: object) {
+  return request<ControlReply>(
+    `/api/printers/${encodeURIComponent(printerId)}/control`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(control),
+    },
+  );
+}
+export function controlText(reply: ControlReply): string {
+  if (reply.reply === "success") return "本体が受け付けました";
+  if (reply.reply === "rejected")
+    return `本体が拒否しました${reply.reason ? `: ${reply.reason}` : ""}`;
+  return "本体の応答がありません。状態を確認してください";
+}

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { request } from "./api";
+import { controlText, request } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -146,4 +146,19 @@ it("history read failures identify history storage and missing plates retain sta
   await expect(request("/api/plates/removed")).rejects.toMatchObject({
     status: 404,
   });
+});
+
+it("tells whether the printer accepted, refused or did not answer a control", () => {
+  expect(controlText({ reply: "success", reason: null })).toBe(
+    "本体が受け付けました",
+  );
+  expect(controlText({ reply: "rejected", reason: "not printing" })).toBe(
+    "本体が拒否しました: not printing",
+  );
+  expect(controlText({ reply: "rejected", reason: null })).toBe(
+    "本体が拒否しました",
+  );
+  expect(controlText({ reply: "none", reason: "x" })).toBe(
+    "本体の応答がありません。状態を確認してください",
+  );
 });

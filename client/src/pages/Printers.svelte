@@ -38,6 +38,7 @@
     nozzle_material: "unknown",
     mqtt_port: 8883,
     ftps_port: 990,
+    camera_port: 6000,
     start_timeout_secs: 600,
   });
   let original = $state<Printer>();
@@ -434,6 +435,15 @@
               min="1"
               max="65535"
               bind:value={settings.ftps_port}
+              required
+            /></label
+          >
+          <label class="field"
+            ><span>カメラのポート</span><input
+              type="number"
+              min="1"
+              max="65535"
+              bind:value={settings.camera_port}
               required
             /></label
           >

@@ -58,7 +58,55 @@ export type Printer = {
   };
   ams: Ams | null;
   external_spool?: { material: string | null } | null;
+  live?: Live;
 };
+type Reading = number | null;
+export type Live = {
+  temperatures: {
+    nozzle: Reading;
+    nozzle_target: Reading;
+    bed: Reading;
+    bed_target: Reading;
+    chamber: Reading;
+  };
+  layer: { current: Reading; total: Reading };
+};
+/** "ノズル 212/220℃ · ベッド 60/60℃ · 層 12/337"; targets and layers only when set. */
+export function liveLine(live?: Live): string {
+  if (!live) return "";
+  const t = live.temperatures;
+  const temperature = (label: string, now: Reading, target: Reading) =>
+    now === null
+      ? null
+      : `${label} ${Math.round(now)}${target ? `/${Math.round(target)}` : ""}℃`;
+  return [
+    temperature("ノズル", t.nozzle, t.nozzle_target),
+    temperature("ベッド", t.bed, t.bed_target),
+    live.layer.total
+      ? `層 ${live.layer.current ?? 0}/${live.layer.total}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+const printerStates: Record<string, string> = {
+  IDLE: "待機中",
+  PREPARE: "準備中",
+  RUNNING: "印刷中",
+  PAUSE: "一時停止中",
+  FINISH: "完了",
+  FAILED: "停止",
+};
+/** The reported `gcode_state` in Japanese; unknown values stay as reported. */
+export function printerStateText(state: string | null): string {
+  return state === null ? "状態不明" : (printerStates[state] ?? state);
+}
+/** Which print controls the reported printer state allows. */
+export function jobControls(state: string | null) {
+  const active = state === "RUNNING" || state === "PREPARE";
+  const paused = state === "PAUSE";
+  return { pause: active, resume: paused, stop: active || paused };
+}
 export type QueueState = {
   epoch: string;
   generation: number;
@@ -102,11 +150,13 @@ export type Command = {
 export function feedLabel(feed?: Feed) {
   return feed === "external" ? "外部スプール" : "AMS";
 }
-/** A new job uses the external spool when the printer reports no AMS unit. */
+/** A new job uses the external spool when the printer reports no AMS unit; unknown stays AMS. */
 export function defaultFeed(
   status: { ams?: { units: unknown[] } | null } | null,
 ): Feed {
-  return status && !status.ams?.units.length ? "external" : "ams";
+  return status?.ams === undefined || status.ams?.units.length
+    ? "ams"
+    : "external";
 }
 export function menuReasons(
   job: Pick<Job, "state" | "plate_deleted"> | undefined,
@@ -231,6 +281,12 @@ export function failureHelp(code?: string) {
         : "このエラーコードの意味は未確認です。公式情報を確認してください。",
     url: `https://e.bambulab.com/index.php?${new URLSearchParams({ e: hex, s: "device_hms", lang: "ja" })}`,
   };
+}
+/** BambuStudio HMS.cpp get_hms_wiki_url with the long `%08X%08X` code; no device ID is sent. */
+export function hmsHelp(code: string): string | null {
+  const hex = code.replaceAll("_", "").toUpperCase();
+  if (!/^[0-9A-F]{16}$/.test(hex)) return null;
+  return `https://e.bambulab.com/index.php?${new URLSearchParams({ e: hex, s: "device_hms", lang: "ja" })}`;
 }
 export const phaseText = {
   queued: "待機中",

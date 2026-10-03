@@ -121,7 +121,8 @@ docker logs orca-server
 稼働中のDBファイルだけをコピーしないでください。SCAD元データはscad-live側でも保管します。
 アップロード元STLは同じDBに含まれるため、DBの復元で再利用できます。
 
-現在のSQLite schema versionは10です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
+現在のSQLite schema versionは21です。機器・材料には`printers`、`filament_products`、`filaments`、`filament_settings`、`ams_slots`を使います。
+version 20でジョブの給材元（`print_jobs.feed`、既存行は`ams`）、21でプレートの開始オプション（`plates.start_options_json`、既存行は既定）と機器のカメラのポート（`printers.camera_port`、既定6000）を追加しました。
 プレート・キューには`plates`、`plate_items`、`print_jobs`を使います。
 初期設定は`default_settings`、通知は`print_notifications`で保持します。
 製品と色の分離では既存材料IDとキューを保持し、全設定が一致する製品だけをまとめます。[材料の移行条件](filaments.md#保存と移行)を確認してください。
@@ -140,7 +141,15 @@ SCAD由来は参照、直接アップロード由来はSTL本体を保管し、�
 キューは再起動・復元後も保持し、不明な開始は要確認になります。命令は再送せず、再接続後に対象名のない待機報告を受けた場合だけ中断として解除します。
 [復旧操作](queue.md#失敗・再起動からの復旧)に従って本体を確認してください。
 旧版へ戻す場合は、更新前の保存領域と対応するイメージを組にして復元します。
-DBの`user_version`だけを書き換えて古い実行ファイルで開くことはできません。
+DBの`user_version`だけを書き換えて古い実行ファイルで開くことはできません。新しいschemaのDBを旧版で開くと、旧版は起動を拒否します。
+
+移行と復元は次の順で行います。
+
+1. 印刷と取り外しを終え、コンテナを停止する。
+2. 保存ボリューム全体（`/data/plates`。`orca.sqlite3`と`jobs/`、`journal/`を含む）と、使用中イメージの版を控える。
+3. 新しい版で起動する。初回起動で移行が一つのtransactionで行われ、失敗すれば変更せずに起動を拒否する。
+4. プレート・材料・機器・履歴・キューを確認する。
+5. 戻す場合はコンテナを停止し、手順2の保存領域を丸ごと戻して、控えた版のイメージで起動する。移行後に追加・変更したデータは戻した時点で失われる。
 
 ## ライセンスとソース
 

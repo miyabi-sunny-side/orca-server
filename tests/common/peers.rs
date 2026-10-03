@@ -395,6 +395,35 @@ fn mqtt_session(
     }
     Ok(())
 }
+/// A LAN camera that checks each login and answers it with `reply`, as the P1S does on port 6000.
+/// Returns the port and the received logins.
+pub fn camera(root: &Path, reply: Vec<u8>) -> (u16, mpsc::Receiver<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = config(&root.join("trusted.pem"), &root.join("trusted.key"));
+    let (logins, received) = mpsc::channel();
+    thread::spawn(move || {
+        for raw in listener.incoming() {
+            let Ok(mut stream) = tls(raw.unwrap(), &config) else {
+                continue;
+            };
+            let mut login = vec![0u8; 80];
+            if stream.read_exact(&mut login).is_ok() {
+                let _ = logins.send(login);
+                let _ = stream.write_all(&reply);
+                let _ = stream.flush();
+            }
+        }
+    });
+    (port, received)
+}
+/// One camera frame: the 16-byte header announcing the image size, then the image.
+pub fn frame(image: &[u8]) -> Vec<u8> {
+    let mut frame = u32::try_from(image.len()).unwrap().to_le_bytes().to_vec();
+    frame.extend([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+    frame.extend(image);
+    frame
+}
 /// Wait for the passive data connection and require the control session's TLS to be reused.
 fn accept_data(
     listener: Option<&TcpListener>,
@@ -456,7 +485,7 @@ fn storage(records: &Mutex<Records>, command: &str, arg: &str) -> Option<Vec<u8>
     for sub in dirs {
         let _ = write!(lines, "drwxr-xr-x 2 root root 4096 Oct 03 12:30 {sub}\r\n");
     }
-    (dir.is_empty() || !lines.is_empty()).then(|| lines.into_bytes())
+    Some(lines.into_bytes())
 }
 /// The printer's reply to a control; `get_version` answers with its modules.
 fn answer(value: &Value, section: &str, command: &str, result: &str, serial: &str) -> Value {
@@ -477,13 +506,14 @@ fn publish(peer: &mut Tls, topic: &str, payload: &[u8]) -> io::Result<()> {
 /// An operator control as `BambuStudio` sends it: its section and command. The AMS auto refill
 /// option keeps its own guarded path above.
 fn control(value: &Value) -> Option<(&'static str, String)> {
-    const COMMANDS: [&str; 15] = [
+    const COMMANDS: [&str; 16] = [
         "pause",
         "resume",
         "stop",
         "print_speed",
         "gcode_line",
         "ams_change_filament",
+        "ams_filament_setting",
         "ams_control",
         "print_option",
         "ams_user_setting",

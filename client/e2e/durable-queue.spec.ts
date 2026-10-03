@@ -27,7 +27,7 @@ for(const colorScheme of ['dark','light'] as const) {
     await expect(add).toBeEnabled();await expect(page.getByLabel('追加先のプリンター')).toHaveCount(0);
     await add.evaluate((button:HTMLButtonElement)=>{button.click();button.click();});
     await expect(page.getByText('追加の結果が不明です。キューを確認し、同じ要求の結果を再確認してください。')).toBeVisible();
-    expect(requests).toHaveLength(1);expect(requests[0].action).toEqual({type:'add',plate_id:'11111111-1111-4111-8111-111111111111',plate_version:1});
+    expect(requests).toHaveLength(1);expect(requests[0].action).toEqual({type:'add',plate_id:'11111111-1111-4111-8111-111111111111',plate_version:1,feed:'ams'});
     await page.reload();await expect(add).toBeDisabled();
     await page.getByRole('button',{name:'同じ要求を再確認'}).click();
     await expect(page.getByRole('status').filter({hasText:'キューに追加しました'})).toBeVisible();

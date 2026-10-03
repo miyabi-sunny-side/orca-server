@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import {
     request,
+    defaultStartOptions,
     ApiError,
     type PlateConditions,
     type DefaultSettings,
@@ -254,6 +255,25 @@
       />
       <p class="caption">サポートの支柱には、最初のフィラメントを使います。</p>
     {/if}
+  </details>
+  <details class="settings-details">
+    <summary>印刷開始</summary>
+    {#each [["bed_leveling", "ベッドレベリング"], ["flow_calibration", "フロー較正"], ["timelapse", "タイムラプス"], ["vibration_calibration", "振動補正"]] as const as [key, label] (key)}
+      <label class="brim-option">
+        <input
+          type="checkbox"
+          checked={(value.start_options ?? defaultStartOptions)[key]}
+          onchange={(e) => {
+            value.start_options = {
+              ...(value.start_options ?? defaultStartOptions),
+              [key]: e.currentTarget.checked,
+            };
+            changed("start_options");
+          }}
+        />
+        <span>{label}</span>
+      </label>
+    {/each}
   </details>
   {#if loading || reading}<p class="caption" role="status">
       印刷条件を確認しています…

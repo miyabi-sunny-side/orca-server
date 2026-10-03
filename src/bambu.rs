@@ -78,6 +78,18 @@ pub enum Control {
     Extrude {
         mm: i8,
     },
+    /// Tell the printer what is loaded in an AMS tray (0–15) or the external spool (254).
+    TraySetting {
+        tray: u8,
+        /// `tray_type`, such as PLA or PETG.
+        material: String,
+        /// RRGGBBAA.
+        color: String,
+        /// `tray_info_idx`, the filament profile ID such as GFL99; may be empty.
+        profile_id: String,
+        temperature_min: u16,
+        temperature_max: u16,
+    },
     /// Read an AMS tray's RFID tag again (0–15).
     ReadTray {
         tray: u8,
@@ -251,6 +263,43 @@ impl Control {
             ),
             Self::Version => build("info", "get_version", json!({}), sequence),
             Self::Home => gcode("G28 \n".into()),
+            Self::TraySetting {
+                tray,
+                material,
+                color,
+                profile_id,
+                temperature_min,
+                temperature_max,
+            } => {
+                let plain = |s: &str, max: usize| {
+                    s.len() <= max
+                        && s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-+ ".contains(&b))
+                };
+                if material.is_empty() || !plain(material, 16) || !plain(profile_id, 16) {
+                    return Err("Material and profile must be plain text up to 16 characters");
+                }
+                if color.len() != 8 || !color.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("Color must be RRGGBBAA");
+                }
+                if !(150..=300).contains(temperature_min)
+                    || !(150..=300).contains(temperature_max)
+                    || temperature_min > temperature_max
+                {
+                    return Err("Nozzle temperatures must be 150-300 °C, minimum first");
+                }
+                let (ams, slot, tray_id) = match tray {
+                    0..=15 => (tray / 4, tray % 4, tray % 4),
+                    254 => (255, 0, 254),
+                    _ => return Err("Tray must be an AMS slot 0-15 or the external spool 254"),
+                };
+                print(
+                    "ams_filament_setting",
+                    json!({"ams_id":ams,"slot_id":slot,"tray_id":tray_id,"tray_info_idx":profile_id,
+                        "setting_id":"","tray_color":color.to_ascii_uppercase(),"tray_type":material,
+                        "nozzle_temp_min":temperature_min,"nozzle_temp_max":temperature_max}),
+                )
+            }
             Self::Move { axis, mm } => {
                 if *mm == 0 || mm.unsigned_abs() > 50 {
                     return Err("Move 1-50 mm");
@@ -638,6 +687,53 @@ mod tests {
                 mm: 10
             }
         );
+    }
+
+    #[test]
+    fn tray_settings_follow_bambu_studio_ams_filament_setting() {
+        let setting = |tray| Control::TraySetting {
+            tray,
+            material: "PLA".into(),
+            color: "FF0000FF".into(),
+            profile_id: "GFL99".into(),
+            temperature_min: 190,
+            temperature_max: 230,
+        };
+        assert_eq!(
+            sent(setting(6)).payload,
+            json!({"print":{"command":"ams_filament_setting","ams_id":1,"slot_id":2,"tray_id":2,
+                "tray_info_idx":"GFL99","setting_id":"","tray_color":"FF0000FF","tray_type":"PLA",
+                "nozzle_temp_min":190,"nozzle_temp_max":230,"sequence_id":"7"}})
+        );
+        // The external spool: VIRTUAL_TRAY_MAIN_ID 255 with tray VIRTUAL_TRAY_DEPUTY_ID 254.
+        let external = sent(setting(254)).payload;
+        assert_eq!(
+            (
+                &external["print"]["ams_id"],
+                &external["print"]["slot_id"],
+                &external["print"]["tray_id"]
+            ),
+            (&json!(255), &json!(0), &json!(254))
+        );
+        let mut bad = setting(16);
+        assert!(bad.message("7").is_err());
+        for (material, color, profile, min, max) in [
+            ("", "FF0000FF", "", 190, 230),
+            ("PLA", "red", "", 190, 230),
+            ("PLA", "FF0000FF", "../x", 190, 230),
+            ("PLA", "FF0000FF", "", 240, 230),
+            ("PLA", "FF0000FF", "", 190, 400),
+        ] {
+            bad = Control::TraySetting {
+                tray: 0,
+                material: material.into(),
+                color: color.into(),
+                profile_id: profile.into(),
+                temperature_min: min,
+                temperature_max: max,
+            };
+            assert!(bad.message("7").is_err(), "{bad:?}");
+        }
     }
 
     #[test]

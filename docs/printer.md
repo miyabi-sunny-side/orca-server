@@ -76,6 +76,7 @@ Orcaを導入しない監視専用の旧構成では、既存P1S 0.4mm・標準�
 | `P1_TLS_CERT` | 接続を許可するプリンター証明書1枚を持つPEMファイル。 |
 | `P1_MQTT_PORT` | 既定8883。変更する場合は1〜65535の整数。 |
 | `P1_FTPS_PORT` | 既定990。implicit FTPSの制御ポート。データ接続はPASVで通知されたポートを使います。 |
+| `P1_CAMERA_PORT` | 既定6000。LANカメラ（TLS）のポート。画面の機器設定では「カメラのポート」です。 |
 | `P1_START_TIMEOUT_SECS` | 既定600。送信後に印刷開始を確認するまでの上限秒数。1〜3600。 |
 
 上記の環境変数はDB初期化時の取り込み専用です。全て未設定なら空の台帳を作ります。
@@ -136,10 +137,11 @@ AMSでは単一材料のスライサーID 1を、選んだ従来AMSのunit 0〜3
 | `awaiting_confirmation` | 転送成功後にMQTTへ開始命令を渡し、プリンターの報告を待っています。 |
 | `accepted` | 要求番号の一致する受理応答、または同じ印刷名の準備状態を確認しました。 |
 | `printing` | 同じ印刷名またはファイル名の`RUNNING`を確認しました。 |
+| `paused` | エラーなしの`PAUSE`。同じ印刷が続いており、キューでは`printing`のままです。再開・停止は[本体の操作](#本体の操作api)から行います。 |
 | `finished` | 印刷開始を確認した要求について`FINISH`を受信しました。 |
 | `upload_failed` / `not_sent` | 転送失敗、接続・AMS状態の変化などで開始命令を送っていません。 |
 | `rejected` | プリンターが要求を拒否しました。 |
-| `unknown` | 通信断・タイムアウト・エラー・一時停止、または印刷中から完了報告なしで待機へ戻った状態。 |
+| `unknown` | 通信断・タイムアウト・エラー、または印刷中から完了報告なしで待機へ戻った状態。 |
 
 機器ごとの進行中ジョブはDB制約で1件に限ります。別プリンターのジョブは独立しています。
 試行ID・固定入力・開始前の記録を永続化してから送信します。
@@ -171,7 +173,22 @@ curl --fail http://127.0.0.1:3000/api/printer/status
 | `ready_to_print` | 同期済み・60秒未満・`IDLE`または`FINISH`・エラー0の場合だけ`true`。 |
 | `print` | `state`、`percent`、`remaining_minutes`、`error`、`job_id`、`file`、`name`。不明な項目は`null`。 |
 | `ams` | `current_tray`と`units`。AMS情報が未取得なら`null`。 |
-| `start` | 最後の開始要求。未要求は`null`。`id`、`plate_id`、`job_id`、`ams_slot`、`phase`、`message`。 |
+| `start` | 最後の開始要求。未要求は`null`。`id`、`plate_id`、`job_id`、`ams_slot`、`phase`、`message`、開始オプション`options`。 |
+| `external_spool` | 外部スプール（`vt_tray`）の`material`・`color`など。報告がなければ`null`。 |
+| `live` | 実況。下表。全状態に差分を合成した値から作り、不明な項目は`null`です。 |
+| `firmware` | 接続ごとに要求した`get_version`の応答。モジュールの`name`・`sw_ver`・`hw_ver`。未取得は`null`。 |
+
+| `live`の項目 | 内容 |
+| --- | --- |
+| `temperatures` | `nozzle`・`nozzle_target`・`bed`・`bed_target`・`chamber`（℃）。 |
+| `layer` | `current`・`total`。 |
+| `speed` | `level`（1静音、2標準、3スポーツ、4ルーディクラス）と`percent`。 |
+| `fans` | `part`・`aux`・`chamber`・`heatbreak`（%、本体の0〜15段を換算）。 |
+| `light`、`camera` | 照明の点灯、録画`recording`・タイムラプス`timelapse`の有効状態。 |
+| `sdcard`、`wifi_signal`、`stage` | SDカードの有無、Wi-Fiの強さ、印刷段階の番号。 |
+| `skipped_objects` | 本体がスキップしたオブジェクトID。 |
+| `hms` | HMSコード（`0300_0D00_0001_0004`形式）。 |
+| `options` | `auto_recovery`、`sound`（本体が非対応なら`null`）、`remain_detection`、`motor_noise_calibration`。 |
 
 `print.state`は機器の文字列です。未知の値、`PAUSE`、`FAILED`、状態不明を待機中と扱いません。
 `ready_to_print`は機器側の状態条件を表し、造形物を除去したかどうかは判定しません。
@@ -189,6 +206,44 @@ AMS IDは0〜255を保持し、各trayは0〜3です。在席ビットで確認�
 通信断では印刷可能の判定を解除し、再接続後も新しい全状態を要求します。以前の要求は再送しません。
 再接続は5秒おきです。接続中に未同期・情報不足となった場合は、5分おきに全状態を再要求します。
 報告が60秒以上途切れた状態は`stale`です。その後に差分だけを受けても同期完了へ戻しません。
+
+## 本体の操作API
+
+`POST /api/printers/{id}/control`は本体へ操作を1件送り、本体の応答を返します。
+他のAPIと同じアクセス境界で提供し、同期済みの接続がなければ409で送りません。値の範囲外は400、未知の操作は422です。
+
+```sh
+curl -X POST -H 'Content-Type: application/json' -d '{"action":"pause"}' http://127.0.0.1:3000/api/printers/PRINTER_ID/control
+```
+
+応答は`{"reply":"success"|"rejected"|"none","reason":...}`です。`rejected`は本体の拒否、`none`は10秒以内に応答がないか接続が切れた状態で、送信済みです。
+結果は後続の[状態](#状態api)で確認します。操作は自動で再送しません。送った操作と応答は[通信記録](#通信記録api)に残ります。
+
+| `action` | 項目 | 本体への命令 |
+| --- | --- | --- |
+| `pause`・`resume`・`stop` | なし | 現在の印刷の一時停止・再開・停止。 |
+| `speed` | `level` 1〜4 | `print_speed`。 |
+| `light` | `on` | チャンバー照明（`ledctrl`）。 |
+| `nozzle_temperature`・`bed_temperature` | `celsius`（0〜300、0〜120） | `M104`・`M140`。 |
+| `fan` | `fan`（`part`・`aux`・`chamber`）、`percent` 0〜100 | `M106 P1/P2/P3`。 |
+| `home`・`move`・`extrude` | `move`は`axis`（`X`・`Y`・`Z`）と`mm`、`extrude`は`mm`（±1〜50） | BambuStudioの軸操作と同じG-code。A1系はY・Zを反転します。 |
+| `load`・`unload` | `load`は`tray`（0〜15、外部254）、両方`celsius`（150〜300） | `ams_change_filament`。 |
+| `ams` | `step`（`resume`・`reset`・`done`） | AMS・給材エラー後の`ams_control`。 |
+| `tray_setting` | `tray`、`material`、`color`（RRGGBBAA）、`profile_id`、`temperature_min`・`temperature_max` | 本体へトレイの材料を伝える`ams_filament_setting`。 |
+| `read_tray` | `tray` 0〜15 | RFIDの再読取（`M620 R`）。 |
+| `auto_recovery`・`sound` | `on` | `print_option`。 |
+| `ams_reading` | `on_insert`、`on_power_up`、`remain` | `ams_user_setting`。 |
+| `recording`・`timelapse` | `on` | カメラの録画・タイムラプス。 |
+| `calibrate` | `bed_leveling`、`vibration`、`motor_noise`（1つ以上） | `calibration`。 |
+| `skip_objects` | `objects`（ID配列） | 現在ジョブの`objects`にあるIDを指定します。 |
+| `clear_error` | `code` | `clean_print_error`。 |
+| `version` | なし | `get_version`。 |
+
+`GET /api/printers/{id}/camera`はLANカメラの静止画をJPEGで返します（キャッシュなし）。本体へ接続できなければ502、10秒以内に画像がなければ504です。
+`GET /api/printers/{id}/files?path=/timelapse`はSDカードの一覧（`name`・`path`・`size`・`directory`・`modified`）、
+`GET /api/printers/{id}/files/content?path=...`はファイル本体（最大512MiB）、`DELETE /api/printers/{id}/files?path=...`は削除です。
+パスは`/`から始め、`..`や制御文字を含めません。印刷データの転送中は409です。
+対応する機能と根拠は[機能対応表](printer-capabilities.md)を参照してください。
 
 ## 診断API
 
