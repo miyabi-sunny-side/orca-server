@@ -184,7 +184,7 @@ fn prediction(xml: &str) -> Result<u64> {
     Ok(u64::from(seconds))
 }
 
-pub(crate) fn estimated_seconds(path: &Path) -> Result<u64> {
+fn slice_info(path: &Path) -> Result<String> {
     let invalid = || Error::Invalid("OrcaSlicer estimate is unavailable");
     let mut archive = zip::ZipArchive::new(File::open(path)?).map_err(|_| invalid())?;
     let file = archive
@@ -195,12 +195,49 @@ pub(crate) fn estimated_seconds(path: &Path) -> Result<u64> {
     if xml.len() > 4 * 1024 * 1024 {
         return Err(invalid());
     }
-    prediction(&xml)
+    Ok(xml)
+}
+
+pub(crate) fn estimated_seconds(path: &Path) -> Result<u64> {
+    prediction(&slice_info(path)?)
+}
+
+/// Printed objects with the IDs the printer accepts in `skip_objects`.
+pub(crate) fn objects(path: &Path) -> Result<Vec<serde_json::Value>> {
+    object_list(&slice_info(path)?)
+}
+
+fn object_list(xml: &str) -> Result<Vec<serde_json::Value>> {
+    let document =
+        Document::parse(xml).map_err(|_| Error::Invalid("Sliced object list is unreadable"))?;
+    Ok(document
+        .descendants()
+        .filter(|n| n.has_tag_name("object"))
+        .filter_map(|n| {
+            let id: u32 = n.attribute("identify_id")?.parse().ok()?;
+            Some(serde_json::json!({"id":id,"name":n.attribute("name").unwrap_or("")}))
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sliced_objects_carry_the_ids_used_to_skip_them() {
+        let xml = r#"<config><plate><object identify_id="45" name="0.stl" skipped="false"/>
+            <object identify_id="56" name="1.stl" skipped="false"/><object name="no id"/>
+            <object identify_id="x" name="bad"/></plate></config>"#;
+        assert_eq!(
+            object_list(xml).unwrap(),
+            vec![
+                serde_json::json!({"id":45,"name":"0.stl"}),
+                serde_json::json!({"id":56,"name":"1.stl"})
+            ]
+        );
+        assert!(object_list("<config").is_err());
+    }
 
     #[test]
     fn every_assigned_model_material_must_be_used_for_objects() {

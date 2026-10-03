@@ -26,6 +26,8 @@ pub(crate) struct Settings {
     pub ftps_port: u16,
     #[serde(default = "start_timeout")]
     pub start_timeout_secs: u16,
+    #[serde(default = "camera_port")]
+    pub camera_port: u16,
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
@@ -56,6 +58,9 @@ fn ftps_port() -> u16 {
 }
 fn start_timeout() -> u16 {
     600
+}
+fn camera_port() -> u16 {
+    6000
 }
 
 #[derive(Clone, Serialize)]
@@ -132,7 +137,8 @@ impl Database {
                     bed_type TEXT NOT NULL, nozzle_material TEXT NOT NULL CHECK(nozzle_material IN ('stainless_steel','hardened_steel','unknown')),
                     mqtt_port INTEGER NOT NULL CHECK(mqtt_port BETWEEN 1 AND 65535),
                     ftps_port INTEGER NOT NULL CHECK(ftps_port BETWEEN 1 AND 65535),
-                    start_timeout_secs INTEGER NOT NULL CHECK(start_timeout_secs BETWEEN 1 AND 3600)
+                    start_timeout_secs INTEGER NOT NULL CHECK(start_timeout_secs BETWEEN 1 AND 3600),
+                    camera_port INTEGER NOT NULL DEFAULT 6000 CHECK(camera_port BETWEEN 1 AND 65535)
                 );").map_err(Error::from)?;
                 if let Some(device) = initial()? {
                     save(&tx, &device)?;
@@ -281,8 +287,18 @@ impl Database {
             tx.execute_batch("ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams' CHECK(feed IN ('ams','external')); PRAGMA user_version=20;")?;
         }
         if version < 21 {
-            // NULL means the defaults of the print dialog in BambuStudio.
-            tx.execute_batch("ALTER TABLE plates ADD COLUMN start_options_json TEXT CHECK(start_options_json IS NULL OR json_valid(start_options_json)); PRAGMA user_version=21;")?;
+            // NULL start options mean the defaults of the print dialog in BambuStudio.
+            tx.execute_batch("ALTER TABLE plates ADD COLUMN start_options_json TEXT CHECK(start_options_json IS NULL OR json_valid(start_options_json));")?;
+            // A new database already has the column: the initial import writes it at version 0.
+            let has_camera: bool = tx.query_row(
+                "SELECT count(*)>0 FROM pragma_table_info('printers') WHERE name='camera_port'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_camera {
+                tx.execute_batch("ALTER TABLE printers ADD COLUMN camera_port INTEGER NOT NULL DEFAULT 6000 CHECK(camera_port BETWEEN 1 AND 65535);")?;
+            }
+            tx.pragma_update(None, "user_version", 21)?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -361,7 +377,7 @@ impl Database {
             .connection
             .lock()
             .map_err(|_| Error::Unavailable("Database lock failed"))?;
-        let mut query = connection.prepare("SELECT id,name,host,serial,access_code,tls_certificate,machine_profile_key,default_process_profile_key,bed_type,nozzle_material,mqtt_port,ftps_port,start_timeout_secs FROM printers ORDER BY name,id").map_err(Error::from)?;
+        let mut query = connection.prepare("SELECT id,name,host,serial,access_code,tls_certificate,machine_profile_key,default_process_profile_key,bed_type,nozzle_material,mqtt_port,ftps_port,start_timeout_secs,camera_port FROM printers ORDER BY name,id").map_err(Error::from)?;
         query
             .query_map([], |r| {
                 Ok(Device {
@@ -379,6 +395,7 @@ impl Database {
                         mqtt_port: r.get(10)?,
                         ftps_port: r.get(11)?,
                         start_timeout_secs: r.get(12)?,
+                        camera_port: r.get(13)?,
                     },
                 })
             })
@@ -463,13 +480,13 @@ fn reconcile_defaults(c: &Connection) -> Result<()> {
 }
 fn save(connection: &Connection, device: &Device) -> Result<()> {
     let s = &device.settings;
-    connection.execute("INSERT INTO printers(id,name,host,serial,access_code,tls_certificate,machine_profile_key,default_process_profile_key,bed_type,nozzle_material,mqtt_port,ftps_port,start_timeout_secs) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+    connection.execute("INSERT INTO printers(id,name,host,serial,access_code,tls_certificate,machine_profile_key,default_process_profile_key,bed_type,nozzle_material,mqtt_port,ftps_port,start_timeout_secs,camera_port) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
         ON CONFLICT(id) DO UPDATE SET name=excluded.name,host=excluded.host,serial=excluded.serial,
         access_code=excluded.access_code,tls_certificate=excluded.tls_certificate,
         machine_profile_key=excluded.machine_profile_key,default_process_profile_key=excluded.default_process_profile_key,
         bed_type=excluded.bed_type,nozzle_material=excluded.nozzle_material,mqtt_port=excluded.mqtt_port,
-        ftps_port=excluded.ftps_port,start_timeout_secs=excluded.start_timeout_secs",
-        params![device.id,s.name,s.host,s.serial,s.access_code,s.tls_certificate,s.machine_profile_key,s.default_process_profile_key,s.bed_type,s.nozzle_material,s.mqtt_port,s.ftps_port,s.start_timeout_secs]).map_err(Error::from)?;
+        ftps_port=excluded.ftps_port,start_timeout_secs=excluded.start_timeout_secs,camera_port=excluded.camera_port",
+        params![device.id,s.name,s.host,s.serial,s.access_code,s.tls_certificate,s.machine_profile_key,s.default_process_profile_key,s.bed_type,s.nozzle_material,s.mqtt_port,s.ftps_port,s.start_timeout_secs,s.camera_port]).map_err(Error::from)?;
     Ok(())
 }
 
@@ -495,6 +512,12 @@ pub(crate) fn load_filaments(connection: &Connection) -> Result<Vec<crate::filam
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A printer row as schemas before version 21 stored it (no camera port).
+    fn save_before_camera(c: &Connection, d: &Device) {
+        let s = &d.settings;
+        c.execute("INSERT INTO printers(id,name,host,serial,access_code,tls_certificate,machine_profile_key,default_process_profile_key,bed_type,nozzle_material,mqtt_port,ftps_port,start_timeout_secs) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![d.id,s.name,s.host,s.serial,s.access_code,s.tls_certificate,s.machine_profile_key,s.default_process_profile_key,s.bed_type,s.nozzle_material,s.mqtt_port,s.ftps_port,s.start_timeout_secs]).unwrap();
+    }
     fn device() -> Device {
         Device {
             id: "stable-id".into(),
@@ -511,6 +534,7 @@ mod tests {
                 mqtt_port: 8883,
                 ftps_port: 990,
                 start_timeout_secs: 600,
+                camera_port: 6000,
             },
         }
     }
@@ -669,7 +693,7 @@ mod tests {
         let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
         c.execute_batch(include_str!("../tests/fixtures/schema-v16.sql"))
             .unwrap();
-        save(&c, &device()).unwrap();
+        save_before_camera(&c, &device());
         c.execute_batch(r#"INSERT INTO filament_products VALUES ('product','PLA','Fixture','PLA',NULL);
             INSERT INTO filaments VALUES ('color','product','White','FFFFFFFF');
             INSERT INTO filament_settings VALUES ('setting','product','machine','base','{}');
@@ -733,7 +757,7 @@ mod tests {
         let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
         c.execute_batch(include_str!("../tests/fixtures/schema-v3.sql"))
             .unwrap();
-        save(&c, &device()).unwrap();
+        save_before_camera(&c, &device());
         c.execute_batch("INSERT INTO filaments VALUES
             ('black','PLA Matte','Bambu Lab','PLA','000000FF','GFA01'),
             ('white','PLA Matte','Bambu Lab','PLA','FFFFFFFF','GFA01'),
@@ -940,7 +964,7 @@ mod tests {
             let schema = include_str!("../tests/fixtures/schema-v3.sql");
             c.execute_batch(schema.split("CREATE TABLE filaments").next().unwrap())
                 .unwrap();
-            save(&c, &device()).unwrap();
+            save_before_camera(&c, &device());
             c.pragma_update(None, "user_version", 1).unwrap();
             c
         }

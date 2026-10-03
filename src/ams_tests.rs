@@ -18,6 +18,7 @@ fn device() -> Device {
             mqtt_port: 8883,
             ftps_port: 990,
             start_timeout_secs: 600,
+            camera_port: 6000,
         },
     }
 }

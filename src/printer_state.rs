@@ -101,6 +101,8 @@ pub struct Status {
     pub auto_refill: AutoRefill,
     /// Temperatures, fans, light, camera, HMS and options from the merged report.
     pub live: Value,
+    /// Module names and versions from the last `get_version` answer on this connection.
+    pub firmware: Option<Value>,
 }
 
 impl Status {
@@ -270,6 +272,7 @@ pub struct State {
     tray_bits: Option<u16>,
     /// The last full `print` report with later differences merged in.
     document: Map<String, Value>,
+    firmware: Option<Value>,
 }
 
 impl State {
@@ -304,6 +307,7 @@ impl State {
             auto_refill: AutoRefill::default(),
             tray_bits: None,
             document: Map::new(),
+            firmware: None,
         }
     }
     pub fn connected(&mut self) {
@@ -373,6 +377,16 @@ impl State {
             self.synchronized = false;
             return Err("invalid_json");
         };
+        if value["info"]["command"] == "get_version" {
+            // Names and versions only: module serial numbers stay out of the API.
+            self.firmware = value["info"]["module"].as_array().map(|modules| {
+                modules
+                    .iter()
+                    .map(|m| serde_json::json!({"name":m["name"],"sw_ver":m["sw_ver"],"hw_ver":m["hw_ver"]}))
+                    .collect()
+            });
+            return Err("version");
+        }
         let Some(report) = value.get("print").and_then(Value::as_object) else {
             return Err("not_print");
         };
@@ -489,6 +503,7 @@ impl State {
             external_spool: self.external_spool.clone(),
             auto_refill: self.auto_refill.clone(),
             live: crate::bambu::live(&self.document),
+            firmware: self.firmware.clone(),
         }
     }
 

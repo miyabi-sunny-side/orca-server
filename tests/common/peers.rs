@@ -381,7 +381,7 @@ fn mqtt_session(
         } else if let Some((section, command)) = control(&value) {
             seen.controls.push(value.clone());
             if let Some(result) = control_reply.lock().unwrap().clone() {
-                let answer = json!({section:{"command":command,"sequence_id":value[section]["sequence_id"],"result":result}});
+                let answer = answer(&value, section, &command, &result, serial);
                 publish(peer, &report, &serde_json::to_vec(&answer).unwrap())?;
             }
         } else {
@@ -392,6 +392,16 @@ fn mqtt_session(
         }
     }
     Ok(())
+}
+/// The printer's reply to a control; `get_version` answers with its modules.
+fn answer(value: &Value, section: &str, command: &str, result: &str, serial: &str) -> Value {
+    let sequence = &value[section]["sequence_id"];
+    if section == "info" {
+        json!({"info":{"command":command,"sequence_id":sequence,
+            "module":[{"name":"ota","sw_ver":"01.08.02.00","hw_ver":"","sn":serial}]}})
+    } else {
+        json!({section:{"command":command,"sequence_id":sequence,"result":result}})
+    }
 }
 fn publish(peer: &mut Tls, topic: &str, payload: &[u8]) -> io::Result<()> {
     let mut body = u16::try_from(topic.len()).unwrap().to_be_bytes().to_vec();

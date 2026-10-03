@@ -6,6 +6,18 @@ use serde_json::{Value, json};
 fn control(rig: &Rig, body: &Value, expected: u16) -> Value {
     rig.post("/api/printers/p1/control", body, expected)
 }
+/// Operator controls received, without the version request sent on every connection.
+fn operator(rig: &Rig) -> Vec<Value> {
+    rig.broker
+        .records
+        .lock()
+        .unwrap()
+        .controls
+        .iter()
+        .filter(|c| c.get("info").is_none())
+        .cloned()
+        .collect()
+}
 fn status(rig: &Rig) -> Value {
     rig.get("/api/printer/status?printer_id=p1")
 }
@@ -31,7 +43,7 @@ fn controls_are_sent_once_and_answered_by_the_printer() {
     assert_eq!(reply, json!({"reply":"success","reason":null}));
     let reply = control(&rig, &json!({"action":"fan","fan":"aux","percent":50}), 200);
     assert_eq!(reply["reply"], "success");
-    let controls = rig.broker.records.lock().unwrap().controls.clone();
+    let controls = operator(&rig);
     assert_eq!(controls.len(), 2);
     assert_eq!(controls[0]["system"]["command"], "ledctrl");
     assert_eq!(controls[0]["system"]["led_mode"], "off");
@@ -67,17 +79,13 @@ fn controls_are_sent_once_and_answered_by_the_printer() {
         Some(&json!({"action":"pause"})),
         404,
     );
-    assert_eq!(
-        rig.broker.records.lock().unwrap().controls.len(),
-        4,
-        "invalid controls are never sent"
-    );
+    assert_eq!(operator(&rig).len(), 4, "invalid controls are never sent");
 
     // Without a synchronized connection nothing is sent.
     rig.broker.action(Action::Disconnect);
     until(|| status(&rig)["synchronized"] == false, 12);
     control(&rig, &json!({"action":"pause"}), 409);
-    assert_eq!(rig.broker.records.lock().unwrap().controls.len(), 4);
+    assert_eq!(operator(&rig).len(), 4);
     rig.check();
 }
 
@@ -109,6 +117,11 @@ fn live_status_reports_temperatures_fans_light_and_hms() {
     );
     assert_eq!(live["fans"]["aux"], 100);
     assert_eq!(live["hms"], json!(["0300_0D00_0001_0004"]));
+    let firmware = status(&rig)["firmware"].clone();
+    assert_eq!(
+        firmware,
+        json!([{"name":"ota","sw_ver":"01.08.02.00","hw_ver":""}])
+    );
     rig.check();
 }
 
@@ -123,6 +136,15 @@ fn pause_resume_and_stop_follow_the_printer_and_keep_recovery() {
     rig.report("RUNNING");
     rig.phase("printing");
 
+    let objects = rig.queue()["current"]["objects"].clone();
+    assert_eq!(
+        objects,
+        json!([{"id":45,"name":"0.stl"},{"id":56,"name":"1.stl"}])
+    );
+    assert_eq!(
+        control(&rig, &json!({"action":"skip_objects","objects":[56]}), 200)["reply"],
+        "success"
+    );
     assert_eq!(
         control(&rig, &json!({"action":"pause"}), 200)["reply"],
         "success"
@@ -155,16 +177,20 @@ fn pause_resume_and_stop_follow_the_printer_and_keep_recovery() {
     assert_eq!(q["current"]["failure"]["kind"], "stopped");
     assert_eq!(q["allowed"]["retry"], true);
     assert_eq!(q["allowed"]["discard"], true);
-    let kinds: Vec<_> = rig
-        .broker
-        .records
-        .lock()
-        .unwrap()
-        .controls
+    let kinds: Vec<_> = operator(&rig)
         .iter()
         .map(|c| c["print"]["command"].clone())
         .collect();
-    assert_eq!(kinds, [json!("pause"), json!("resume"), json!("stop")]);
+    assert_eq!(
+        kinds,
+        [
+            json!("skip_objects"),
+            json!("pause"),
+            json!("resume"),
+            json!("stop")
+        ]
+    );
+    assert_eq!(operator(&rig)[0]["print"]["obj_list"], json!([56]));
     assert_eq!(rig.broker.prints().len(), 1, "controls never start a print");
     rig.check();
 }

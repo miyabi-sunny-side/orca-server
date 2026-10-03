@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// One operator control. Values are validated before a message is built.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Control {
     Pause,
@@ -74,7 +74,7 @@ pub enum Control {
     Version,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Fan {
     Part,
@@ -82,7 +82,7 @@ pub enum Fan {
     Chamber,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AmsStep {
     Resume,
@@ -702,6 +702,7 @@ pub fn live(document: &serde_json::Map<String, Value>) -> Value {
         "sdcard": get("sdcard").as_bool(),
         "wifi_signal": get("wifi_signal").as_str(),
         "stage": integer("stg_cur"),
+        "skipped_objects": get("s_obj").as_array().map(|ids| ids.iter().filter_map(Value::as_u64).collect::<Vec<_>>()),
         "hms": hms,
         // BambuStudio parse_home_flag / DevPrintOptions: a value bit is meaningful only when supported.
         "options": {

@@ -149,6 +149,7 @@ impl Entry {
 }
 
 /// Build the application with its persistent registry and per-device Bambu LAN paths.
+#[allow(clippy::too_many_lines)] // Route groups and the disabled fallback device live together.
 /// # Errors
 /// Rejects unreadable storage, unsupported schema versions or invalid initial environment settings.
 pub fn router(
@@ -175,6 +176,7 @@ pub fn router(
             mqtt_port: 8883,
             ftps_port: 990,
             start_timeout_secs: 600,
+            camera_port: 6000,
         },
     };
     let fallback = Entry {
@@ -408,6 +410,7 @@ fn state_routes() -> Router<Arc<Registry>> {
         .route("/api/printers/{id}/diagnostics", get(diagnostics))
         .route("/api/printers/{id}/ams/refresh", post(refresh_inventory))
         .route("/api/printers/{id}/control", post(control))
+        .route("/api/printers/{id}/camera", get(camera))
 }
 /// Ask the printer for a full report, then return the inventory built from it.
 async fn refresh_inventory(
@@ -435,6 +438,24 @@ async fn control(
         entries.get(&id).ok_or(Error::NotFound)?.printer.clone()
     };
     printer.control(&control).await.map(Json)
+}
+/// The latest camera image as JPEG; never cached.
+async fn camera(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+) -> Result<impl axum::response::IntoResponse> {
+    let printer = {
+        let entries = registry.entries.lock().await;
+        entries.get(&id).ok_or(Error::NotFound)?.printer.clone()
+    };
+    let image = printer.snapshot().await?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "image/jpeg"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        image,
+    ))
 }
 fn product_routes() -> Router<Arc<Registry>> {
     Router::new()

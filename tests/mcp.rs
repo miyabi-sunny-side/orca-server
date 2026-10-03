@@ -1003,3 +1003,57 @@ fn mcp_save_and_retry_share_the_persistent_plate_result() {
     assert_eq!(rig.traces().len(), calls);
     assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
 }
+
+#[test]
+fn printer_controls_and_live_status_share_the_rest_api() {
+    let mut rig = common::Rig::new("mcp-controls");
+    rig.launch();
+    rig.idle();
+    let base = rig.base.clone();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = ()
+            .serve(StreamableHttpClientTransport::from_uri(format!(
+                "{base}/mcp"
+            )))
+            .await
+            .unwrap();
+        let reply = call(
+            &client,
+            "printer_control",
+            json!({"printer_id":"p1","control":{"action":"light","on":false}}),
+            false,
+        )
+        .await["data"]
+            .clone();
+        assert_eq!(reply["reply"], "success");
+        call(
+            &client,
+            "printer_control",
+            json!({"printer_id":"p1","control":{"action":"speed","level":7}}),
+            true,
+        )
+        .await;
+        call(
+            &client,
+            "printer_control",
+            json!({"printer_id":"missing","control":{"action":"pause"}}),
+            true,
+        )
+        .await;
+        let printers = call(&client, "printers", json!({}), false).await["data"].clone();
+        assert!(printers[0]["status"]["live"]["temperatures"].is_object());
+        client.cancel().await.unwrap();
+    });
+    let controls: Vec<_> = rig
+        .broker
+        .records
+        .lock()
+        .unwrap()
+        .controls
+        .iter()
+        .filter(|c| c.get("info").is_none())
+        .cloned()
+        .collect();
+    assert_eq!(controls.len(), 1, "invalid controls are not sent");
+    assert_eq!(controls[0]["system"]["command"], "ledctrl");
+}

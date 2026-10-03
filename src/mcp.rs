@@ -124,6 +124,12 @@ struct Prioritize {
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct PrinterControl {
+    printer_id: String,
+    control: crate::bambu::Control,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Admission {
     printer_id: String,
     plate_id: String,
@@ -452,6 +458,20 @@ impl Tools {
     )]
     async fn printers(&self) -> CallToolResult {
         answer(self.api(Method::GET, &["api", "printers"], &[], None).await)
+    }
+    #[tool(
+        description = "Send one operator control to an explicit physical printer: pause, resume, stop the current print; print speed 1-4; chamber light; nozzle/bed temperature; part/aux/chamber fan percent; load an AMS tray (0-15) or the external spool (254) at a nozzle temperature, unload; AMS resume/reset/done after a filament error; auto recovery, sound, AMS reading options; camera recording/timelapse; calibration; skip objects; clear an error; firmware version. Only on the user's explicit instruction for that printer: these act on the physical machine. Returns reply success/rejected/none; none means sent without an answer, so read printers for the reported state before acting again. Never use it to start a print; use the queue."
+    )]
+    async fn printer_control(&self, Parameters(a): Parameters<PrinterControl>) -> CallToolResult {
+        answer(
+            self.api(
+                Method::POST,
+                &["api", "printers", &a.printer_id, "control"],
+                &[],
+                Some(json!(a.control)),
+            )
+            .await,
+        )
     }
     #[tool(
         description = "Read one printer's AMS observations, mapping IDs/revisions, current flag and priority groups. Unconfirmed observations are not current inventory.",

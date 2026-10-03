@@ -939,6 +939,16 @@ impl Service {
                     job,
                     self.slicer.as_ref().map(|s| s.profiles.as_ref()),
                 )?;
+                // What can be skipped in the running print; the printer reports what it skipped.
+                value["objects"] = match (&job.artifact_path, job.state.as_str()) {
+                    (Some(path), "printing") => json!(
+                        crate::artifacts::objects(
+                            &self.store.root.join(path).join("print.gcode.3mf")
+                        )
+                        .ok()
+                    ),
+                    _ => Value::Null,
+                };
                 value["actual_ams_slot"] = if job.state == "printing" && status.synchronized {
                     json!(
                         status
@@ -1699,6 +1709,7 @@ mod tests {
                 mqtt_port: 8883,
                 ftps_port: 990,
                 start_timeout_secs: 60,
+                camera_port: 6000,
             },
         };
         store.db.save(&device).unwrap();

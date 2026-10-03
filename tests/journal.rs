@@ -48,7 +48,8 @@ fn traffic_is_recorded_in_order_filtered_redacted_and_kept_across_restarts() {
     let pushall = position(&|e| {
         e["kind"] == "request" && e["dir"] == "out" && e["body"]["pushing"]["command"] == "pushall"
     });
-    let report = position(&|e| e["kind"] == "report" && e["dir"] == "in");
+    let report =
+        position(&|e| e["kind"] == "report" && e["body"]["print"]["command"] == "push_status");
     assert!(connected < subscribed && subscribed < pushall && pushall < report);
     assert_eq!(all[report]["body"], rig.full);
     assert!(all[report]["epoch"].is_u64() && all[report]["at"].is_u64());

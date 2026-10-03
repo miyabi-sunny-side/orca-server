@@ -172,6 +172,7 @@ pub struct Config {
     ip: IpAddr,
     port: u16,
     ftps_port: u16,
+    camera_port: u16,
     start_timeout: u64,
     serial: String,
     access_code: String,
@@ -191,6 +192,7 @@ impl Config {
         let certificate = get("P1_TLS_CERT");
         let port = get("P1_MQTT_PORT");
         let ftps_port = get("P1_FTPS_PORT");
+        let camera_port = get("P1_CAMERA_PORT");
         let start_timeout = get("P1_START_TIMEOUT_SECS");
         if [
             &ip,
@@ -233,6 +235,12 @@ impl Config {
             .ok()
             .filter(|&v| v > 0)
             .ok_or("P1_FTPS_PORT must be 1..65535")?;
+        let camera_port = camera_port
+            .unwrap_or_else(|| "6000".into())
+            .parse::<u16>()
+            .ok()
+            .filter(|&v| v > 0)
+            .ok_or("P1_CAMERA_PORT must be 1..65535")?;
         let start_timeout = start_timeout
             .unwrap_or_else(|| "600".into())
             .parse::<u64>()
@@ -243,6 +251,7 @@ impl Config {
             ip,
             port,
             ftps_port,
+            camera_port,
             start_timeout,
             serial,
             access_code,
@@ -265,6 +274,7 @@ impl Config {
             "P1_TLS_CERT",
             "P1_MQTT_PORT",
             "P1_FTPS_PORT",
+            "P1_CAMERA_PORT",
             "P1_START_TIMEOUT_SECS",
         ] {
             match std::env::var(name) {
@@ -310,6 +320,7 @@ impl Config {
             ("P1_TLS_CERT", "inline".into()),
             ("P1_MQTT_PORT", settings.mqtt_port.to_string()),
             ("P1_FTPS_PORT", settings.ftps_port.to_string()),
+            ("P1_CAMERA_PORT", settings.camera_port.to_string()),
             (
                 "P1_START_TIMEOUT_SECS",
                 settings.start_timeout_secs.to_string(),
@@ -342,6 +353,7 @@ impl Config {
             nozzle_material: self.nozzle_material,
             mqtt_port: self.port,
             ftps_port: self.ftps_port,
+            camera_port: self.camera_port,
             start_timeout_secs: u16::try_from(self.start_timeout).expect("validated timeout"),
         })
     }
@@ -725,6 +737,34 @@ impl Printer {
             .await
             .map_err(|_| Error::Unavailable("Printer connection closed"))?
             .map_err(|_| Error::Unavailable("Printer connection closed"))?
+    }
+
+    /// One JPEG from the printer camera, within 10 seconds.
+    pub(crate) async fn snapshot(&self) -> Result<Vec<u8>> {
+        let config = self
+            .config
+            .clone()
+            .ok_or(Error::Unavailable("Printer is not configured"))?;
+        let tls = config
+            .tls()
+            .map_err(|_| Error::Upstream("Camera TLS failed"))?;
+        let printer = self.inventory.as_ref().map_or("", |(_, d)| d.id.as_str());
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::camera::snapshot(tls, config.ip, config.camera_port, &config.access_code),
+        )
+        .await
+        .unwrap_or(Err("timeout"));
+        crate::journal::event(
+            printer,
+            None,
+            "camera",
+            serde_json::json!({"bytes":result.as_ref().ok().map(Vec::len),"failed_stage":result.as_ref().err()}),
+        );
+        result.map_err(|stage| match stage {
+            "timeout" => Error::NoReply("Camera did not send an image within 10 seconds"),
+            _ => Error::Upstream("Camera image could not be read; check the printer's LAN camera"),
+        })
     }
 
     pub(crate) async fn forget_retired(&self) -> Result<()> {
@@ -1272,6 +1312,20 @@ fn transition(
 const SNAPSHOT: &[u8] =
     br#"{"pushing":{"sequence_id":"0","command":"pushall","version":1,"push_target":1}}"#;
 
+/// Ask for module versions as `BambuStudio` does on connect; the answer is kept in the status.
+fn request_version(client: &AsyncClient, topic: &str, printer: &str, epoch: u64) {
+    let sequence = (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string();
+    let message = crate::bambu::Control::Version
+        .message(&sequence)
+        .expect("version needs no values")
+        .payload
+        .to_string();
+    let queued = client
+        .try_publish(topic, QoS::AtMostOnce, false, message.clone())
+        .is_ok();
+    crate::journal::request(printer, epoch, message.as_bytes(), queued);
+}
+
 fn request_snapshot(
     client: &AsyncClient,
     topic: &str,
@@ -1353,6 +1407,7 @@ async fn run(
                         if !ok { break ("subscribe", None); }
                         subscribed = true;
                         if !snapshot(&printer, &state, &client, &request, "subscribed").await { break ("publish", None); }
+                        request_version(&client, &request, &printer, state.lock().await.epoch);
                         refresh.reset();
                     }
                     Ok(Event::Incoming(Incoming::Publish(message))) if subscribed && message.topic == report && !message.retain => {
@@ -1495,6 +1550,7 @@ mod tests {
             ip: "127.0.0.1".parse().unwrap(),
             port: 8883,
             ftps_port: 990,
+            camera_port: 6000,
             start_timeout: 600,
             serial: "TESTSERIAL".into(),
             access_code: "test-only-secret".into(),

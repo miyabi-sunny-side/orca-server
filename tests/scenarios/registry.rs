@@ -120,6 +120,8 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
             .all(
                 |(k, v)| if matches!(k.as_str(), "brim_enabled" | "support_enabled") {
                     v == false
+                } else if k == "start_options" {
+                    v["timelapse"] == true
                 } else {
                     v.is_null()
                 }
