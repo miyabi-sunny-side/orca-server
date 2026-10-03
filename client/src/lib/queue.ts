@@ -13,7 +13,10 @@ export type Failure = {
   reason?: string;
   state?: string;
 };
+/** Where the printer takes filament from; the user chooses it per job. */
+export type Feed = "ams" | "external";
 export type Job = {
+  feed?: Feed;
   ams_slot_id: string | null;
   filament_id: string | null;
   required_machine_profile_key: string | null;
@@ -54,6 +57,7 @@ export type Printer = {
     error: number | null;
   };
   ams: Ams | null;
+  external_spool?: { material: string | null } | null;
 };
 export type QueueState = {
   epoch: string;
@@ -69,13 +73,15 @@ export type QueueState = {
   current: Job | null;
   printer: Printer;
   admission?: {
+    feed?: Feed;
     plate_version: number;
     allowed: boolean;
     reason: string | null;
   } | null;
 };
 export type Action =
-  | { type: "add"; plate_id: string; plate_version: number }
+  | { type: "add"; plate_id: string; plate_version: number; feed?: Feed }
+  | { type: "feed"; job_id: string; feed: Feed }
   | { type: "move"; job_id: string; index: number }
   | { type: "remove"; job_id: string }
   | { type: "reestimate"; job_id: string }
@@ -93,13 +99,22 @@ export type Command = {
   action: Action;
 };
 
+export function feedLabel(feed?: Feed) {
+  return feed === "external" ? "外部スプール" : "AMS";
+}
+/** A new job uses the external spool when the printer reports no AMS unit. */
+export function defaultFeed(
+  status: { ams?: { units: unknown[] } | null } | null,
+): Feed {
+  return status && !status.ams?.units.length ? "external" : "ams";
+}
 export function menuReasons(
   job: Pick<Job, "state" | "plate_deleted"> | undefined,
   admission: QueueState["admission"],
 ) {
   if (!job) {
     const reason = "このジョブはキューにありません。";
-    return { edit: reason, duplicate: reason, remove: reason };
+    return { edit: reason, duplicate: reason, remove: reason, feed: reason };
   }
   const edit = job.plate_deleted ? "プレートは一覧から削除されています。" : "";
   const duplicate =
@@ -115,7 +130,11 @@ export function menuReasons(
       : job.state === "awaiting_removal" || job.state === "needs_attention"
         ? "現在のジョブは、造形物を取り外してから取り外し確認の操作で終了してください。"
         : `${phaseText[job.state]}のジョブは削除できません。`;
-  return { edit, duplicate, remove };
+  const feed =
+    job.state === "queued" || job.state === "needs_attention"
+      ? ""
+      : `${phaseText[job.state]}のジョブは給材元を変更できません。`;
+  return { edit, duplicate, remove, feed };
 }
 
 export function slotLabel(slot: number, ams: Ams | null) {
@@ -295,6 +314,14 @@ export const failureText: Record<string, string> = {
     "印刷が一時停止しています。本体で再開するか停止してください。",
   "Print ended without a completion report; inspect the printer":
     "完了報告なしに印刷が終了しました。本体を確認してください。",
+  "The external spool prints one material; use the AMS or one material for every role":
+    "外部スプールで印刷できるのは1材料だけです。AMSを使うか、全ての役割を同じ材料にしてください。",
+  "External spool reports a different material; change the spool or its setting on the printer":
+    "本体の外部スプール設定が予定の材料と異なります。スプールか本体の設定を確認してください。",
+  "Material settings changed during preparation":
+    "準備中に材料設定が変わりました。材料設定を確認してください。",
+  "Only a waiting or attention-needed job can change its feed; reload the queue":
+    "給材元は待機中か要確認のジョブだけ変更できます。キューを確認してください。",
   "Printer reconnected idle without this print; check the plate before starting again":
     "本体は再接続後に待機中で、この印刷は動いていません。プレートを確認して再印刷か削除を選んでください。",
 };

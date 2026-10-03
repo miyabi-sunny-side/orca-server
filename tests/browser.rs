@@ -271,3 +271,27 @@ fn stopped_recovery() {
     assert_eq!(rig.queue()["current"]["id"], next["id"]);
     assert!(!rig.store.join("jobs").join(id(&first)).exists());
 }
+
+#[test]
+#[ignore = "requires Chromium"]
+fn external_spool() {
+    let mut rig = Rig::new("browser-external-spool");
+    rig.launch();
+    rig.seed();
+    let plate = rig.configure(None, None);
+    // The P1S as observed in production with the AMS detached and an unset external spool.
+    rig.full["print"]["ams"] =
+        json!({"ams":[],"ams_exist_bits":"0","tray_exist_bits":"0","tray_now":"254"});
+    rig.full["print"]["vt_tray"] = json!({"id":"254","tray_type":"","tray_color":"00000000"});
+    rig.broker.send(&rig.full);
+    until(|| rig.queue()["printer"]["external_spool"]["id"] == 254, 12);
+    let control = rig.control();
+    rig.browser(
+        "E2E_EXTERNAL_CONTEXT",
+        &json!({"plate":plate["id"]}),
+        Some(&control),
+    );
+    let prints = rig.broker.prints();
+    assert_eq!(prints.len(), 1);
+    assert_eq!(prints[0]["use_ams"], false);
+}

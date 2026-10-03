@@ -119,14 +119,16 @@ Dockerでは環境変数を`--env-file`で渡し、証明書を読み取り専�
 
 ## 印刷を開始する
 
-プレートをキューへ追加し、予定材料・AMSスロット・要求機種とノズルを指定します。
+プレートをキューへ追加し、予定材料・[給材元](queue.md#給材元)・要求機種とノズルを指定します。
 造形物を除去して空のビルドプレートを戻してから、[キューの開始操作](queue.md#次の印刷と再送)を行います。
 開始前と転送後に機器・AMS・材料設定を照合します。残量や物理的な装着状態は利用者も確認してください。
 
 キューの`preparing`は、モデル取得から機器の開始確認までを含みます。
 `GET /api/printer/status?printer_id=PRINTER_ID`の`start`で通信段階を確認できます。
-単一材料のスライサーID 1を、選んだ従来AMSのunit 0〜3・tray 0〜3へ対応づけます。
-外部スプールや装填未確認のスロットでは開始しません。
+AMSでは単一材料のスライサーID 1を、選んだ従来AMSのunit 0〜3・tray 0〜3へ対応づけます。装填未確認のスロットでは開始しません。
+外部スプールでは`use_ams: false`、`ams_mapping: [0]`で開始します。[ha-bambulabのLAN印刷](https://github.com/greghesp/ha-bambulab/blob/cd67ed90e08561175a831f35b45773fe427996d7/custom_components/bambu_lab/coordinator.py)と同じ形で、
+[BambuStudio](https://github.com/bambulab/BambuStudio/blob/77b9dd94d1e3c432d5e74a18ab8de146ccf3b7c7/src/slic3r/GUI/SelectMachine.cpp)も全材料が外部スプールのとき`use_ams`をfalseにします。
+[状態API](#状態api)の`external_spool`は本体が報告した外部スプール（`vt_tray`）の材料・色です。未設定なら`material`は`null`です。
 
 | `start.phase` | 意味 |
 | --- | --- |

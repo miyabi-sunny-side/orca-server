@@ -140,7 +140,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=19 => {}
+            1..=20 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -276,6 +276,9 @@ impl Database {
         }
         if version < 19 {
             crate::notifications::migrate_events(&tx)?;
+        }
+        if version < 20 {
+            tx.execute_batch("ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams' CHECK(feed IN ('ams','external')); PRAGMA user_version=20;")?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -944,7 +947,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            19
+            20
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

@@ -95,10 +95,11 @@ DBをバックアップから戻した場合も同じです。
 | `current` | 準備中以降のジョブ。なければ`null`。 |
 | `allowed` | 確認後に行える`next`・`retry`・`discard`。POSTでも再検証します。 |
 | `recovery` | `retry_reason`・`discard_reason`。復旧できない理由。理由がなければ`null`。 |
-| `admission` | `plate_id`をqueryへ追加した場合の`plate_version`・`allowed`・`reason`。指定がなければ`null`。 |
+| `admission` | `plate_id`をqueryへ追加した場合の`plate_version`・`feed`・`allowed`・`reason`。`feed`（`ams`・`external`、既定`ams`）もqueryで指定します。指定がなければ`null`。 |
 | `printer` | [機器状態](printer.md#状態api)。 |
 
-ジョブは`id`、`plate_id`、`name`、`state`と、材料・要求機種・工程・ベッド・解決したAMSを持ちます。
+ジョブは`id`、`plate_id`、`name`、`state`と、給材元`feed`（`ams`・`external`）、材料・要求機種・工程・ベッド・解決したAMSを持ちます。
+外部スプールのジョブはAMSスロットを持たず、`ams_slot_id`は`null`（確定後は空文字列）です。
 `plate_deleted`が`true`でも既存ジョブは継続できます。[プレートの論理削除](plates.md#一覧から削除する)は新規追加だけを止めます。
 試行の情報は`attempt_id`、`artifact_path`、`last_error`、`failure`です。
 `failure`は現在の試行について本体が報告した失敗で、なければ`null`です。Discordの失敗通知と同じ保存値です。
@@ -147,19 +148,31 @@ APIは未知のコードもそのまま返します。画面は折り畳みの�
   "action": {
     "type": "add",
     "plate_id": "プレートID",
-    "plate_version": 1
+    "plate_version": 1,
+    "feed": "ams"
   }
 }
 ```
 
-追加前に`GET /api/queue?printer_id=PRINTER_ID&plate_id=PLATE_ID`を読み、`admission.allowed`と理由を確認します。
+追加前に`GET /api/queue?printer_id=PRINTER_ID&plate_id=PLATE_ID&feed=FEED`を読み、`admission.allowed`と理由を確認します。
 `admission.plate_version`が表示したプレートの版と一致することも確認してください。
 POSTでも現在のプレート版・登録実機・AMSを再照合します。条件やslotはPOSTで上書きできません。
+
+### 給材元
+
+`feed`はジョブごとに利用者が選びます。`ams`は従来どおり指定材料を装填したAMSスロットを使用順で解決します。
+`external`は本体の外部スプールから印刷し、AMSの材料割当を要求しません。AMSを外したとき、またはAMSを接続したまま外部を使うときに選びます。
+外部スプールの物理的な装填はサーバーから確認できません。開始は利用者の明示操作で進みます。
+本体が外部スプールの材料（`vt_tray.tray_type`）を報告していて、予定の材料と異なる場合は保留します。未設定（空）の報告では止めません。
+外部スプールで印刷できるのは1材料だけです。役割や接触面に異なる材料を使うプレートは理由を示して保留します。
+P1Sは外部スプールの多色交換補助（BambuStudioの`flag3` bit 16、`fun` bit 48）を報告せず、BambuStudioもこの場合は印刷中に一時停止しないと警告するためです。
+AMSが見えなくなっても既存のAMSジョブを外部へ切り替えません。`feed`操作で利用者が変更します。画面ではキューの行メニューから変更できます。
 待機条件の個別編集APIはありません。[プレートAPI](plates.md#印刷条件を保存する)で編集します。
 
 | `action.type` | 追加項目と操作 |
 | --- | --- |
-| `add` | `plate_id`、`plate_version`。末尾へ追加。 |
+| `add` | `plate_id`、`plate_version`、`feed`（省略時`ams`）。末尾へ追加。 |
+| `feed` | `job_id`、`feed`。待機中または要確認のジョブの給材元を変更。 |
 | `move` | `job_id`、`index`。待機中の位置を0始まりで指定。 |
 | `remove` | `job_id`。待機を取消。 |
 | `reestimate` | `job_id`。待機ジョブの試算を破棄し、再計算。印刷は開始しません。 |

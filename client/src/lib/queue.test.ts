@@ -1,5 +1,5 @@
 import { estimateText } from "./queue";
-import { menuReasons, type Job } from "./queue";
+import { defaultFeed, feedLabel, menuReasons, type Job } from "./queue";
 import { describe, expect, it } from "vitest";
 import { slotLabel, printerText, type Printer } from "./queue";
 const printer: Printer = {
@@ -260,4 +260,30 @@ it("summarizes current progress and waiting holds in one status line", async () 
       "PETG-GF 黒",
     ),
   ).toContain("0℃");
+});
+
+it("defaults the feed to the external spool only when the printer reports no AMS", () => {
+  expect(defaultFeed(null)).toBe("ams");
+  expect(defaultFeed({ ams: null })).toBe("external");
+  expect(defaultFeed({ ams: { units: [] } })).toBe("external");
+  expect(defaultFeed({ ams: { units: [{ id: 0, trays: [] }] } })).toBe("ams");
+});
+
+it("allows a feed change only for waiting and attention-needed jobs", () => {
+  const admission = { plate_version: 7, allowed: true, reason: null };
+  for (const state of [
+    "queued",
+    "preparing",
+    "printing",
+    "awaiting_removal",
+    "needs_attention",
+  ] as const) {
+    const reasons = menuReasons({ state, plate_deleted: false }, admission);
+    expect(Boolean(reasons.feed)).toBe(
+      state !== "queued" && state !== "needs_attention",
+    );
+  }
+  expect(menuReasons(undefined, null).feed).toBeTruthy();
+  expect(feedLabel("external")).toBe("外部スプール");
+  expect(feedLabel(undefined)).toBe("AMS");
 });

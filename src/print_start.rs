@@ -87,6 +87,9 @@ pub struct Attempt {
     /// Printer-reported failure of this attempt; kept across later uncertainty and restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<Failure>,
+    /// Feed from the external spool instead of the AMS.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
     sequence: String,
     sent_at: Option<u64>,
     observed_printing: bool,
@@ -127,6 +130,7 @@ impl Attempt {
             secondary: None,
             completed_at: None,
             failure: None,
+            external: false,
             sequence: (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string(),
             sent_at: None,
             observed_printing: false,
@@ -140,16 +144,22 @@ impl Attempt {
         format!("{}.gcode.3mf", self.name())
     }
     pub fn command(&self) -> Value {
-        let mapping: Vec<_> = std::iter::once(self.ams_slot)
-            .chain(self.secondary.iter().map(|i| i.ams_slot))
-            .chain(self.interface.iter().map(|i| i.ams_slot))
-            .collect();
+        // External: ha-bambulab's LAN start (`use_ams` false keeps the default mapping [0]);
+        // BambuStudio likewise sends use_ams=false when every filament maps to the external tray.
+        let mapping: Vec<_> = if self.external {
+            vec![0]
+        } else {
+            std::iter::once(self.ams_slot)
+                .chain(self.secondary.iter().map(|i| i.ams_slot))
+                .chain(self.interface.iter().map(|i| i.ams_slot))
+                .collect()
+        };
         json!({"print":{
             "command":"project_file", "sequence_id":self.sequence,
             "param":"Metadata/plate_1.gcode", "url":format!("ftp:///{}", self.filename()),
             "file":self.filename(), "subtask_name":self.name(),
             "project_id":"0", "profile_id":"0", "task_id":"0", "subtask_id":"0", "md5":"",
-            "use_ams":true, "ams_mapping":mapping, "bed_type":"auto",
+            "use_ams":!self.external, "ams_mapping":mapping, "bed_type":"auto",
             "timelapse":false, "bed_leveling":true, "flow_cali":false,
             "vibration_cali":true, "layer_inspect":false
         }})
@@ -613,6 +623,21 @@ mod tests {
         assert_eq!(command["print"]["param"], "Metadata/plate_1.gcode");
         assert_eq!(command["print"]["url"], format!("ftp:///{}", a.filename()));
         assert_eq!(command["print"]["use_ams"], true);
+    }
+
+    #[test]
+    fn external_spool_starts_without_the_ams_and_old_attempts_stay_ams() {
+        let mut attempt = Attempt::new("p".into(), "j".into(), 0, "PLA".into());
+        attempt.external = true;
+        let command = attempt.command();
+        assert_eq!(command["print"]["use_ams"], false);
+        assert_eq!(command["print"]["ams_mapping"], json!([0]));
+        let mut raw = json!(attempt);
+        assert_eq!(raw["external"], true);
+        raw.as_object_mut().unwrap().remove("external");
+        let old: Attempt = serde_json::from_value(raw).unwrap();
+        assert_eq!(old.command()["print"]["use_ams"], true);
+        assert!(json!(old).get("external").is_none());
     }
 
     #[test]

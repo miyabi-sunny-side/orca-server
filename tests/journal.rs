@@ -212,7 +212,11 @@ fn recorded_reports_replay_to_the_same_state() {
                 array(&ams["slots"])
                     .iter()
                     .find(|v| v["slot_index"] == i && v["ams_id"] == 0)
-                    .map_or(Value::Null, |v| v["reported"].clone())
+                    // Observation times differ between runs; compare what was reported.
+                    .map_or(Value::Null, |v| {
+                        let r = &v["reported"];
+                        json!({"present":r["present"],"material":r["material"],"color":r["color"]})
+                    })
             })
             .collect();
         (status["print"]["state"].clone(), slots)

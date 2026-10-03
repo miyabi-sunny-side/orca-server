@@ -96,6 +96,8 @@ pub struct Status {
     pub ready_to_print: bool,
     pub print: PrintStatus,
     pub ams: Option<AmsStatus>,
+    /// The external spool (`vt_tray`) as reported; the server cannot see what is loaded.
+    pub external_spool: Option<Tray>,
     pub auto_refill: AutoRefill,
 }
 
@@ -265,6 +267,7 @@ pub struct State {
     updated_at: Option<u64>,
     print: PrintStatus,
     ams: Option<AmsStatus>,
+    external_spool: Option<Tray>,
     auto_refill: AutoRefill,
     tray_bits: Option<u16>,
 }
@@ -297,6 +300,7 @@ impl State {
             updated_at: None,
             print: PrintStatus::default(),
             ams: None,
+            external_spool: None,
             auto_refill: AutoRefill::default(),
             tray_bits: None,
         }
@@ -391,6 +395,7 @@ impl State {
             self.nozzle_material = None;
             self.print = PrintStatus::default();
             self.ams = None;
+            self.external_spool = None;
             self.auto_refill = AutoRefill::default();
             self.tray_bits = None;
             self.synchronized = true;
@@ -417,6 +422,14 @@ impl State {
         update(&mut self.print.job_id, report, "subtask_id", string);
         update(&mut self.print.file, report, "gcode_file", string);
         update(&mut self.print.name, report, "subtask_name", string);
+        if let Some(raw) = report.get("vt_tray").and_then(Value::as_object) {
+            self.external_spool
+                .get_or_insert_with(|| Tray {
+                    id: 254,
+                    ..Tray::default()
+                })
+                .update(raw, now);
+        }
         if let Some(ams) = report.get("ams") {
             if let Some(ams) = ams.as_object() {
                 self.update_ams(ams, now);
@@ -467,6 +480,7 @@ impl State {
                 && self.print.error == Some(0),
             print: self.print.clone(),
             ams: self.ams.clone(),
+            external_spool: self.external_spool.clone(),
             auto_refill: self.auto_refill.clone(),
         }
     }
@@ -851,6 +865,46 @@ fn string(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn external_spool_is_read_from_vt_tray_and_reset_by_full_reports() {
+        let mut state = State::new(true);
+        state.connected();
+        let apply = |state: &mut State, value: Value, at| {
+            assert!(state.apply(value.to_string().as_bytes(), at));
+            state.status(at).external_spool
+        };
+        // As reported by a P1S without an AMS and an unset external spool.
+        let unset = apply(
+            &mut state,
+            json!({"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,
+            "vt_tray":{"id":"254","tray_type":"","tray_color":"00000000","remain":0}}}),
+            1,
+        )
+        .unwrap();
+        assert_eq!(unset.material, None);
+        let set = apply(
+            &mut state,
+            json!({"print":{"command":"push_status","msg":1,
+            "vt_tray":{"id":"254","tray_type":"PETG","tray_color":"FF0000FF"}}}),
+            2,
+        )
+        .unwrap();
+        assert_eq!(set.material.as_deref(), Some("PETG"));
+        assert_eq!(set.color.as_deref(), Some("FF0000FF"));
+        let kept = apply(
+            &mut state,
+            json!({"print":{"command":"push_status","msg":1,"mc_percent":3}}),
+            3,
+        );
+        assert_eq!(kept.unwrap().material.as_deref(), Some("PETG"));
+        let full = apply(
+            &mut state,
+            json!({"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0}}),
+            4,
+        );
+        assert!(full.is_none());
+    }
 
     #[test]
     fn native_refill_reports_distinguish_support_state_and_device_groups() {

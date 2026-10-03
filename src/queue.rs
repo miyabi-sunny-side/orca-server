@@ -14,9 +14,27 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+/// Where the printer takes filament from. Chosen by the user per job; never switched silently.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Feed {
+    #[default]
+    Ams,
+    External,
+}
+impl Feed {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ams => "ams",
+            Self::External => "external",
+        }
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Specification {
+    #[serde(default)]
+    pub feed: Feed,
     pub ams_slot_id: String,
     pub filament_id: String,
     pub required_machine_profile_key: String,
@@ -51,6 +69,13 @@ enum Action {
     Add {
         plate_id: String,
         plate_version: i64,
+        #[serde(default)]
+        feed: Feed,
+    },
+    /// Change the feed of a waiting or `needs_attention` job.
+    Feed {
+        job_id: String,
+        feed: Feed,
     },
     Reestimate {
         job_id: String,
@@ -107,6 +132,9 @@ pub(crate) struct Resolved {
     pub secondary: Option<Binding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub roles: BTreeMap<crate::model_import::Role, usize>,
+    /// Every binding feeds from the external spool; none holds an AMS slot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
 }
 impl Resolved {
     pub(crate) fn filament_profiles(&self) -> Vec<serde_json::Map<String, Value>> {
@@ -134,10 +162,32 @@ impl Resolved {
             .ok_or(Error::Invalid("Invalid nozzle profile"))?;
         crate::print_start::check_nozzle(status, diameter, &device.settings.nozzle_material)?;
         let filaments = crate::database::load_filaments(c)?;
-        for binding in std::iter::once(&self.main)
+        let bindings: Vec<&Binding> = std::iter::once(&self.main)
             .chain(self.secondary.iter())
             .chain(self.interface.iter())
-        {
+            .collect();
+        if self.external {
+            for binding in &bindings {
+                if filaments.iter().find(|f| f.id == binding.filament.id) != Some(&binding.filament)
+                    || binding.setting.as_ref().is_some_and(|setting| {
+                        crate::products::load_setting(c, &binding.filament.id, &machine)
+                            .as_ref()
+                            .ok()
+                            != Some(setting)
+                    })
+                {
+                    return Err(Error::Conflict(
+                        "Material settings changed during preparation",
+                    ));
+                }
+            }
+            let materials: Vec<&str> = bindings
+                .iter()
+                .map(|b| b.filament.data.material.as_str())
+                .collect();
+            return check_external(status, &materials);
+        }
+        for binding in bindings {
             let slot = crate::ams::resolve(c, &device.id, &binding.filament.id, &machine)?
                 .into_iter()
                 .find(|s| s.id == binding.ams_slot_id && s.ams_id < 4)
@@ -288,7 +338,7 @@ fn retry_execution(
         return Err(Error::Conflict("Plate has been deleted"));
     }
     let plate = crate::plates::load(c, &job.plate_id)?;
-    let specification = planned(c, &device.id, &plate)?;
+    let specification = planned(c, &device.id, &plate, job.specification.feed)?;
     let settings = available(c, device, &specification, &plate, status, profiles)?;
     Ok(Execution {
         plate,
@@ -303,8 +353,8 @@ struct Preparation {
 }
 
 fn jobs(c: &Connection, pid: &str) -> Result<Vec<Job>> {
-    Ok(c.prepare("SELECT j.id,j.plate_id,coalesce(e.name,p.name),coalesce(e.ams_slot_id,''),coalesce(e.filament_id,p.filament_id,''),coalesce(e.required_machine_profile_key,p.required_machine_profile_key,''),coalesce(e.process_profile_key,p.process_profile_key,''),coalesce(e.bed_type,p.bed_type,''),j.state,j.attempt_id,e.artifact_path,j.last_error,json_extract(e.attempt_json,'$.failure') FROM print_jobs j JOIN plates p ON p.id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('completed','cancelled') ORDER BY j.position,j.id")?
-        .query_map([pid],|r|Ok(Job{id:r.get(0)?,plate_id:r.get(1)?,name:r.get(2)?,specification:Specification{ams_slot_id:r.get(3)?,filament_id:r.get(4)?,required_machine_profile_key:r.get(5)?,process_profile_key:r.get(6)?,bed_type:r.get(7)?},state:r.get(8)?,attempt_id:r.get(9)?,artifact_path:r.get(10)?,last_error:r.get(11)?,failure:r.get::<_,Option<String>>(12)?.and_then(|s|serde_json::from_str(&s).ok())}))?
+    Ok(c.prepare("SELECT j.id,j.plate_id,coalesce(e.name,p.name),coalesce(e.ams_slot_id,''),coalesce(e.filament_id,p.filament_id,''),coalesce(e.required_machine_profile_key,p.required_machine_profile_key,''),coalesce(e.process_profile_key,p.process_profile_key,''),coalesce(e.bed_type,p.bed_type,''),j.state,j.attempt_id,e.artifact_path,j.last_error,json_extract(e.attempt_json,'$.failure'),j.feed FROM print_jobs j JOIN plates p ON p.id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('completed','cancelled') ORDER BY j.position,j.id")?
+        .query_map([pid],|r|Ok(Job{id:r.get(0)?,plate_id:r.get(1)?,name:r.get(2)?,specification:Specification{feed:if r.get::<_,String>(13)?=="external"{Feed::External}else{Feed::Ams},ams_slot_id:r.get(3)?,filament_id:r.get(4)?,required_machine_profile_key:r.get(5)?,process_profile_key:r.get(6)?,bed_type:r.get(7)?},state:r.get(8)?,attempt_id:r.get(9)?,artifact_path:r.get(10)?,last_error:r.get(11)?,failure:r.get::<_,Option<String>>(12)?.and_then(|s|serde_json::from_str(&s).ok())}))?
         .collect::<std::result::Result<_,_>>()?)
 }
 fn generation(c: &Connection, pid: &str) -> Result<i64> {
@@ -362,6 +412,10 @@ pub(crate) fn resolve(
     plate: &crate::plates::Plate,
 ) -> Result<Resolved> {
     let mut settings = slice_settings(c, profiles, plate)?;
+    if s.feed == Feed::External {
+        settings.external = true;
+        return Ok(settings);
+    }
     settings.main = binding(
         c,
         pid,
@@ -510,6 +564,7 @@ pub(crate) fn slice_settings(
         interface,
         secondary,
         roles,
+        external: false,
     })
 }
 fn available(
@@ -528,6 +583,7 @@ pub(crate) fn planned(
     c: &Connection,
     pid: &str,
     plate: &crate::plates::Plate,
+    feed: Feed,
 ) -> Result<Specification> {
     plate.ensure_printable()?;
     let condition = &plate.conditions;
@@ -557,19 +613,53 @@ pub(crate) fn planned(
             "Required machine or nozzle differs from the registered configuration",
         ));
     }
-    let slot = crate::ams::resolve(c, pid, filament, machine)?
-        .into_iter()
-        .find(|s| s.ams_id < 4)
-        .ok_or(Error::Conflict(
-            "No confirmed AMS slot contains the plate material",
-        ))?;
+    let ams_slot_id = match feed {
+        Feed::External => String::new(),
+        Feed::Ams => {
+            crate::ams::resolve(c, pid, filament, machine)?
+                .into_iter()
+                .find(|s| s.ams_id < 4)
+                .ok_or(Error::Conflict(
+                    "No confirmed AMS slot contains the plate material",
+                ))?
+                .id
+        }
+    };
     Ok(Specification {
-        ams_slot_id: slot.id,
+        feed,
+        ams_slot_id,
         filament_id: filament.to_owned(),
         required_machine_profile_key: machine.clone(),
         process_profile_key: process.clone(),
         bed_type: bed.clone(),
     })
+}
+/// Whether the external spool can print `materials` (one per filament) now.
+/// The server cannot see what is loaded; a reported spool material that differs is the one
+/// contradiction it can check. One spool cannot feed several filaments: the P1S reports no
+/// external change assist (`BambuStudio` `flag3` bit 16, `fun` bit 48), so it would not pause.
+pub(crate) fn check_external(status: &Status, materials: &[&str]) -> Result<()> {
+    if !status.synchronized {
+        return Err(Error::Conflict(
+            "Wait for a fresh synchronized printer report",
+        ));
+    }
+    let [material] = materials else {
+        return Err(Error::Conflict(
+            "The external spool prints one material; use the AMS or one material for every role",
+        ));
+    };
+    if status
+        .external_spool
+        .as_ref()
+        .and_then(|s| s.material.as_deref())
+        .is_some_and(|reported| !reported.eq_ignore_ascii_case(material))
+    {
+        return Err(Error::Conflict(
+            "External spool reports a different material; change the spool or its setting on the printer",
+        ));
+    }
+    Ok(())
 }
 pub(crate) fn message(error: &Error) -> String {
     match error {
@@ -766,9 +856,9 @@ impl Service {
             .and_then(|c| jobs(&c, &self.device.id))
             .map_or(true, |j| j.iter().any(|j| j.state != "queued"))
     }
-    pub(crate) async fn read(&self, plate_id: Option<&str>) -> Result<Value> {
+    pub(crate) async fn read(&self, admission: Option<(&str, Feed)>) -> Result<Value> {
         let (_observation, status) = self.printer.observed_status().await?;
-        let view = self.view(&*self.store.db.connection()?, &status, plate_id)?;
+        let view = self.view(&*self.store.db.connection()?, &status, admission)?;
         let decision = json!({"current":view["current"]["id"],"allowed":view["allowed"],"recovery":view["recovery"]});
         let mut last = self.decision.lock().await;
         if last.as_ref() != Some(&decision) {
@@ -778,7 +868,12 @@ impl Service {
         Ok(view)
     }
     /// The queue as seen from one printer status; shared by the page, MCP and diagnostics.
-    fn view(&self, c: &Connection, status: &Status, plate_id: Option<&str>) -> Result<Value> {
+    fn view(
+        &self,
+        c: &Connection,
+        status: &Status,
+        admission: Option<(&str, Feed)>,
+    ) -> Result<Value> {
         let list = jobs(c, &self.device.id)?;
         let current = list.iter().find(|j| j.state != "queued");
         let mut waiting = Vec::new();
@@ -799,9 +894,12 @@ impl Service {
                 value[key] = json!(plate.conditions)[key].clone();
             }
             value["ams_slot_id"] = Value::Null;
-            let hold = self.plan(c, &plate, status).map(|spec| {
-                value["ams_slot_id"] = json!(spec.ams_slot_id);
-            });
+            let hold = self
+                .plan(c, &plate, status, job.specification.feed)
+                .map(|spec| {
+                    value["ams_slot_id"] =
+                        json!(Some(spec.ams_slot_id).filter(|id| !id.is_empty()));
+                });
             value["hold_reason"] = hold.err().map_or(Value::Null, |e| json!(message(&e)));
             waiting.push(value);
         }
@@ -827,10 +925,10 @@ impl Service {
         });
         let retry = retry.is_some_and(|r| r.is_ok());
         let discard = discard.is_some_and(|r| r.is_ok());
-        let admission = plate_id.map(|id| -> Result<Value> {
+        let admission = admission.map(|(id, feed)| -> Result<Value> {
             let plate = crate::plates::load(c, id)?;
-            let result = self.admission(c, &plate, status);
-            Ok(json!({"plate_version":plate.version,"allowed":result.is_ok(),"reason":result.err().map(|e|message(&e))}))
+            let result = self.admission(c, &plate, status, feed);
+            Ok(json!({"plate_version":plate.version,"feed":feed,"allowed":result.is_ok(),"reason":result.err().map(|e|message(&e))}))
         }).transpose()?;
         let current_view = current
             .map(|job| -> Result<Value> {
@@ -1082,6 +1180,20 @@ impl Service {
                     ],
                 )?;
             }
+            Action::Feed { job_id, feed } => {
+                let job = all
+                    .iter()
+                    .find(|j| {
+                        j.id == *job_id && matches!(j.state.as_str(), "queued" | "needs_attention")
+                    })
+                    .ok_or(Error::Conflict(
+                        "Only a waiting or attention-needed job can change its feed; reload the queue",
+                    ))?;
+                tx.execute(
+                    "UPDATE print_jobs SET feed=?1 WHERE id=?2",
+                    params![feed.as_str(), job.id],
+                )?;
+            }
             _ => unreachable!("waiting actions handled above"),
         }
         record(&tx, &self.device.id, command)?;
@@ -1106,13 +1218,14 @@ impl Service {
             Action::Add {
                 plate_id,
                 plate_version,
+                feed,
             } => {
                 let plate = crate::plates::load(tx, plate_id)?;
                 if plate.version != *plate_version {
                     return Err(Error::Conflict("Plate changed; reload before adding"));
                 }
-                self.admission(tx, &plate, status)?;
-                tx.execute("INSERT INTO print_jobs(id,printer_id,plate_id,state,position) VALUES (?1,?2,?3,'queued',coalesce((SELECT max(position)+1 FROM print_jobs WHERE printer_id=?2),0))",params![uuid::Uuid::new_v4().to_string(),self.device.id,plate_id])?;
+                self.admission(tx, &plate, status, *feed)?;
+                tx.execute("INSERT INTO print_jobs(id,printer_id,plate_id,state,position,feed) VALUES (?1,?2,?3,'queued',coalesce((SELECT max(position)+1 FROM print_jobs WHERE printer_id=?2),0),?4)",params![uuid::Uuid::new_v4().to_string(),self.device.id,plate_id,feed.as_str()])?;
             }
             Action::Reestimate { job_id } => {
                 selected(job_id)?;
@@ -1152,6 +1265,7 @@ impl Service {
         c: &Connection,
         plate: &crate::plates::Plate,
         status: &Status,
+        feed: Feed,
     ) -> Result<Specification> {
         if crate::plates::is_deleted(c, &plate.id)? {
             return Err(Error::Conflict("Plate has been deleted"));
@@ -1164,19 +1278,20 @@ impl Service {
         if count >= 100 {
             return Err(Error::Conflict("Queue holds at most 100 waiting jobs"));
         }
-        self.plan(c, plate, status)
+        self.plan(c, plate, status, feed)
     }
     fn plan(
         &self,
         c: &Connection,
         plate: &crate::plates::Plate,
         status: &Status,
+        feed: Feed,
     ) -> Result<Specification> {
         let slicer = self
             .slicer
             .as_ref()
             .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
-        let specification = planned(c, &self.device.id, plate)?;
+        let specification = planned(c, &self.device.id, plate, feed)?;
         available(
             c,
             &self.device,
@@ -1201,7 +1316,7 @@ impl Service {
         let mut job = job.clone();
         let execution = if job.state == "queued" {
             let plate = crate::plates::load(c, &job.plate_id)?;
-            job.specification = planned(c, &self.device.id, &plate)?;
+            job.specification = planned(c, &self.device.id, &plate, job.specification.feed)?;
             let stopped_attempt = next_recovery(c, &self.device.id, status)?;
             let settings = available(
                 c,
@@ -1219,7 +1334,7 @@ impl Service {
         } else {
             retry_execution(c, &self.device, &job, status, &slicer.profiles)?
         };
-        job.specification = planned(c, &self.device.id, &execution.plate)?;
+        job.specification = planned(c, &self.device.id, &execution.plate, job.specification.feed)?;
         let originals = originals(c, &execution.plate)?;
         c.execute(
             "UPDATE printers SET recovery_attempt=NULL WHERE id=?1",
@@ -1305,6 +1420,7 @@ impl Service {
                         .clone(),
                 });
         attempt.id = attempt_id.into();
+        attempt.external = execution.settings.external;
         self.printer.start(attempt, bytes).await?;
         Ok(())
     }
@@ -1443,6 +1559,7 @@ impl Database {
             _ => false,
         };
         if attempt.plate_id != execution.plate.id
+            || attempt.external != execution.settings.external
             || execution.settings.main.ams_slot_id != slot_id
             || attempt.ams_slot != execution.settings.main.ams_slot
             || execution.settings.profiles["filament.json"]["filament_type"][0] != attempt.material
@@ -1524,6 +1641,39 @@ impl Database {
 mod tests {
     use super::*;
     const MACHINE: &str = crate::profiles::PRINTER;
+    #[test]
+    fn external_spool_checks_sync_one_material_and_a_reported_mismatch() {
+        let report = |extra: &str| {
+            let mut state = crate::printer_state::State::new(true);
+            state.connected();
+            state.apply(format!(r#"{{"print":{{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0{extra}}}}}"#).as_bytes(), 1);
+            state.status(1)
+        };
+        let conflict = |r: Result<()>| match r {
+            Err(Error::Conflict(m)) => m,
+            other => panic!("{:?}", other.err()),
+        };
+        // No AMS and no spool material reported: the user's start decides.
+        let no_ams = report("");
+        assert!(check_external(&no_ams, &["PLA"]).is_ok());
+        // An AMS stays connected while the user chose the external spool.
+        assert!(check_external(&status(), &["PLA"]).is_ok());
+        let unset = report(r#","vt_tray":{"id":"254","tray_type":""}"#);
+        assert!(check_external(&unset, &["PLA"]).is_ok());
+        let pla = report(r#","vt_tray":{"id":"254","tray_type":"pla"}"#);
+        assert!(check_external(&pla, &["PLA"]).is_ok());
+        let petg = report(r#","vt_tray":{"id":"254","tray_type":"PETG"}"#);
+        assert!(conflict(check_external(&petg, &["PLA"])).contains("External spool"));
+        assert!(conflict(check_external(&no_ams, &["PLA", "PLA"])).contains("one material"));
+        let mut lost = crate::printer_state::State::new(true);
+        lost.connected();
+        lost.apply(
+            br#"{"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0}}"#,
+            1,
+        );
+        lost.disconnected();
+        assert!(conflict(check_external(&lost.status(1), &["PLA"])).contains("synchronized"));
+    }
     fn status() -> Status {
         let mut state = crate::printer_state::State::new(true);
         state.connected();
@@ -1622,7 +1772,7 @@ mod tests {
         let original = resolve(
             &c,
             "p1",
-            &planned(&c, "p1", &plate).unwrap(),
+            &planned(&c, "p1", &plate, Feed::Ams).unwrap(),
             profiles,
             &plate,
         )
@@ -1632,7 +1782,7 @@ mod tests {
         let offline = slice_settings(&c, profiles, &plate).unwrap();
         assert_eq!(offline.profiles, original.profiles);
         assert_eq!(offline.roles, original.roles);
-        assert!(planned(&c, "p1", &plate).is_err());
+        assert!(planned(&c, "p1", &plate, Feed::Ams).is_err());
     }
 
     #[tokio::test]
@@ -1670,8 +1820,13 @@ mod tests {
         conditions["support_interface_filament_id"] = json!(f.id);
         let plate = edit_conditions(&s, &j.plate_id, conditions.clone());
         assert!(
-            s.plan(&s.store.db.connection().unwrap(), &plate, &status())
-                .is_err()
+            s.plan(
+                &s.store.db.connection().unwrap(),
+                &plate,
+                &status(),
+                Feed::Ams
+            )
+            .is_err()
         );
         let mut state = crate::printer_state::State::new(true);
         state.connected();
@@ -1754,12 +1909,17 @@ mod tests {
         let mut plate = s.store.get(&j.plate_id).unwrap();
         plate.models[0].roles = vec![Role::Primary, Role::Secondary];
         assert!(
-            s.plan(&s.store.db.connection().unwrap(), &plate, &status())
-                .is_err()
+            s.plan(
+                &s.store.db.connection().unwrap(),
+                &plate,
+                &status(),
+                Feed::Ams
+            )
+            .is_err()
         );
         plate.conditions.secondary_filament_id = plate.conditions.filament_id.clone();
         let c = s.store.db.connection().unwrap();
-        let spec = s.plan(&c, &plate, &status()).unwrap();
+        let spec = s.plan(&c, &plate, &status(), Feed::Ams).unwrap();
         let settings = resolve(
             &c,
             "one",
@@ -1775,9 +1935,9 @@ mod tests {
         );
         plate.models[0].roles = vec![Role::Secondary];
         plate.conditions.filament_id = None;
-        assert!(s.plan(&c, &plate, &status()).is_ok());
+        assert!(s.plan(&c, &plate, &status(), Feed::Ams).is_ok());
         plate.conditions.secondary_filament_id = Some("missing".into());
-        assert!(s.plan(&c, &plate, &status()).is_err());
+        assert!(s.plan(&c, &plate, &status(), Feed::Ams).is_err());
     }
 
     #[tokio::test]
@@ -1800,7 +1960,7 @@ mod tests {
             resolve(
                 &c,
                 "one",
-                &planned(&c, "one", &plate).unwrap(),
+                &planned(&c, "one", &plate, Feed::Ams).unwrap(),
                 &s.slicer.as_ref().unwrap().profiles,
                 &plate,
             )
@@ -1876,6 +2036,7 @@ mod tests {
             Action::Add {
                 plate_id: plate.id,
                 plate_version: plate.version,
+                feed: Feed::Ams,
             },
         );
         s.mutate(&command, &status()).unwrap();
@@ -2008,19 +2169,30 @@ mod tests {
             .unwrap();
         let plate = s.store.get(&job.plate_id).unwrap();
         assert!(
-            s.admission(&s.store.db.connection().unwrap(), &plate, &status())
-                .is_ok()
+            s.admission(
+                &s.store.db.connection().unwrap(),
+                &plate,
+                &status(),
+                Feed::Ams
+            )
+            .is_ok()
         );
         add(&s);
         assert!(
-            s.admission(&s.store.db.connection().unwrap(), &plate, &status())
-                .is_err()
+            s.admission(
+                &s.store.db.connection().unwrap(),
+                &plate,
+                &status(),
+                Feed::Ams
+            )
+            .is_err()
         );
         let rejected = command(
             &s,
             Action::Add {
                 plate_id: plate.id.clone(),
                 plate_version: plate.version,
+                feed: Feed::Ams,
             },
         );
         assert!(s.mutate(&rejected, &status()).is_err());
@@ -2033,8 +2205,13 @@ mod tests {
         s.mutate(&command(&s, Action::Remove { job_id: last }), &status())
             .unwrap();
         assert!(
-            s.admission(&s.store.db.connection().unwrap(), &plate, &status())
-                .is_ok()
+            s.admission(
+                &s.store.db.connection().unwrap(),
+                &plate,
+                &status(),
+                Feed::Ams
+            )
+            .is_ok()
         );
     }
     #[test]

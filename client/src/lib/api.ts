@@ -232,6 +232,7 @@ export type Printer = {
     connection: string;
     nozzle_diameter: string | null;
     nozzle_material: string | null;
+    ams?: { units: unknown[] } | null;
   };
 };
 

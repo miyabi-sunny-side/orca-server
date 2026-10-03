@@ -17,6 +17,8 @@
     jobStatus,
     moveIndex,
     menuReasons,
+    feedLabel,
+    type Feed,
     type Job,
     printerText,
     type Action,
@@ -48,6 +50,7 @@
   let menu = $state<{
     id: string;
     plate_id: string;
+    feed: Feed;
     name: string;
     printerId: string;
     index: number;
@@ -68,6 +71,7 @@
     menu = {
       id: job.id,
       plate_id: job.plate_id,
+      feed: job.feed ?? "ams",
       name: job.name,
       printerId,
       index: queue?.waiting.findIndex((j) => j.id === job.id) ?? 0,
@@ -99,6 +103,7 @@
       type: "add",
       plate_id: menuJob.plate_id,
       plate_version: queue.admission.plate_version,
+      feed: menuJob.feed ?? "ams",
     });
   }
 
@@ -122,7 +127,9 @@
     const target = menu?.id;
     const path =
       queuePath +
-      (menu ? `&plate_id=${encodeURIComponent(menu.plate_id)}` : "");
+      (menu
+        ? `&plate_id=${encodeURIComponent(menu.plate_id)}&feed=${menu.feed}`
+        : "");
     try {
       const value = await request<QueueState>(path, {
         signal: controller.signal,
@@ -207,14 +214,17 @@
         void refresh();
       }
     }
+    const { action: done } = command;
     if (
       applied &&
-      (command.action.type === "add" || command.action.type === "remove")
+      (done.type === "add" || done.type === "remove" || done.type === "feed")
     ) {
       notice =
-        command.action.type === "add"
+        done.type === "add"
           ? "キューを複製しました"
-          : "キューから削除しました";
+          : done.type === "feed"
+            ? `給材元を${feedLabel(done.feed)}に変更しました`
+            : "キューから削除しました";
       if (menu) await closeMenu();
     }
   }
@@ -370,9 +380,11 @@
     <p class="full-name">{job.name}</p>
     <p>予定材料: {material}</p>
     <p>
-      {slot
-        ? `AMS ${slot.ams_id} / スロット ${slot.slot_index + 1}`
-        : "AMSを確認"} · {job.required_machine_profile_key}
+      {job.feed === "external"
+        ? feedLabel(job.feed)
+        : slot
+          ? `AMS ${slot.ams_id} / スロット ${slot.slot_index + 1}`
+          : "AMSを確認"} · {job.required_machine_profile_key}
     </p>
     <p>{job.process_profile_key} · {job.bed_type}</p>
     {#if job.actual_ams_slot !== null && job.actual_ams_slot !== undefined}<p>
@@ -399,7 +411,10 @@
           class="btn"
           href={`/plates/${job.plate_id}?edit=1`}>プレートの条件を編集</a
         >{/if}
-      <a class="btn" href={`/printers/${printerId}/ams`}>AMSを確認</a>
+      {#if job.feed !== "external"}<a
+          class="btn"
+          href={`/printers/${printerId}/ams`}>AMSを確認</a
+        >{/if}
       {#if job.state === "queued"}
         {#if job.estimate?.state === "failed"}<button
             class="btn"
@@ -602,13 +617,28 @@
         onclick={() => void duplicate()}>キュー複製</button
       >
       <button
+        class="btn"
+        disabled={disabled || !!reasons.feed}
+        onclick={() => {
+          if (menuJob)
+            void send({
+              type: "feed",
+              job_id: menuJob.id,
+              feed: menuJob.feed === "external" ? "ams" : "external",
+            });
+        }}
+        >{feedLabel(
+          menuJob?.feed === "external" ? "ams" : "external",
+        )}で印刷</button
+      >
+      <button
         class="btn danger"
         disabled={disabled || !!reasons.remove}
         onclick={() => {
           if (menuJob) void send({ type: "remove", job_id: menuJob.id });
         }}>キュー削除</button
       >
-      {#each [...new Set([reasons.edit, reasons.duplicate, reasons.remove].filter(Boolean))] as reason}<p
+      {#each [...new Set([reasons.edit, reasons.duplicate, reasons.feed, reasons.remove].filter(Boolean))] as reason}<p
           class="caption"
         >
           {reason}

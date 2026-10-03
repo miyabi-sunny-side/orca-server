@@ -460,6 +460,9 @@ fn product_routes() -> Router<Arc<Registry>> {
 struct Selected {
     printer_id: Option<String>,
     plate_id: Option<String>,
+    /// Admission for this feed; AMS when omitted.
+    #[serde(default)]
+    feed: queue::Feed,
 }
 async fn list(State(registry): State<Arc<Registry>>) -> Json<Vec<Value>> {
     let entries = registry.entries.lock().await;
@@ -625,7 +628,10 @@ async fn read_queue(
         entry.usable()?;
         entry.queue.clone()
     };
-    queue.read(query.plate_id.as_deref()).await.map(Json)
+    queue
+        .read(query.plate_id.as_deref().map(|id| (id, query.feed)))
+        .await
+        .map(Json)
 }
 async fn act_queue(
     State(registry): State<Arc<Registry>>,
