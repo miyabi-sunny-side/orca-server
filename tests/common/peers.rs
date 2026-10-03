@@ -124,6 +124,8 @@ pub struct Records {
     pub errors: Vec<String>,
     /// Operator controls (pause, light, temperature…) as received.
     pub controls: Vec<Value>,
+    /// Stored files by absolute path, as `LIST`/`RETR`/`DELE` see them.
+    pub files: std::collections::BTreeMap<String, Vec<u8>>,
 }
 pub enum Action {
     Disconnect,
@@ -393,6 +395,69 @@ fn mqtt_session(
     }
     Ok(())
 }
+/// Wait for the passive data connection and require the control session's TLS to be reused.
+fn accept_data(
+    listener: Option<&TcpListener>,
+    config: &Arc<ServerConfig>,
+    stopped: &AtomicBool,
+) -> io::Result<Tls> {
+    let listener = listener.ok_or_else(|| invalid("no passive listener"))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let raw = loop {
+        match listener.accept() {
+            Ok((raw, _)) => break raw,
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline
+                    && !stopped.load(Ordering::SeqCst) =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let data = tls(raw, config)?;
+    if data.conn.handshake_kind() != Some(rustls::HandshakeKind::Resumed) {
+        return Err(invalid("FTPS data TLS session was not reused"));
+    }
+    Ok(data)
+}
+/// A directory listing (POSIX `ls -l` lines) or a file's bytes from the stored files.
+fn storage(records: &Mutex<Records>, command: &str, arg: &str) -> Option<Vec<u8>> {
+    use std::fmt::Write as _;
+    let files = &records.lock().unwrap().files;
+    if command == "RETR" {
+        return files.get(arg).cloned();
+    }
+    let dir = if arg == "/" {
+        String::new()
+    } else {
+        arg.trim_end_matches('/').to_owned()
+    };
+    let mut lines = String::new();
+    let mut dirs = std::collections::BTreeSet::new();
+    for (path, bytes) in files {
+        let Some(rest) = path.strip_prefix(&format!("{dir}/")) else {
+            continue;
+        };
+        match rest.split_once('/') {
+            Some((sub, _)) => {
+                dirs.insert(sub.to_owned());
+            }
+            None => {
+                let _ = write!(
+                    lines,
+                    "-rw-r--r-- 1 root root {} Oct 03 12:30 {rest}\r\n",
+                    bytes.len()
+                );
+            }
+        }
+    }
+    for sub in dirs {
+        let _ = write!(lines, "drwxr-xr-x 2 root root 4096 Oct 03 12:30 {sub}\r\n");
+    }
+    (dir.is_empty() || !lines.is_empty()).then(|| lines.into_bytes())
+}
 /// The printer's reply to a control; `get_version` answers with its modules.
 fn answer(value: &Value, section: &str, command: &str, result: &str, serial: &str) -> Value {
     let sequence = &value[section]["sequence_id"];
@@ -488,31 +553,12 @@ fn ftp_session(
                     return Err(invalid("unexpected upload name"));
                 }
                 reader.get_mut().write_all(b"150 send data\r\n")?;
-                let listener = listener
-                    .as_ref()
-                    .ok_or_else(|| invalid("no passive listener"))?;
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                let raw = loop {
-                    match listener.accept() {
-                        Ok((raw, _)) => break raw,
-                        Err(e)
-                            if e.kind() == io::ErrorKind::WouldBlock
-                                && std::time::Instant::now() < deadline
-                                && !stopped.load(Ordering::SeqCst) =>
-                        {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(e) => return Err(e),
-                    }
-                };
-                let mut data = tls(raw, config)?;
-                if data.conn.handshake_kind() != Some(rustls::HandshakeKind::Resumed) {
-                    return Err(invalid("FTPS data TLS session was not reused"));
-                }
+                let mut data = accept_data(listener.as_ref(), config, stopped)?;
                 let mut content = Vec::new();
                 data.read_to_end(&mut content)?;
                 {
                     let mut seen = records.lock().unwrap();
+                    seen.files.insert(format!("/{arg}"), content.clone());
                     seen.contents.push(content);
                     seen.uploads.push(arg.to_owned());
                 }
@@ -534,6 +580,27 @@ fn ftp_session(
                     continue;
                 }
                 b"226 transfer complete\r\n"
+            }
+            "LIST" | "RETR" => {
+                let body = storage(records, command, arg);
+                let Some(body) = body else {
+                    reader.get_mut().write_all(b"550 not found\r\n")?;
+                    continue;
+                };
+                reader.get_mut().write_all(b"150 sending\r\n")?;
+                let mut data = accept_data(listener.as_ref(), config, stopped)?;
+                data.write_all(&body)?;
+                data.conn.send_close_notify();
+                data.flush()?;
+                drop(data);
+                b"226 transfer complete\r\n"
+            }
+            "DELE" => {
+                if records.lock().unwrap().files.remove(arg).is_some() {
+                    b"250 deleted\r\n"
+                } else {
+                    b"550 not found\r\n"
+                }
             }
             "QUIT" => {
                 reader.get_mut().write_all(b"221 bye\r\n")?;

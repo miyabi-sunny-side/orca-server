@@ -411,6 +411,11 @@ fn state_routes() -> Router<Arc<Registry>> {
         .route("/api/printers/{id}/ams/refresh", post(refresh_inventory))
         .route("/api/printers/{id}/control", post(control))
         .route("/api/printers/{id}/camera", get(camera))
+        .route(
+            "/api/printers/{id}/files",
+            get(list_files).delete(delete_file),
+        )
+        .route("/api/printers/{id}/files/content", get(download_file))
 }
 /// Ask the printer for a full report, then return the inventory built from it.
 async fn refresh_inventory(
@@ -438,6 +443,65 @@ async fn control(
         entries.get(&id).ok_or(Error::NotFound)?.printer.clone()
     };
     printer.control(&control).await.map(Json)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoragePath {
+    path: String,
+}
+async fn printer_of(registry: &Registry, id: &str) -> Result<Printer> {
+    let entries = registry.entries.lock().await;
+    Ok(entries.get(id).ok_or(Error::NotFound)?.printer.clone())
+}
+/// Entries of one printer storage directory (`path`, `/` by default).
+async fn list_files(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+) -> Result<Json<Value>> {
+    let dir = query.get("path").map_or("/", String::as_str);
+    let entries = printer_of(&registry, &id).await?.files(dir).await?;
+    Ok(Json(json!({"path":dir,"entries":entries})))
+}
+async fn download_file(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Query(query): Query<StoragePath>,
+) -> Result<impl axum::response::IntoResponse> {
+    let bytes = printer_of(&registry, &id)
+        .await?
+        .download(&query.path)
+        .await?;
+    let name = query
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or("file")
+        .replace('"', "");
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_owned(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        bytes,
+    ))
+}
+async fn delete_file(
+    State(registry): State<Arc<Registry>>,
+    Path(id): Path<String>,
+    Query(query): Query<StoragePath>,
+) -> Result<axum::http::StatusCode> {
+    printer_of(&registry, &id)
+        .await?
+        .delete_file(&query.path)
+        .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 /// The latest camera image as JPEG; never cached.
 async fn camera(

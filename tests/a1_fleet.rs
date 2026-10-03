@@ -83,6 +83,11 @@ fn three_a1_minis_with_and_without_ams_lite_never_cross() {
         &json!({"action":"speed","level":1}),
         200,
     );
+    rig.post(
+        &format!("/api/printers/{}/control", ids[2]),
+        &json!({"action":"move","axis":"Y","mm":10}),
+        200,
+    );
     let operator = |i: usize| -> Vec<Value> {
         peers[i]
             .0
@@ -99,7 +104,14 @@ fn three_a1_minis_with_and_without_ams_lite_never_cross() {
     assert_eq!(operator(1)[0]["system"]["command"], "ledctrl");
     assert_eq!(operator(1).len(), 1);
     assert_eq!(operator(2)[0]["print"]["command"], "print_speed");
-    assert_eq!(operator(2).len(), 1);
+    assert!(
+        operator(2)[1]["print"]["param"]
+            .as_str()
+            .unwrap()
+            .contains("G1 Y-10.0 F3000"),
+        "the A1 bed moves the other way"
+    );
+    assert_eq!(operator(2).len(), 2);
 
     let material = rig.post(
         "/api/filaments",

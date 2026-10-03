@@ -68,6 +68,20 @@ pub enum Control {
     SkipObjects {
         objects: Vec<u32>,
     },
+    Home,
+    /// Relative move in whole millimetres (±1–50); see [`Control::oriented`].
+    Move {
+        axis: Axis,
+        mm: i8,
+    },
+    /// Extrude (positive) or retract (negative) millimetres of filament (±1–50).
+    Extrude {
+        mm: i8,
+    },
+    /// Read an AMS tray's RFID tag again (0–15).
+    ReadTray {
+        tray: u8,
+    },
     ClearError {
         code: u32,
     },
@@ -80,6 +94,13 @@ pub enum Fan {
     Part,
     Aux,
     Chamber,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
@@ -99,6 +120,15 @@ pub struct Message {
 }
 
 impl Control {
+    /// The move as this printer understands it: bed-slinger printers (not `CoreXY`, such as the
+    /// A1 series) move Y and Z the other way (`DevAxisCtrl.cpp`).
+    #[must_use]
+    pub fn oriented(self, core_xy: bool) -> Self {
+        match self {
+            Self::Move { axis, mm } if !core_xy && axis != Axis::X => Self::Move { axis, mm: -mm },
+            other => other,
+        }
+    }
     /// The MQTT message, or why the values cannot be sent.
     #[allow(clippy::too_many_lines)] // One table of every supported control.
     pub fn message(&self, sequence: &str) -> Result<Message, &'static str> {
@@ -220,6 +250,32 @@ impl Control {
                 json!({"print_error":code,"subtask_id":""}),
             ),
             Self::Version => build("info", "get_version", json!({}), sequence),
+            Self::Home => gcode("G28 \n".into()),
+            Self::Move { axis, mm } => {
+                if *mm == 0 || mm.unsigned_abs() > 50 {
+                    return Err("Move 1-50 mm");
+                }
+                let (name, speed) = match axis {
+                    Axis::X => ("X", 3000),
+                    Axis::Y => ("Y", 3000),
+                    Axis::Z => ("Z", 900),
+                };
+                gcode(format!(
+                    "M211 S \nM211 X1 Y1 Z1\nM1002 push_ref_mode\nG91 \nG1 {name}{mm}.0 F{speed}\nM1002 pop_ref_mode\nM211 R\n"
+                ))
+            }
+            Self::Extrude { mm } => {
+                if *mm == 0 || mm.unsigned_abs() > 50 {
+                    return Err("Extrude 1-50 mm");
+                }
+                gcode(format!("M83 \nG0 E{mm}.0 F900\n"))
+            }
+            Self::ReadTray { tray } => {
+                if *tray > 15 {
+                    return Err("Tray must be an AMS slot 0-15");
+                }
+                gcode(format!("M620 R{tray} \n"))
+            }
         })
     }
 }
@@ -511,6 +567,77 @@ mod tests {
             json!({"info":{"command":"get_version","sequence_id":"7"}})
         );
         assert_eq!((version.section, version.command), ("info", "get_version"));
+    }
+
+    #[test]
+    fn motion_controls_follow_bambu_studio_axis_control() {
+        // DevAxisCtrl.cpp: relative moves inside push/pop of the reference mode, soft limits on.
+        let gcode = |c: Control| sent(c).payload["print"]["param"].clone();
+        assert_eq!(
+            gcode(Control::Move {
+                axis: Axis::X,
+                mm: 10
+            }),
+            "M211 S \nM211 X1 Y1 Z1\nM1002 push_ref_mode\nG91 \nG1 X10.0 F3000\nM1002 pop_ref_mode\nM211 R\n"
+        );
+        assert_eq!(
+            gcode(Control::Move {
+                axis: Axis::Z,
+                mm: -1
+            }),
+            "M211 S \nM211 X1 Y1 Z1\nM1002 push_ref_mode\nG91 \nG1 Z-1.0 F900\nM1002 pop_ref_mode\nM211 R\n"
+        );
+        assert_eq!(gcode(Control::Extrude { mm: 10 }), "M83 \nG0 E10.0 F900\n");
+        assert_eq!(gcode(Control::Home), "G28 \n");
+        assert_eq!(gcode(Control::ReadTray { tray: 5 }), "M620 R5 \n");
+        for bad in [
+            Control::Move {
+                axis: Axis::Y,
+                mm: 0,
+            },
+            Control::Move {
+                axis: Axis::Y,
+                mm: 51,
+            },
+            Control::Extrude { mm: -51 },
+            Control::ReadTray { tray: 16 },
+        ] {
+            assert!(bad.message("7").is_err(), "{bad:?}");
+        }
+        // Bed-slinger printers (A1 series) move Y and Z the other way.
+        assert_eq!(
+            Control::Move {
+                axis: Axis::Y,
+                mm: 10
+            }
+            .oriented(false),
+            Control::Move {
+                axis: Axis::Y,
+                mm: -10
+            }
+        );
+        assert_eq!(
+            Control::Move {
+                axis: Axis::X,
+                mm: 10
+            }
+            .oriented(false),
+            Control::Move {
+                axis: Axis::X,
+                mm: 10
+            }
+        );
+        assert_eq!(
+            Control::Move {
+                axis: Axis::Y,
+                mm: 10
+            }
+            .oriented(true),
+            Control::Move {
+                axis: Axis::Y,
+                mm: 10
+            }
+        );
     }
 
     #[test]

@@ -715,11 +715,18 @@ impl Printer {
     /// Publish one operator control on the current connection and wait for the printer's answer.
     /// Sending is not completion: the reply and later reports tell what the printer did.
     pub(crate) async fn control(&self, control: &crate::bambu::Control) -> Result<Reply> {
-        if self.config.is_none() {
-            return Err(Error::Unavailable("Printer is not configured"));
-        }
+        let config = self
+            .config
+            .as_ref()
+            .ok_or(Error::Unavailable("Printer is not configured"))?;
+        // The A1 series moves the bed in Y; every other supported model is CoreXY.
+        let core_xy = !config.machine.contains(" A1");
         let sequence = (uuid::Uuid::new_v4().as_u128() % 2_000_000_000 + 1).to_string();
-        let message = control.message(&sequence).map_err(Error::Invalid)?;
+        let message = control
+            .clone()
+            .oriented(core_xy)
+            .message(&sequence)
+            .map_err(Error::Invalid)?;
         if !self.state.lock().await.status(now()).synchronized {
             return Err(Error::Conflict(
                 "Wait for a fresh synchronized printer report",
@@ -737,6 +744,106 @@ impl Printer {
             .await
             .map_err(|_| Error::Unavailable("Printer connection closed"))?
             .map_err(|_| Error::Unavailable("Printer connection closed"))?
+    }
+
+    /// Run one storage operation on its own FTPS login, never during a print transfer.
+    async fn storage<T>(
+        &self,
+        event: serde_json::Value,
+        operation: impl AsyncFnOnce(&mut Ftps) -> std::result::Result<T, &'static str>,
+    ) -> Result<T> {
+        let config = self
+            .config
+            .clone()
+            .ok_or(Error::Unavailable("Printer is not configured"))?;
+        if self
+            .state
+            .lock()
+            .await
+            .start
+            .as_ref()
+            .is_some_and(|a| a.phase == Phase::Uploading)
+        {
+            return Err(Error::Conflict(
+                "A print file is being transferred; try again after it starts",
+            ));
+        }
+        let result = tokio::time::timeout(Duration::from_mins(1), async {
+            let mut ftp = ftps(&config).await?;
+            let value = operation(&mut ftp).await?;
+            let _ = tokio::time::timeout(Duration::from_secs(2), ftp.quit()).await;
+            Ok(value)
+        })
+        .await
+        .unwrap_or(Err("timeout"));
+        let mut body = event;
+        body["failed_stage"] = serde_json::json!(result.as_ref().err());
+        let printer = self.inventory.as_ref().map_or("", |(_, d)| d.id.as_str());
+        crate::journal::event(printer, None, "ftps", body);
+        result.map_err(|stage| match stage {
+            "not_found" => Error::NotFound,
+            "too_large" => Error::Invalid("File is larger than 512 MiB"),
+            _ => Error::Upstream(
+                "Printer storage could not be read; check the printer's SD card and LAN",
+            ),
+        })
+    }
+
+    /// Entries of one storage directory.
+    pub(crate) async fn files(&self, dir: &str) -> Result<Vec<serde_json::Value>> {
+        let dir = crate::sdcard::path(dir).map_err(Error::Invalid)?;
+        let listed = dir.clone();
+        self.storage(
+            serde_json::json!({"event":"list","path":dir}),
+            async move |ftp| {
+                let lines = ftp.list(Some(&listed)).await.map_err(|_| "list")?;
+                Ok(lines
+                    .iter()
+                    .filter_map(|line| crate::sdcard::entry(line, &listed))
+                    .collect())
+            },
+        )
+        .await
+    }
+
+    /// The bytes of one stored file, up to [`crate::sdcard::MAX_DOWNLOAD`].
+    pub(crate) async fn download(&self, path: &str) -> Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let path = crate::sdcard::path(path).map_err(Error::Invalid)?;
+        let file = path.clone();
+        self.storage(
+            serde_json::json!({"event":"download","path":path}),
+            async move |ftp| {
+                let stream = ftp.retr_as_stream(&file).await.map_err(|_| "not_found")?;
+                let mut bytes = Vec::new();
+                let mut limited = stream.take(crate::sdcard::MAX_DOWNLOAD as u64 + 1);
+                limited
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|_| "transfer")?;
+                if bytes.len() > crate::sdcard::MAX_DOWNLOAD {
+                    return Err("too_large");
+                }
+                limited
+                    .into_inner()
+                    .finish()
+                    .await
+                    .map_err(|_| "transfer")?;
+                Ok(bytes)
+            },
+        )
+        .await
+    }
+
+    /// Delete one stored file.
+    pub(crate) async fn delete_file(&self, path: &str) -> Result<()> {
+        let path = crate::sdcard::path(path).map_err(Error::Invalid)?;
+        let file = path.clone();
+        self.storage(
+            serde_json::json!({"event":"delete","path":path}),
+            async move |ftp| ftp.rm(&file).await.map_err(|_| "not_found"),
+        )
+        .await
     }
 
     /// One JPEG from the printer camera, within 10 seconds.
@@ -1191,21 +1298,16 @@ fn log_phase(printer: &str, last: &mut Option<(String, Phase)>, state: &State) {
     }
 }
 
-/// Upload the print file; an error names the failed stage, never the server's reply.
-async fn upload(
-    config: &Config,
-    name: &str,
-    bytes: &[u8],
-) -> std::result::Result<(), &'static str> {
-    use suppaftp::{
-        tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream},
-        types::FileType,
-    };
+type Ftps = suppaftp::tokio::AsyncRustlsFtpStream;
+
+/// Log in over implicit FTPS; an error names the failed stage, never the server's reply.
+async fn ftps(config: &Config) -> std::result::Result<Ftps, &'static str> {
+    use suppaftp::{tokio::AsyncRustlsConnector, types::FileType};
     // One TLS config per upload shares the control session with its data connection.
     let connector = AsyncRustlsConnector::from(suppaftp::tokio_rustls::TlsConnector::from(
         config.tls().map_err(|_| "tls")?,
     ));
-    let mut ftp = AsyncRustlsFtpStream::connect_secure_implicit(
+    let mut ftp = Ftps::connect_secure_implicit(
         (config.ip, config.ftps_port),
         connector,
         &config.ip.to_string(),
@@ -1229,6 +1331,16 @@ async fn upload(
     ftp.transfer_type(FileType::Binary)
         .await
         .map_err(|_| "binary_mode")?;
+    Ok(ftp)
+}
+
+/// Upload the print file; an error names the failed stage, never the server's reply.
+async fn upload(
+    config: &Config,
+    name: &str,
+    bytes: &[u8],
+) -> std::result::Result<(), &'static str> {
+    let mut ftp = ftps(config).await?;
     let count = ftp
         .put_file(name, &mut std::io::Cursor::new(bytes))
         .await

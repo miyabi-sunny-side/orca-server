@@ -26,6 +26,7 @@ mod profiles;
 pub mod queue;
 pub mod registry;
 pub mod scad;
+mod sdcard;
 mod search;
 pub mod slicer;
 mod support;
