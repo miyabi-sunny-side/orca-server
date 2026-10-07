@@ -165,6 +165,14 @@ mod tests {
             .db
             .connection()
             .unwrap()
+            .execute("UPDATE plates SET archived=1 WHERE id='plate'", [])
+            .unwrap();
+        let archived = page(&store, "", 200).await;
+        assert_eq!(archived["items"][1]["available"], true);
+        store
+            .db
+            .connection()
+            .unwrap()
             .execute("UPDATE plates SET deleted=1 WHERE id='plate'", [])
             .unwrap();
         let deleted = page(&store, "", 200).await;

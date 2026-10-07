@@ -626,14 +626,37 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Move a plate out of (or back into) the normal list. Nothing else changes.
+    /// # Errors
+    /// Rejects invalid, missing or deleted IDs and unavailable storage.
+    pub fn archive(&self, id: &str, archived: bool) -> Result<()> {
+        valid_id(id)?;
+        let changed = self.db.connection()?.execute(
+            "UPDATE plates SET archived=?2 WHERE id=?1 AND deleted=0",
+            rusqlite::params![id, archived],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
     /// Search saved names and model names, ordered by fuzzy relevance.
     /// # Errors
     /// Returns storage errors.
     pub fn list(&self, query: &str) -> Result<Vec<Plate>> {
+        self.search(query, false)
+    }
+    /// Search archived plates like [`Store::list`].
+    /// # Errors
+    /// Returns storage errors.
+    pub fn list_archived(&self, query: &str) -> Result<Vec<Plate>> {
+        self.search(query, true)
+    }
+    fn search(&self, query: &str, archived: bool) -> Result<Vec<Plate>> {
         let c = self.db.connection()?;
         let ids = c
-            .prepare("SELECT id FROM plates WHERE deleted=0")?
-            .query_map([], |r| r.get::<_, String>(0))?
+            .prepare("SELECT id FROM plates WHERE deleted=0 AND archived=?1")?
+            .query_map([archived], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut matches = Vec::new();
         for id in ids {
@@ -1021,6 +1044,63 @@ mod tests {
             Err(Error::NotFound)
         ));
         assert!(store.list("").unwrap().is_empty());
+    }
+    #[test]
+    fn archive_only_moves_a_plate_between_lists_and_restore_brings_it_back() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let kept = store.edit(None, edit("Philips holder", 1)).unwrap();
+        let other = store.edit(None, edit("Philips holder spare", 1)).unwrap();
+        store.db.connection().unwrap().execute("INSERT INTO plate_slices(plate_id,plan_json,record_json) VALUES (?1,'{}','{\"state\":\"ready\"}')", [&other.id]).unwrap();
+        let slice = |id: &str| -> Option<String> {
+            store
+                .db
+                .connection()
+                .unwrap()
+                .query_row(
+                    "SELECT record_json FROM plate_slices WHERE plate_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap()
+        };
+        let cached = slice(&other.id);
+        // A retried request after a lost response succeeds without changing the state.
+        for _ in 0..2 {
+            store.archive(&other.id, true).unwrap();
+        }
+        assert_eq!(store.list("").unwrap(), vec![kept.clone()]);
+        assert_eq!(store.list("holder").unwrap(), vec![kept.clone()]);
+        assert_eq!(store.list_archived("").unwrap(), vec![other.clone()]);
+        assert_eq!(store.list_archived("spare").unwrap(), vec![other.clone()]);
+        assert!(store.list_archived("unrelated").unwrap().is_empty());
+        assert_eq!(store.get(&other.id).unwrap(), other);
+        assert_eq!(slice(&other.id), cached);
+        let reopened = Store::open(root.path()).unwrap();
+        assert_eq!(reopened.list_archived("").unwrap(), vec![other.clone()]);
+        // Archived plates stay editable and copyable; a copy is a new, unarchived plate.
+        let mut change = edit("Philips holder spare", 2);
+        change.version = Some(other.version);
+        let edited = store.edit(Some(&other.id), change).unwrap();
+        assert_eq!(store.list_archived("").unwrap(), vec![edited.clone()]);
+        let copy = store.duplicate(&other.id, "copy").unwrap();
+        assert_eq!(store.list("copy").unwrap(), vec![copy]);
+        for _ in 0..2 {
+            store.archive(&other.id, false).unwrap();
+        }
+        assert!(store.list_archived("").unwrap().is_empty());
+        assert!(store.list("spare").unwrap().contains(&edited));
+        assert_eq!(store.get(&other.id).unwrap(), edited);
+        store.archive(&other.id, true).unwrap();
+        store.delete(&other.id).unwrap();
+        assert!(store.list_archived("").unwrap().is_empty());
+        for id in [other.id.clone(), uuid::Uuid::new_v4().to_string()] {
+            for archived in [true, false] {
+                assert!(matches!(store.archive(&id, archived), Err(Error::NotFound)));
+            }
+        }
+        assert!(store.archive("../outside", true).is_err());
     }
     fn edit(name: &str, quantity: u16) -> Edit {
         Edit {

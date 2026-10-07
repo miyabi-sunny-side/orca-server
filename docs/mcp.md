@@ -151,7 +151,7 @@ FINISH、再起動、画面表示だけでは次の印刷を始めません。�
 | Tool | 引数と内容 |
 | --- | --- |
 | `scad_models` | 任意の`q: string`。公開済みモデルの部分列検索。 |
-| `plate_list` | 任意の`q: string`。保存済みプレートの検索。 |
+| `plate_list` | 任意の`q: string`。保存済みプレートの検索。アーカイブ済みは含みません。 |
 | `plate_get` | `id: string`。詳細・版・管理画面パス。 |
 | `plate_save` | 任意の`id: string`と`plate`。新規はID省略、更新は現在版を含む全構成。形式は[プレートAPI](plates.md)。 |
 | `filament_products` | 引数なし。製品・色・共通設定一覧。 |

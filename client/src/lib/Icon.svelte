@@ -38,6 +38,7 @@
     "zoom-out",
     "maximize",
     "plus",
+    "archive",
   ] as const;
 </script>
 
@@ -192,6 +193,10 @@
   {:else if name === "plus"}
     <line x1="12" y1="5" x2="12" y2="19" />
     <line x1="5" y1="12" x2="19" y2="12" />
+  {:else if name === "archive"}
+    <rect x="2" y="3" width="20" height="5" rx="1" />
+    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+    <line x1="10" y1="12" x2="14" y2="12" />
   {/if}
 </svg>
 

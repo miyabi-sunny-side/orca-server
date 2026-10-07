@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -53,6 +53,7 @@ pub fn router(store: Store) -> Router {
             get(slice_status).post(retry_slice),
         )
         .route("/api/plates/{id}/duplicate", post(duplicate))
+        .route("/api/plates/{id}/archive", put(archive).delete(restore))
         .route("/api/plates/{id}/files/{*path}", get(file))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(store)
@@ -95,13 +96,23 @@ pub(crate) async fn blocking<T: Send + 'static>(
 struct Search {
     #[serde(default)]
     q: String,
+    #[serde(default)]
+    archived: bool,
 }
 
 async fn list(State(store): State<Store>, Query(query): Query<Search>) -> Result<Json<Vec<Plate>>> {
     if query.q.len() > 1024 {
         return Err(Error::Invalid("Search query is too long"));
     }
-    blocking(move || store.list(&query.q)).await.map(Json)
+    blocking(move || {
+        if query.archived {
+            store.list_archived(&query.q)
+        } else {
+            store.list(&query.q)
+        }
+    })
+    .await
+    .map(Json)
 }
 
 async fn read(State(store): State<Store>, Path(id): Path<String>) -> Result<Json<Plate>> {
@@ -131,6 +142,16 @@ async fn retry_slice(State(store): State<Store>, Path(id): Path<String>) -> Resu
 
 async fn remove(State(store): State<Store>, Path(id): Path<String>) -> Result<StatusCode> {
     blocking(move || store.delete(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn archive(State(store): State<Store>, Path(id): Path<String>) -> Result<StatusCode> {
+    blocking(move || store.archive(&id, true)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn restore(State(store): State<Store>, Path(id): Path<String>) -> Result<StatusCode> {
+    blocking(move || store.archive(&id, false)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

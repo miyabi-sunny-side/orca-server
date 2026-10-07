@@ -497,7 +497,7 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        22
+        23
     );
     assert!(
         peers

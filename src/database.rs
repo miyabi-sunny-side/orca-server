@@ -146,7 +146,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=22 => {}
+            1..=23 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -304,6 +304,9 @@ impl Database {
             // The printer's report decides the feed; the last queue request keeps its replay
             // identity without the removed per-job choice.
             tx.execute_batch("ALTER TABLE print_jobs DROP COLUMN feed; UPDATE printers SET queue_request=CASE WHEN json_extract(queue_request,'$.action.type')='feed' THEN NULL ELSE json_remove(queue_request,'$.action.feed') END WHERE queue_request IS NOT NULL; PRAGMA user_version=22;")?;
+        }
+        if version < 23 {
+            tx.execute_batch("ALTER TABLE plates ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)); PRAGMA user_version=23;")?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -579,7 +582,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
         let add = r#"{"epoch":"e","generation":3,"request_id":"r","action":{"type":"add","plate_id":"p","plate_version":1,"feed":"external"}}"#;
-        db.connection().unwrap().execute_batch(&format!("INSERT INTO plates(id,name) VALUES ('p','P'); INSERT INTO print_jobs(id,printer_id,plate_id,state,position) VALUES ('a','stable-id','p','queued',0),('b','stable-id','p','needs_attention',1); ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams' CHECK(feed IN ('ams','external')); UPDATE print_jobs SET feed='external' WHERE id='b'; UPDATE printers SET queue_request='{add}'; PRAGMA user_version=21;")).unwrap();
+        db.connection().unwrap().execute_batch(&format!("INSERT INTO plates(id,name) VALUES ('p','P'); INSERT INTO print_jobs(id,printer_id,plate_id,state,position) VALUES ('a','stable-id','p','queued',0),('b','stable-id','p','needs_attention',1); ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams' CHECK(feed IN ('ams','external')); UPDATE print_jobs SET feed='external' WHERE id='b'; UPDATE printers SET queue_request='{add}'; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=21;")).unwrap();
         drop(db);
         let reopen = || {
             let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -619,16 +622,42 @@ mod tests {
         );
         // A recorded feed change has no replacement; the next request starts afresh.
         let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
-        c.execute_batch(r#"ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams'; UPDATE printers SET queue_request='{"epoch":"e","generation":4,"request_id":"s","action":{"type":"feed","job_id":"a","feed":"external"}}'; PRAGMA user_version=21;"#).unwrap();
+        c.execute_batch(r#"ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams'; UPDATE printers SET queue_request='{"epoch":"e","generation":4,"request_id":"s","action":{"type":"feed","job_id":"a","feed":"external"}}'; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=21;"#).unwrap();
         drop(c);
         assert_eq!(reopen().1, None);
+    }
+    #[test]
+    fn version_23_keeps_existing_plates_unarchived_and_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        db.connection().unwrap().execute_batch("ALTER TABLE plates DROP COLUMN archived; INSERT INTO plates(id,name,version) VALUES ('kept','Kept',3),('gone','Gone',1); UPDATE plates SET deleted=1 WHERE id='gone'; PRAGMA user_version=22;").unwrap();
+        drop(db);
+        let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
+        let rows: Vec<(String, String, i64, bool, bool)> = db
+            .connection()
+            .unwrap()
+            .prepare("SELECT id,name,version,deleted,archived FROM plates ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("gone".into(), "Gone".into(), 1, true, false),
+                ("kept".into(), "Kept".into(), 3, false, false)
+            ]
+        );
     }
     #[test]
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
         crate::legacy_schema::queue_v16(&db.connection().unwrap());
-        db.connection().unwrap().execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
+        db.connection().unwrap().execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN archived; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6; INSERT INTO plates(id,name) VALUES ('legacy','Legacy');").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
         assert_eq!(db.default_printer().unwrap().as_deref(), Some("stable-id"));
@@ -665,7 +694,7 @@ mod tests {
         crate::legacy_schema::queue_v16(&db.connection().unwrap());
         db.connection()
             .unwrap()
-            .execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
+            .execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN archived; ALTER TABLE plates DROP COLUMN deleted; ALTER TABLE plates DROP COLUMN sparse_infill_pattern; ALTER TABLE plates DROP COLUMN sparse_infill_density; ALTER TABLE plates DROP COLUMN wall_loops; DROP TABLE default_settings; DROP TABLE print_notifications; ALTER TABLE print_jobs DROP COLUMN estimate_json; PRAGMA user_version=6;")
             .unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -1032,7 +1061,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            22
+            23
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

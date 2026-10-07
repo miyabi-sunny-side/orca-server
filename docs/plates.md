@@ -28,11 +28,14 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 | 操作 | HTTP |
 | --- | --- |
 | 一覧・検索 | `GET /api/plates?q=...` |
+| アーカイブ済みの一覧・検索 | `GET /api/plates?archived=true&q=...` |
 | STLをアップロードして新規作成 | `POST /api/plates`（multipart） |
 | SCAD参照で新規作成 | `POST /api/plates/import`（JSON） |
 | プレート取得 | `GET /api/plates/{id}` |
 | 構成を編集 | `PUT /api/plates/{id}`（JSON） |
 | 一覧から論理削除 | `DELETE /api/plates/{id}` |
+| アーカイブ | `PUT /api/plates/{id}/archive` |
+| アーカイブから復元 | `DELETE /api/plates/{id}/archive` |
 | 未保存の公開SCADモデル取得 | `GET /api/scad/model?path=相対パス` |
 | SCADモデルの役割取得 | `GET /api/scad/model-info?path=相対パス` |
 | 保存モデルのプレビュー用STL取得 | `GET /api/plates/{id}/models/{model_id}` |
@@ -82,9 +85,19 @@ curl --fail http://127.0.0.1:3000/api/plates/files \
 派生項目の個数・条件を編集しても元ファイルを保持します。派生項目を構成から外した場合も元ファイルは取得できます。
 `GET /api/plates/{id}/files/{model_id}`で取得する3MF由来のSTLは派生物です。
 
+## アーカイブする
+
+普段使わないプレートは、行のメニューの「アーカイブ」で通常の一覧・検索から外せます。確認はありません。
+検索欄の右のアイコンでアーカイブ一覧を開き、同じ検索と行のメニューから「復元」または「削除」を選べます。
+アーカイブしても構成・ID・元データ・試算・既存ジョブ・履歴は変わらず、詳細・編集・複製・キュー追加もそのまま使えます。
+
+`PUT /api/plates/{id}/archive`はアーカイブ、`DELETE /api/plates/{id}/archive`は復元で、どちらも204を返します。
+同じ操作の再送も204です。削除済みや不明なIDは404です。
+`GET /api/plates`と[MCP](mcp.md)の`plate_list`はアーカイブ済みを含みません。`archived=true`でアーカイブ済みだけを返し、`q`と併用できます。
+
 ## 一覧から削除する
 
-プレート一覧で右クリック・長押し、または行にフォーカスしてShift+F10を押すと、キュー追加・編集・削除のメニューを開きます。
+プレート一覧で右クリック・長押し、または行にフォーカスしてShift+F10を押すと、キュー追加・編集・複製・アーカイブ・削除のメニューを開きます。
 「削除」を選ぶとプレート名を含む確認が開きます。「キャンセル」、Escape、閉じる操作でメニューへ戻れます。
 確認内の「削除」でそのプレートを一覧・検索から隠します。既存の待機・進行中ジョブは取り消さず、手動で継続できます。
 

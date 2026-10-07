@@ -118,6 +118,12 @@ export async function request<T>(
         "プレートの保存先を利用できません。名前を保ったまま再試行できます。",
     );
   }
+  if (/^\/api\/plates\/[^/]+\/archive$/.test(path) && response.status >= 500) {
+    throw new ApiError(
+      response.status,
+      "プレートの保存先を利用できません。時間を置いて再試行してください。",
+    );
+  }
   if (
     path.startsWith("/api/plates/file") &&
     response.status === 400 &&

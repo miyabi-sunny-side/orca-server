@@ -422,7 +422,7 @@ fn stopped_discard_preserves_recovery_across_empty_queue_and_restart() {
             rig.stop(false);
             rig.db()
                 .execute_batch(
-                    "ALTER TABLE printers DROP COLUMN recovery_attempt; ALTER TABLE plates DROP COLUMN start_options_json; PRAGMA user_version=17;",
+                    "ALTER TABLE printers DROP COLUMN recovery_attempt; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=17;",
                 )
                 .unwrap();
             rig.launch();

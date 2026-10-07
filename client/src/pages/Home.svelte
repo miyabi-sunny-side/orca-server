@@ -2,8 +2,11 @@
   import { tick } from "svelte";
   import { request, type Plate } from "../lib/api";
   import { contextMenu } from "../lib/context-menu";
+  import Icon from "../lib/Icon.svelte";
   import Modal from "../lib/Modal.svelte";
   import PlateQueueAdd from "../lib/PlateQueueAdd.svelte";
+  // One page serves both lists; the archived one keeps the same search and rows.
+  const archived = new URLSearchParams(location.search).has("archived");
   let query = $state("");
   let revision = $state(0);
   let plates = $state<Plate[]>([]);
@@ -15,11 +18,14 @@
     menuRow: HTMLAnchorElement | undefined;
   let queueBusy = $state(false),
     deleting = $state(false),
+    archiving = $state(false),
     confirmDelete = $state(false),
     menuError = $state(""),
     notice = $state("");
   let cancelButton = $state<HTMLButtonElement>(),
-    deleteButton = $state<HTMLButtonElement>();
+    deleteButton = $state<HTMLButtonElement>(),
+    archiveButton = $state<HTMLButtonElement>();
+  const busy = $derived(queueBusy || deleting || archiving);
   let duplicateName = $state("");
   let confirmDuplicate = $state(false),
     duplicating = $state(false);
@@ -34,7 +40,7 @@
     confirmDuplicate = false;
   }
   async function closeMenu() {
-    if (deleting || duplicating) return;
+    if (deleting || duplicating || archiving) return;
     menuPlate = undefined;
     confirmDelete = false;
     confirmDuplicate = false;
@@ -45,7 +51,7 @@
     )?.focus();
   }
   async function askToDelete() {
-    if (!menuPlate || queueBusy || deleting) return;
+    if (!menuPlate || busy) return;
     confirmDelete = true;
     menuError = "";
     await tick();
@@ -74,6 +80,28 @@
       deleting = false;
       await tick();
       cancelButton?.focus();
+    }
+  }
+
+  // Archiving is reversible, so it needs no confirmation.
+  async function setArchived(value: boolean) {
+    if (!menuPlate || busy) return;
+    const plate = menuPlate;
+    archiving = true;
+    menuError = "";
+    try {
+      await request(`/api/plates/${plate.id}/archive`, {
+        method: value ? "PUT" : "DELETE",
+      });
+      plates = plates.filter((p) => p.id !== plate.id);
+      notice = `「${plate.name}」を${value ? "アーカイブ" : "復元"}しました`;
+      archiving = false;
+      await closeMenu();
+    } catch (cause) {
+      menuError = (cause as Error).message;
+      archiving = false;
+      await tick();
+      archiveButton?.focus();
     }
   }
 
@@ -123,7 +151,7 @@
     const timer = setTimeout(async () => {
       try {
         const result = await request<Plate[]>(
-          `/api/plates?q=${encodeURIComponent(q)}`,
+          `/api/plates?q=${encodeURIComponent(q)}${archived ? "&archived=true" : ""}`,
           { signal: controller.signal },
         );
         if (!controller.signal.aborted) {
@@ -160,31 +188,53 @@
 <section class="content" aria-label="プレート一覧" data-state={phase}>
   {#if notice}<p role="status">{notice}</p>{/if}
   <div class="page-heading">
-    <h1>プレート</h1>
-    <div class="create-actions">
-      <a
-        class="import-link"
-        aria-label="ファイルから取り込む"
-        href="/plates/new?source=file">ファイル取込</a
-      ><a class="btn primary" href="/plates/new">新規作成</a>
-    </div>
+    {#if archived}
+      <div class="archive-heading">
+        <a
+          class="icon-btn"
+          href="/plates"
+          aria-label="プレート一覧へ戻る"
+          title="プレート一覧へ戻る"><Icon name="arrow-left" /></a
+        >
+        <h1>アーカイブ</h1>
+      </div>
+    {:else}
+      <h1>プレート</h1>
+      <div class="create-actions">
+        <a
+          class="import-link"
+          aria-label="ファイルから取り込む"
+          href="/plates/new?source=file">ファイル取込</a
+        ><a class="btn primary" href="/plates/new">新規作成</a>
+      </div>
+    {/if}
   </div>
-  <label class="field" for="plate-search">
-    <span>名前・モデル名で検索</span>
-    <input
-      id="plate-search"
-      type="search"
-      bind:value={query}
-      bind:this={search}
-      placeholder="例: box、机"
-      onkeydown={(event) => {
-        if (event.key === "ArrowDown") {
-          event.preventDefault();
-          list?.querySelector("a")?.focus();
-        }
-      }}
-    />
-  </label>
+  <div class="search-row">
+    <label class="field" for="plate-search">
+      <span>名前・モデル名で検索</span>
+      <input
+        id="plate-search"
+        type="search"
+        bind:value={query}
+        bind:this={search}
+        placeholder="例: box、机"
+        onkeydown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            list?.querySelector("a")?.focus();
+          }
+        }}
+      />
+    </label>
+    {#if !archived}
+      <a
+        class="icon-btn large"
+        href="/plates?archived=1"
+        aria-label="アーカイブ済み"
+        title="アーカイブ済み"><Icon name="archive" /></a
+      >
+    {/if}
+  </div>
   {#if phase === "loading"}
     <p class="state" role="status">
       <span class="spinner" aria-hidden="true"
@@ -199,7 +249,9 @@
     <p class="state">
       {query.trim()
         ? "一致するプレートがありません"
-        : "保存済みプレートはありません"}
+        : archived
+          ? "アーカイブ済みのプレートはありません"
+          : "保存済みプレートはありません"}
     </p>
   {:else}
     <ul class="plate-list" bind:this={list}>
@@ -235,7 +287,7 @@
       : confirmDuplicate
         ? "プレートを複製"
         : menuPlate.name}
-    dismissible={!deleting && !duplicating}
+    dismissible={!deleting && !duplicating && !archiving}
     onclose={() =>
       void (confirmDelete
         ? cancelDelete()
@@ -288,32 +340,49 @@
       {#if menuError}<p role="alert">{menuError}</p>{/if}
     {:else}
       <div class="plate-menu">
-        <PlateQueueAdd
-          bind:plate={menuPlate}
-          label="キュー追加"
-          paused={deleting}
-          onbusy={(value) => (queueBusy = value)}
-          onadded={() => {
-            notice = "キューに追加しました";
-            void closeMenu();
-          }}
-        />
-        <button
-          class="btn"
-          disabled={queueBusy || deleting}
-          onclick={() => location.assign(`/plates/${menuPlate!.id}?edit=1`)}
-          >編集</button
-        >
-        <button
-          class="btn"
-          bind:this={duplicateButton}
-          disabled={queueBusy || deleting}
-          onclick={() => void askToDuplicate()}>複製</button
-        >
+        {#if archived}
+          <button
+            class="btn"
+            bind:this={archiveButton}
+            disabled={busy}
+            onclick={() => void setArchived(false)}
+            >{archiving ? "復元中…" : "復元"}</button
+          >
+        {:else}
+          <PlateQueueAdd
+            bind:plate={menuPlate}
+            label="キュー追加"
+            paused={deleting || archiving}
+            onbusy={(value) => (queueBusy = value)}
+            onadded={() => {
+              notice = "キューに追加しました";
+              void closeMenu();
+            }}
+          />
+          <button
+            class="btn"
+            disabled={busy}
+            onclick={() => location.assign(`/plates/${menuPlate!.id}?edit=1`)}
+            >編集</button
+          >
+          <button
+            class="btn"
+            bind:this={duplicateButton}
+            disabled={busy}
+            onclick={() => void askToDuplicate()}>複製</button
+          >
+          <button
+            class="btn"
+            bind:this={archiveButton}
+            disabled={busy}
+            onclick={() => void setArchived(true)}
+            >{archiving ? "アーカイブ中…" : "アーカイブ"}</button
+          >
+        {/if}
         <button
           class="btn danger"
           bind:this={deleteButton}
-          disabled={queueBusy || deleting}
+          disabled={busy}
           onclick={() => void askToDelete()}>削除</button
         >
         {#if menuError}<p role="alert">{menuError}</p>{/if}
@@ -323,10 +392,19 @@
 {/if}
 
 <style lang="sass">
-  .create-actions
+  .create-actions, .archive-heading
     display: flex
     align-items: center
     gap: var(--sp-2)
+  // The archived-list link shares the search row so it never pushes the list down.
+  .search-row
+    display: flex
+    align-items: flex-end
+    gap: var(--sp-2)
+    margin-bottom: var(--sp-3)
+    .field
+      flex: 1
+      margin-bottom: 0
   .import-link
     font-size: var(--fs-sm)
     min-height: 44px

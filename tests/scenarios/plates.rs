@@ -125,6 +125,58 @@ pub fn plate_duplication(browser: bool) {
     assert_eq!(rig.get(&format!("/api/plates/{}", id(&source))), source);
 }
 
+pub fn plate_archive(browser: bool) {
+    let mut rig = Rig::new("plate-archive");
+    rig.launch();
+    rig.seed();
+    let plate = rig.configure(None, None);
+    let path = format!("/api/plates/{}", id(&plate));
+    let slice = format!("{path}/slice");
+    let other = rig.post("/api/plates/import", &json!({"name":"Philips 洗浄ポットホルダー 予備","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":2}]}), 201);
+    let other = rig.configure(None, Some(other));
+    for target in [&plate, &other] {
+        until(
+            || rig.get(&format!("/api/plates/{}/slice", id(target)))["state"] == "ready",
+            12,
+        );
+    }
+    let (snapshot, calls) = (rig.get(&slice), rig.traces().len());
+    let listed = |rig: &Rig, query: &str| -> Vec<Value> {
+        array(&rig.get(&format!("/api/plates{query}"))).to_vec()
+    };
+    for _ in 0..2 {
+        rig.request("PUT", &format!("{path}/archive"), None, 204);
+    }
+    assert!(!listed(&rig, "").iter().any(|p| p["id"] == plate["id"]));
+    assert_eq!(listed(&rig, "?archived=true"), std::slice::from_ref(&plate));
+    assert_eq!(rig.get(&path), plate);
+    assert_eq!(rig.get(&slice), snapshot);
+    // Archived plates can still be queued; the existing admission path is unchanged.
+    let job = rig.add(3);
+    assert_eq!(job["plate_id"], plate["id"]);
+    for _ in 0..2 {
+        rig.request("DELETE", &format!("{path}/archive"), None, 204);
+    }
+    assert!(listed(&rig, "?archived=true").is_empty());
+    rig.request("PUT", &format!("{path}/archive"), None, 204);
+    rig.stop(false);
+    rig.launch();
+    assert_eq!(listed(&rig, "?archived=true"), std::slice::from_ref(&plate));
+    rig.request("DELETE", &format!("{path}/archive"), None, 204);
+    if browser {
+        rig.browser(
+            "E2E_ARCHIVE_CONTEXT",
+            &json!({"plate":plate,"other":other}),
+            None,
+        );
+    }
+    assert_eq!(rig.get(&path), plate);
+    assert_eq!(rig.get(&slice), snapshot);
+    assert_eq!(rig.traces().len(), calls);
+    assert_eq!(array(&rig.queue()["waiting"]).len(), 1);
+    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn plate_admission(browser: bool) {
     let mut rig = Rig::new("plate-admission");
@@ -404,7 +456,7 @@ pub fn creation_defaults(browser: bool) {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        22
+        23
     );
     let db = rig.db();
     let columns: Vec<String> = db

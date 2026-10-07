@@ -2940,7 +2940,7 @@ mod tests {
             .db
             .connection()
             .unwrap()
-            .execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; PRAGMA user_version=15;")
+            .execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=15;")
             .unwrap();
         let store = Store::open(root.path().join("data")).unwrap();
         store

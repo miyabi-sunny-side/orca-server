@@ -111,6 +111,19 @@ async fn client_saves_references_and_shares_the_rest_validation() {
             .len(),
         1
     );
+    // Archiving hides a plate from the MCP list like the web list; reading by ID still works.
+    let archive = format!("{}/api/plates/{id}/archive", server.base);
+    let http = reqwest::Client::new();
+    assert_eq!(http.put(&archive).send().await.unwrap().status(), 204);
+    assert_eq!(
+        call(&client, "plate_list", json!({"q":"Gridfinity"}), false).await["data"],
+        json!([])
+    );
+    assert_eq!(
+        call(&client, "plate_get", json!({"id":id}), false).await["data"],
+        rest
+    );
+    assert_eq!(http.delete(&archive).send().await.unwrap().status(), 204);
     assert_eq!(
         call(&client, "plate_slice_get", json!({"id":id}), false).await["data"]["state"],
         "failed"

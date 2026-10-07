@@ -101,6 +101,124 @@ async fn deleted_plate_stays_stored_but_cannot_be_listed_read_or_edited() {
     assert_eq!(original, include_bytes!("fixtures/triangle.stl"));
 }
 
+async fn call(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn archive_and_restore_move_plates_between_list_views_without_changing_them() {
+    let root = tempfile::tempdir().unwrap();
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    let mut saved = Vec::new();
+    for name in ["Washing pot holder", "Desk box"] {
+        let response = app
+            .clone()
+            .oneshot(upload(
+                "POST",
+                "/api/plates",
+                name,
+                include_str!("fixtures/triangle.stl"),
+            ))
+            .await
+            .unwrap();
+        saved.push(json(response).await);
+    }
+    let id = saved[0]["id"].as_str().unwrap();
+    let archive = format!("/api/plates/{id}/archive");
+    for _ in 0..2 {
+        assert_eq!(call(&app, "PUT", &archive).await.0, StatusCode::NO_CONTENT);
+    }
+    let names = |list: &Value| -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates").await.1),
+        ["Desk box"]
+    );
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates?q=washing").await.1),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/plates?archived=true").await.1,
+        serde_json::json!([saved[0]])
+    );
+    assert_eq!(
+        names(
+            &call(&app, "GET", "/api/plates?archived=true&q=washing")
+                .await
+                .1
+        ),
+        ["Washing pot holder"]
+    );
+    assert_eq!(
+        names(
+            &call(&app, "GET", "/api/plates?archived=true&q=desk")
+                .await
+                .1
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates?archived=false").await.1),
+        ["Desk box"]
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/plates?archived=maybe").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&app, "GET", &format!("/api/plates/{id}")).await.1,
+        saved[0]
+    );
+    let file = format!(
+        "/api/plates/{id}/files/{}",
+        saved[0]["models"][0]["id"].as_str().unwrap()
+    );
+    assert_eq!(call(&app, "GET", &file).await.0, StatusCode::OK);
+    for _ in 0..2 {
+        assert_eq!(
+            call(&app, "DELETE", &archive).await.0,
+            StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates").await.1),
+        ["Desk box", "Washing pot holder"]
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/plates?archived=true").await.1,
+        serde_json::json!([])
+    );
+    assert_eq!(
+        call(&app, "DELETE", &format!("/api/plates/{id}")).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let missing = "/api/plates/00000000-0000-4000-8000-000000000000/archive".to_owned();
+    for uri in [&archive, &missing] {
+        for method in ["PUT", "DELETE"] {
+            assert_eq!(call(&app, method, uri).await.0, StatusCode::NOT_FOUND);
+        }
+    }
+}
+
 #[tokio::test]
 async fn multipart_save_search_download_and_restart_use_the_same_store() {
     let root = tempfile::tempdir().unwrap();

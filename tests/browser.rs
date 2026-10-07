@@ -31,6 +31,11 @@ fn creation_defaults() {
 }
 #[test]
 #[ignore = "requires Chromium"]
+fn plate_archive() {
+    plates::plate_archive(true);
+}
+#[test]
+#[ignore = "requires Chromium"]
 fn strength_settings() {
     material::strength_settings(true);
 }

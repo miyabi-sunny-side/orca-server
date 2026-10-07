@@ -116,7 +116,6 @@ for (const width of [320, 375, 900])
         type: "add",
         plate_id: f.items[0].plate_id,
         plate_version: 7,
-        feed: "ams",
       });
       await expect(
         page.getByRole("status").filter({ hasText: "キューに追加しました" }),

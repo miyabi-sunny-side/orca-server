@@ -23,3 +23,8 @@ fn filament_picker() {
 fn plate_duplication() {
     plates::plate_duplication(false);
 }
+
+#[test]
+fn plate_archive() {
+    plates::plate_archive(false);
+}

@@ -162,3 +162,20 @@ it("tells whether the printer accepted, refused or did not answer a control", ()
     "本体の応答がありません。状態を確認してください",
   );
 });
+
+it("explains archive failures as storage problems, not slicer ones", async () => {
+  for (const [status, message] of [
+    [404, "プレートが見つかりません"],
+    [500, "プレートの保存先を利用できません"],
+    [503, "プレートの保存先を利用できません"],
+  ] as const) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("{}", { status })),
+    );
+    for (const method of ["PUT", "DELETE"])
+      await expect(
+        request("/api/plates/id/archive", { method }),
+      ).rejects.toThrow(message);
+  }
+});

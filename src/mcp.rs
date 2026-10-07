@@ -265,7 +265,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "List/search saved plates and their current composition, version and nullable conditions. Reconcile an uncertain create here before retrying.",
+        description = "List/search saved plates and their current composition, version and nullable conditions. Archived plates are excluded; plate_get still reads them. Reconcile an uncertain create here before retrying.",
         annotations(read_only_hint = true)
     )]
     async fn plate_list(&self, Parameters(a): Parameters<Search>) -> CallToolResult {
