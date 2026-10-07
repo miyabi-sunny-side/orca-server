@@ -1,4 +1,4 @@
-const emptyDefaults={"default_printer_id":null,"conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null},"reason":"printer"};
+const emptyDefaults={"default_printer_id":null,"conditions":{"filament_id":null},"reason":"printer"};
 import { test, expect } from '@playwright/test';
 import { readFileSync, mkdirSync } from 'node:fs';
 const cube = readFileSync('../tests/fixtures/cube.stl');

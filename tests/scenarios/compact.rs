@@ -38,7 +38,9 @@ pub fn compact_queue(browser: bool) {
     );
     let mut conditions = rig.specification(0);
     conditions.as_object_mut().unwrap().remove("ams_slot_id");
-    conditions["bed_type"] = json!("Cool Plate");
+    let mut printer = printer_settings(&rig.get("/api/printers/p1"));
+    printer["bed_type"] = json!("Cool Plate");
+    rig.put("/api/printers/p1", &printer, 200);
     let plate=rig.post("/api/plates/import",&json!({"name":"PETG-GF 前側ケース","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":2}],"conditions":conditions}),201);
     let action = json!({"type":"add","plate_id":plate["id"],"plate_version":plate["version"]});
     let one = array(&rig.send(action.clone(), 200)["waiting"])
@@ -63,7 +65,7 @@ pub fn compact_queue(browser: bool) {
     ready(&rig);
     assert_eq!(
         rig.rows("PRAGMA user_version", &[]),
-        vec![vec![rusqlite::types::Value::Integer(23)]]
+        vec![vec![rusqlite::types::Value::Integer(24)]]
     );
     assert_eq!(
         rig.rows("SELECT * FROM plate_items ORDER BY id", &[]),

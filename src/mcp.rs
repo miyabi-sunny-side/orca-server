@@ -285,7 +285,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Read the saved plate's shared calculation state, estimated seconds and safe failure reason. Saving starts calculation in the background; a ready result does not start printing.",
+        description = "Read the saved plate's calculation on every registered printer: printers[] with printer_id, printer_name, machine_profile_key, state, seconds, error and reason (unfit: the models do not fit that printer's bed; material_setting: the material has no setting for that machine). Saving starts calculation in the background; a ready result does not start printing.",
         annotations(read_only_hint = true)
     )]
     async fn plate_slice_get(&self, Parameters(a): Parameters<Id>) -> CallToolResult {
@@ -295,7 +295,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Recheck and retry a saved plate's calculation after correcting its model or material conditions. Valid G-code is shared across queue entries and survives queue deletion and restart. Does not enqueue or start printing."
+        description = "Recheck and retry a saved plate's calculation on every printer after correcting its model or material conditions. Valid G-code per plate and printer is shared across queue entries and survives queue deletion and restart. Does not enqueue or start printing."
     )]
     async fn plate_slice_retry(&self, Parameters(a): Parameters<Id>) -> CallToolResult {
         answer(
@@ -304,7 +304,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Create or replace a saved plate. Omit id for create; for update read first and supply current plate.version and ALL models. Preserve uploaded model IDs. SCAD source must exist. On create, omitted/null conditions use the saved printer defaults and first usable material in its synchronized AMS; explicit values win. On update, omitted/null fields clear conditions; send values to preserve them. Never invent conditions. Saving starts background slicing; G-code is stored in SQLite and reused across queues. Check plate_slice_get for calculation results; saving success does not mean slicing success. Does not enqueue or start printing. On an uncertain response, use plate_list/get before any new create."
+        description = "Create or replace a saved plate: what to make (models and quantities, materials, infill, walls, brim, support, start options). The printer owns the machine/nozzle, process and build plate; sending required_machine_profile_key, process_profile_key or bed_type is an input error. Omit id for create; for update read first and supply current plate.version and ALL models. Preserve uploaded model IDs. SCAD source must exist. On create, omitted/null material and infill/wall conditions use the saved defaults and first usable material in the default printer's synchronized AMS; explicit values win. On update, omitted/null fields clear conditions; send values to preserve them. Never invent conditions. Saving starts background slicing; G-code is stored in SQLite and reused across queues. Check plate_slice_get for calculation results; saving success does not mean slicing success. Does not enqueue or start printing. On an uncertain response, use plate_list/get before any new create."
     )]
     async fn plate_save(&self, Parameters(a): Parameters<PlateSave>) -> CallToolResult {
         let result = if let Some(id) = a.id {
@@ -529,7 +529,7 @@ impl Tools {
         )
     }
     #[tool(
-        description = "Read deduplicated owned machine/nozzle keys. Pass one explicit returned machine to read compatible process/material/bed choices. Defaults in the profile are suggestions, never authorization to fill missing plate conditions.",
+        description = "Read deduplicated owned machine/nozzle keys. Pass one explicit returned machine to read compatible process/material/bed choices for printer settings and per-machine material settings. Plates do not take a machine, process or bed.",
         annotations(read_only_hint = true)
     )]
     async fn plate_options(&self, Parameters(a): Parameters<Machine>) -> CallToolResult {

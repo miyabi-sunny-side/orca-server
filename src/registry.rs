@@ -267,11 +267,6 @@ struct Defaults {
     reason: Option<&'static str>,
     infill_patterns: &'static [&'static str],
 }
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DefaultQuery {
-    machine: Option<String>,
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DefaultChoice {
@@ -279,11 +274,8 @@ struct DefaultChoice {
     #[serde(flatten)]
     strength: crate::strength::Strength,
 }
-async fn read_defaults(
-    State(registry): State<Arc<Registry>>,
-    Query(query): Query<DefaultQuery>,
-) -> Result<Json<Defaults>> {
-    registry.defaults(query.machine.as_deref()).await.map(Json)
+async fn read_defaults(State(registry): State<Arc<Registry>>) -> Result<Json<Defaults>> {
+    registry.defaults().await.map(Json)
 }
 async fn update_defaults(
     State(registry): State<Arc<Registry>>,
@@ -298,7 +290,7 @@ async fn update_defaults(
     Ok(StatusCode::NO_CONTENT)
 }
 impl Registry {
-    async fn defaults(&self, machine: Option<&str>) -> Result<Defaults> {
+    async fn defaults(&self) -> Result<Defaults> {
         let entries = self.entries.lock().await;
         let mut result = Defaults {
             default_printer_id: self.db.default_printer()?,
@@ -321,8 +313,7 @@ impl Registry {
             });
             return Ok(result);
         };
-        let settings = &entry.device.settings;
-        let machine = machine.unwrap_or(&settings.machine_profile_key);
+        let machine = entry.device.settings.machine_profile_key.as_str();
         let Some(profiles) = self
             .profiles
             .as_ref()
@@ -331,15 +322,6 @@ impl Registry {
             result.reason = Some("profiles");
             return Ok(result);
         };
-        result.conditions.required_machine_profile_key = Some(machine.into());
-        result.conditions.bed_type = Some(settings.bed_type.clone());
-        if profiles
-            .validate_process(machine, &settings.default_process_profile_key)
-            .is_ok()
-        {
-            result.conditions.process_profile_key =
-                Some(settings.default_process_profile_key.clone());
-        }
         let (current, slots) = entry.printer.ams_inventory(None).await?;
         if !current {
             result.reason = Some("ams_sync");
@@ -366,30 +348,16 @@ impl Registry {
                 break;
             }
         }
-        result.reason = if result.conditions.filament_id.is_none() {
-            Some("material")
-        } else if result.conditions.process_profile_key.is_none() {
-            Some("process")
-        } else {
-            None
-        };
+        result.reason = result
+            .conditions
+            .filament_id
+            .is_none()
+            .then_some("material");
         Ok(result)
     }
     pub(crate) async fn fill_creation(&self, value: &mut crate::plates::Conditions) -> Result<()> {
-        let defaults = self
-            .defaults(value.required_machine_profile_key.as_deref())
-            .await?
-            .conditions;
-        value.required_machine_profile_key = value
-            .required_machine_profile_key
-            .take()
-            .or(defaults.required_machine_profile_key);
+        let defaults = self.defaults().await?.conditions;
         value.filament_id = value.filament_id.take().or(defaults.filament_id);
-        value.process_profile_key = value
-            .process_profile_key
-            .take()
-            .or(defaults.process_profile_key);
-        value.bed_type = value.bed_type.take().or(defaults.bed_type);
         value.strength.sparse_infill_pattern = value
             .strength
             .sparse_infill_pattern

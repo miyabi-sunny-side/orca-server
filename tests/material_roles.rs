@@ -230,8 +230,8 @@ fn official_role_assemblies_preserve_material_order_geometry_and_ams() {
                 fixture("material-roles-support.3mf"),
             );
         }
-        let conditions = json!({"required_machine_profile_key":MACHINE,"filament_id":rig.materials[0]["id"],
-            "secondary_filament_id":rig.materials[usize::from(!same)]["id"],"process_profile_key":PROCESS,"bed_type":BED,
+        let conditions = json!({"filament_id":rig.materials[0]["id"],
+            "secondary_filament_id":rig.materials[usize::from(!same)]["id"],
             "support_enabled":support,"support_interface_filament_id":if support {rig.materials[2]["id"].clone()} else {Value::Null}});
         // Resolve an existing STL reference after the producer publishes only the matching 3MF.
         rig.plate = rig.post("/api/plates/import",&json!({"name":name,"models":[{"name":"roles.stl","source":"parts/roles.stl","quantity":2}],"conditions":conditions}),201);

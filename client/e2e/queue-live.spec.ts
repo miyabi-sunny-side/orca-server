@@ -32,8 +32,7 @@ test("queue starts and continues with one action on mobile and desktop", async (
   const materials = await (await request.get('/api/filaments')).json();
   const slots = (await (await request.get('/api/printers/p1/ams')).json()).slots;
   const specification = (slot: number) => ({ ams_slot_id: slots.find((s: any) => s.slot_index === slot).id,
-    filament_id: materials.find((f: any) => f.name === (slot === 3 ? 'PLA 青' : 'PLA 白')).id,
-    required_machine_profile_key: 'Bambu Lab P1S 0.4 nozzle', process_profile_key: '0.20mm Standard @BBL X1C', bed_type: 'Textured PEI Plate' });
+    filament_id: materials.find((f: any) => f.name === (slot === 3 ? 'PLA 青' : 'PLA 白')).id });
   const plates: Plate[] = (await (await request.get("/api/plates")).json()).sort((a: Plate, b: Plate) => a.name.localeCompare(b.name));
   let displayTheme = "dark";
   const configure = async(index:number,slot:number) => {

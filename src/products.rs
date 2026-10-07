@@ -141,12 +141,14 @@ pub(crate) fn product_id(c: &Connection, filament_id: &str) -> Result<String> {
     .optional()?
     .ok_or(Error::NotFound)
 }
+pub(crate) const MISSING_SETTING: &str =
+    "Configure this material for the required machine and nozzle first";
 pub(crate) fn load_setting(
     c: &Connection,
     filament: &str,
     machine: &str,
 ) -> Result<crate::filament::SettingData> {
-    let (base,raw):(String,String)=c.query_row("SELECT s.base_profile_key,s.overrides_json FROM filament_settings s JOIN filaments f ON f.product_id=s.product_id WHERE f.id=?1 AND s.machine_profile_key=?2",params![filament,machine],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::Conflict("Configure this material for the required machine and nozzle first"))?;
+    let (base,raw):(String,String)=c.query_row("SELECT s.base_profile_key,s.overrides_json FROM filament_settings s JOIN filaments f ON f.product_id=s.product_id WHERE f.id=?1 AND s.machine_profile_key=?2",params![filament,machine],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or(Error::Conflict(MISSING_SETTING))?;
     Ok(crate::filament::SettingData {
         machine_profile_key: machine.to_owned(),
         base_profile_key: base,

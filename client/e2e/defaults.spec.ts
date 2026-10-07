@@ -3,7 +3,7 @@ import {test,expect} from '@playwright/test';
 test('late defaults preserve deliberate selections and clearing, without repeated refresh',async({page})=>{
   const machine='Bambu Lab P1S 0.4 nozzle',process='Standard';let reads=0;
   let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
-  const defaults={default_printer_id:'p1',conditions:{required_machine_profile_key:machine,filament_id:'white',process_profile_key:process,bed_type:'Cool Plate'},reason:null};
+  const defaults={default_printer_id:'p1',conditions:{filament_id:'white',wall_loops:2},reason:null};
   const filaments=['white','blue'].map(id=>({id,name:id,vendor:'Test',material:'PLA'}));
   await page.route('**/api/**',async route=>{
     const path=new URL(route.request().url()).pathname;
@@ -18,11 +18,11 @@ test('late defaults preserve deliberate selections and clearing, without repeate
     return route.fulfill({status:404,json:{error:'not found'}});
   });
   await page.goto('/plates/new');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();
-  await page.getByLabel('要求する機種・ノズル').selectOption(machine);
+  // The printer owns the machine, process and bed; creation asks for none of them.
+  for(const name of ['要求する機種・ノズル','工程（品質）','ビルドプレート'])await expect(page.getByLabel(name,{exact:true})).toHaveCount(0);
   const material=materialButton(page);await selectMaterial(page,'blue');await selectMaterial(page,null);
-  await page.getByLabel('工程（品質）').selectOption(process);await page.getByRole('combobox',{name:'ビルドプレート',exact:true}).selectOption('High Temp Plate');
   release();await expect(page.getByText('初期値を読み込んでいます…')).toHaveCount(0);
-  await expect(material).toContainText('フィラメントを選択');await expect(page.getByRole('combobox',{name:'ビルドプレート',exact:true})).toHaveValue('High Temp Plate');
+  await expect(material).toContainText('フィラメントを選択');
   await selectMaterial(page,'blue');await page.getByRole('button',{name:'モデル選択へ'}).click();await page.getByRole('button',{name:'構成を確認（1）'}).click();
   await expect(material).toContainText('blue');expect(reads).toBe(1);
 });

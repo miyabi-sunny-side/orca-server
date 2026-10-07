@@ -141,9 +141,7 @@ fn three_a1_minis_with_and_without_ams_lite_never_cross() {
     let plate = rig.post(
         "/api/plates/import",
         &json!({"name":"A1 cube","models":[{"name":"parts/cube.stl",
-        "source":"parts/cube.stl","quantity":2}],"conditions":{"required_machine_profile_key":A1,
-        "filament_id":material["id"],"process_profile_key":profiles["defaults"]["process"],
-        "bed_type":profiles["defaults"]["bed"]}}),
+        "source":"parts/cube.stl","quantity":2}],"conditions":{"filament_id":material["id"]}}),
         201,
     );
     for (i, pid) in ids.iter().enumerate() {

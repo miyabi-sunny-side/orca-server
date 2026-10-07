@@ -1,7 +1,7 @@
 import {test,expect} from '@playwright/test';
 const machine='Bambu Lab P1S 0.4 nozzle';
 async function fixture(page:any,title?:string){
-  let plates=[1,2].map(i=>({id:`10000000-0000-4000-8000-${String(i).padStart(12,'0')}`,version:1,name:title??`保存プレート ${i}`,models:[{id:'model',name:'cube.stl',source:'cube.stl',quantity:1}],conditions:{required_machine_profile_key:machine,filament_id:'white',process_profile_key:'quality',bed_type:'Cool Plate'}}));
+  let plates=[1,2].map(i=>({id:`10000000-0000-4000-8000-${String(i).padStart(12,'0')}`,version:1,name:title??`保存プレート ${i}`,models:[{id:'model',name:'cube.stl',source:'cube.stl',quantity:1}],conditions:{filament_id:'white'}}));
   const printers=[{id:'p1',name:'P1S',machine_profile_key:machine}];let allowed=true;const commands:any[]=[]; const deletes:string[]=[];
   await page.route('**/api/**',async(route:any)=>{
     const url=new URL(route.request().url()),path=url.pathname;

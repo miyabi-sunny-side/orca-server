@@ -89,13 +89,24 @@ async fn client_saves_references_and_shares_the_rest_validation() {
     let rest = read(&server.base, &path).await;
     assert_eq!(rest, saved["data"]);
     assert_eq!(rest["models"][0]["quantity"], 10);
+    assert!(rest["conditions"]["filament_id"].is_null());
+    // The printer owns the machine, process and bed; naming them is an input error.
     for key in [
         "required_machine_profile_key",
-        "filament_id",
         "process_profile_key",
         "bed_type",
     ] {
-        assert!(rest["conditions"][key].is_null());
+        assert!(rest["conditions"].get(key).is_none());
+        let mut invalid = edit.clone();
+        invalid["conditions"] = json!({key: "Textured PEI Plate"});
+        let rejected = client
+            .call_tool(
+                CallToolRequestParams::new("plate_save")
+                    .with_arguments(json!({"plate":invalid}).as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.is_error, Some(true), "{key}");
     }
     assert_eq!(rest["conditions"]["sparse_infill_pattern"], "adaptivecubic");
     assert_eq!(rest["conditions"]["sparse_infill_density"], 15.0);
@@ -125,8 +136,8 @@ async fn client_saves_references_and_shares_the_rest_validation() {
     );
     assert_eq!(http.delete(&archive).send().await.unwrap().status(), 204);
     assert_eq!(
-        call(&client, "plate_slice_get", json!({"id":id}), false).await["data"]["state"],
-        "failed"
+        call(&client, "plate_slice_get", json!({"id":id}), false).await["data"],
+        json!({"printers":[]})
     );
     call(&client, "plate_slice_retry", json!({"id":id}), false).await;
     edit["version"] = rest["version"].clone();
@@ -361,7 +372,7 @@ fn shared_materials_ams_and_admission() {
         .await["data"][0]["id"],
         yellow["id"]
     );
-    let mut edit = json!({"name":"MCP Gridfinity ×10","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":10}]});
+    let mut edit = json!({"name":"MCP Gridfinity ×2","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":2}]});
     let mut plate = call(&client, "plate_save", json!({"plate":edit}), false).await["data"].clone();
     let plate_id = plate["id"].clone();
     let admission = json!({"printer_id":"p1","plate_id":plate_id});
@@ -374,7 +385,7 @@ fn shared_materials_ams_and_admission() {
         read(&base, "/api/default-settings").await["conditions"]
     );
     edit["version"] = plate["version"].clone();
-    edit["conditions"] = json!({"required_machine_profile_key":machine,"filament_id":yellow["id"],"process_profile_key":process,"bed_type":"Textured PEI Plate"});
+    edit["conditions"] = json!({"filament_id":yellow["id"]});
     plate = call(
         &client,
         "plate_save",
@@ -502,7 +513,7 @@ fn check_creation_defaults(custom: bool) {
     let mut edit = json!({"name":"MCP defaults","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":1}]});
     for nulls in [false, true] {
         if nulls {
-            edit["conditions"] = json!({"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null});
+            edit["conditions"] = json!({"filament_id":null});
         }
         let plate = call(&client, "plate_save", json!({"plate":edit}), false).await["data"].clone();
         assert_eq!(plate["conditions"], defaults);
@@ -993,7 +1004,7 @@ fn mcp_save_and_retry_share_the_persistent_plate_result() {
         let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
             loop {
                 let result = call(&client, "plate_slice_get", json!({"id":plate_id}), false).await
-                    ["data"]
+                    ["data"]["printers"][0]
                     .clone();
                 if result["state"] == "ready" {
                     break result;
@@ -1004,8 +1015,9 @@ fn mcp_save_and_retry_share_the_persistent_plate_result() {
         .await
         .unwrap();
         assert_eq!(result["seconds"], 1140);
+        assert_eq!(result["printer_id"], "p1");
         assert_eq!(
-            read(&base, &format!("/api/plates/{plate_id}/slice")).await,
+            read(&base, &format!("/api/plates/{plate_id}/slice")).await["printers"][0],
             result
         );
         client.cancel().await.unwrap();

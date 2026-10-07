@@ -45,17 +45,10 @@ export function chooseModels(
     ...additions.map((source) => ({ name: source, source, quantity: 1 })),
   ];
 }
-type Device = { id: string; machine_profile_key: string };
-export function machineChoices(printers: Device[]) {
-  return [...new Set(printers.map((p) => p.machine_profile_key))].sort();
-}
-export function destinations<T extends Device>(
-  printers: T[],
-  machine: string | null,
-) {
-  return printers
-    .filter((p) => p.machine_profile_key === machine)
-    .sort((a, b) => a.id.localeCompare(b.id));
+type Device = { id: string };
+/** Every printer can be chosen; its own slice result decides whether the plate fits. */
+export function destinations<T extends Device>(printers: T[]) {
+  return [...printers].sort((a, b) => a.id.localeCompare(b.id));
 }
 export function choosePrinter(printers: Device[], previous: string) {
   return printers.some((p) => p.id === previous)
@@ -72,10 +65,7 @@ export const emptyConditions: PlateConditions = {
   support_enabled: false,
   support_interface_filament_id: null,
   ...emptyStrength,
-  required_machine_profile_key: null,
   filament_id: null,
-  process_profile_key: null,
-  bed_type: null,
 };
 
 export function initialConditions(
@@ -92,16 +82,7 @@ export function initialConditions(
   };
   if (!creation) return result;
   for (const key of Object.keys(emptyConditions) as (keyof PlateConditions)[]) {
-    const strength = key in emptyStrength;
-    if (
-      result[key] == null &&
-      !edited.has(key) &&
-      (strength ||
-        key === "required_machine_profile_key" ||
-        key === "bed_type" ||
-        result.required_machine_profile_key ===
-          defaults.required_machine_profile_key)
-    )
+    if (result[key] == null && !edited.has(key))
       Object.assign(result, { [key]: defaults[key] ?? null });
   }
   if (result.support_enabled)

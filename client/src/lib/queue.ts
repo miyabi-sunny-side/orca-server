@@ -303,6 +303,10 @@ export const phaseText = {
   needs_attention: "要確認",
 };
 export const failureText: Record<string, string> = {
+  "The models do not fit on this printer's build plate":
+    "モデルがこのプリンターの台に乗りません。別のプリンターを選ぶか、個数を減らしてください。",
+  "Models must fit together on one plate":
+    "モデルがこのプリンターの台に乗りません。個数を減らすか、台の広いプリンターで印刷してください。",
   "Wait for a matching terminal report for the previous start":
     "前の開始結果が不明です。本体から対象の停止・終了報告を受け取るまでお待ちください。",
   "Wait for a fresh synchronized printer report":
@@ -393,10 +397,20 @@ export type Estimate = {
   state: "pending" | "calculating" | "ready" | "failed";
   seconds: number | null;
   error: string | null;
+  /** Why this printer cannot print the plate. */
+  reason?: "unfit" | "material_setting" | null;
+};
+/** One printer's result in `GET /api/plates/{id}/slice`. */
+export type PrinterEstimate = Estimate & {
+  printer_id: string;
+  printer_name: string;
+  machine_profile_key: string;
 };
 export function estimateText(estimate?: Estimate): string {
   if (!estimate || estimate.state === "pending") return "試算待ち";
   if (estimate.state === "calculating") return "試算中…";
+  if (estimate.reason === "unfit") return "台に乗りません";
+  if (estimate.reason === "material_setting") return "材料設定がありません";
   if (estimate.state === "failed" || !estimate.seconds)
     return "試算できませんでした";
   const minutes = Math.ceil(estimate.seconds / 60);

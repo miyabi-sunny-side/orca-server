@@ -35,10 +35,8 @@ pub fn layout(appdir: &Path) {
                 .clone();
             rig.post(&format!("/api/filaments/{}/settings",id(&rig.materials[1])),&json!({"machine_profile_key":machine,"base_profile_key":base,"overrides_json":{"nozzle_temperature":215}}),201);
         }
-        spec = merge(
-            &rig.specification(3),
-            &json!({"required_machine_profile_key":machine,"process_profile_key":selection["process"]}),
-        );
+        // The printer's machine and process (changed above) decide the slice.
+        spec = rig.specification(3);
         let action = rig.add_action(Some(spec.clone()), None);
         let job = array(&rig.send(action, 200)["waiting"])
             .last()
@@ -110,8 +108,10 @@ pub fn estimates(appdir: &Path) {
     let mut results = Vec::new();
     let mut last = None;
     for (quantity, process) in [(1, PROCESS), (2, PROCESS), (2, "0.16mm Optimal @BBL X1C")] {
+        let mut printer = printer_settings(&rig.get("/api/printers/p1"));
+        printer["default_process_profile_key"] = json!(process);
+        rig.put("/api/printers/p1", &printer, 200);
         let mut plate = edit(&rig.configure(None, None));
-        plate["conditions"]["process_profile_key"] = json!(process);
         plate["models"][0]["quantity"] = json!(quantity);
         rig.plate = rig.put(&format!("/api/plates/{}", id(&rig.plate)), &plate, 200);
         let job = rig.send(
@@ -328,4 +328,58 @@ pub fn strength(appdir: &Path) {
     assert!(results[5]["middle_solid"].as_f64().unwrap() > 0.);
     assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
     write_json(&rig.output.join("result.json"), &json!(results));
+}
+
+/// A model that fits the P1S (256 mm) but not the A1 mini (180 mm) bed, and a material
+/// without a setting for the A1 mini, are each named for that printer only.
+pub fn printer_fit(appdir: &Path) {
+    let mut rig = Rig::with_options("official-printer-fit", "v3", Some(appdir));
+    rig.launch();
+    rig.seed();
+    rig.large_model();
+    let plate = rig.post(
+        "/api/plates/import",
+        &json!({"name":"Large tray","models":[{"name":"parts/large.stl","source":"parts/large.stl","quantity":1}],
+            "conditions":{"filament_id":rig.materials[1]["id"]}}),
+        201,
+    );
+    let slice = format!("/api/plates/{}/slice", id(&plate));
+    let (peer, pid) = rig.register_mini();
+    until(
+        || rig.slice_on(&slice, &pid)["reason"] == "material_setting",
+        60,
+    );
+    rig.configure_material(id(&rig.materials[1]), "Bambu Lab A1 mini 0.4 nozzle");
+    until(
+        || rig.slice(&slice)["state"] == "ready" && rig.slice_on(&slice, &pid)["state"] == "failed",
+        180,
+    );
+    let p1 = rig.slice(&slice);
+    assert!(p1["seconds"].as_u64().unwrap() > 0, "{p1}");
+    let fit = rig.slice_on(&slice, &pid);
+    assert_eq!(fit["reason"], "unfit", "{fit}");
+    assert_eq!(fit["printer_name"], "A1 mini");
+    fs::write(
+        rig.output.join("printer-fit.json"),
+        serde_json::to_vec_pretty(&rig.get(&slice)).unwrap(),
+    )
+    .unwrap();
+    // Admission follows the pair: the P1S takes the plate, the A1 mini does not.
+    let admission = |printer: &str| {
+        rig.get(&format!(
+            "/api/queue?printer_id={printer}&plate_id={}",
+            id(&plate)
+        ))["admission"]
+            .clone()
+    };
+    assert_eq!(admission("p1")["allowed"], true);
+    rig.load_material(&peer, &pid, &rig.materials[1]["id"]);
+    let refused = admission(&pid);
+    assert_eq!(refused["allowed"], false);
+    assert!(
+        refused["reason"].as_str().unwrap().contains("do not fit"),
+        "{refused}"
+    );
+    assert!(rig.broker.prints().is_empty() && peer.prints().is_empty());
+    rig.check();
 }

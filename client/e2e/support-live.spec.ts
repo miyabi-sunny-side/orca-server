@@ -9,6 +9,8 @@ test('support selection stays optional, searchable and persistent in both themes
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
     await page.goto('/plates/new');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();
     await page.getByLabel('プレート名',{exact:true}).fill(`接触面の材料 ${width} ${colorScheme}`);
+    // The fixture CLI always places two objects; another count would not fit its plate.
+    await page.getByLabel(/の個数$/).fill('2');
     const details=page.locator('details').filter({has:page.locator('summary',{hasText:'詳細設定'})});
     await expect(details).not.toHaveAttribute('open');
     await expect(page.getByRole('button',{name:/接触面のフィラメント/})).toHaveCount(0);

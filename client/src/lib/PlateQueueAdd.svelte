@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ApiError, request, type Plate, type Printer } from "./api";
-  import { choosePrinter, destinations, emptyConditions } from "./plate";
+  import { choosePrinter, destinations } from "./plate";
   import { failureText, type Command, type QueueState } from "./queue";
   let {
     plate = $bindable(),
@@ -20,7 +20,9 @@
   } = $props();
   const id = $derived(plate.id);
   let printers = $state<Printer[]>([]),
-    printerId = $state("");
+    printerId = $state(""),
+    defaultPrinter = "",
+    chosen = false;
   let queue = $state<QueueState>(),
     readError = $state(""),
     reading = $state(false),
@@ -31,10 +33,7 @@
   $effect(() => {
     onbusy?.(busy || !!pending);
   });
-  const conditions = $derived(plate?.conditions ?? emptyConditions);
-  const candidates = $derived(
-    destinations(printers, conditions.required_machine_profile_key),
-  );
+  const candidates = $derived(destinations(printers));
   const importHold = $derived(
     plate.imported &&
       plate.models.some((m) => m.id === plate.imported?.model_id)
@@ -44,13 +43,11 @@
   const hold = $derived(
     importHold
       ? importHold
-      : !conditions.required_machine_profile_key
-        ? "プレートの印刷条件を設定してください。"
-        : !candidates.length
-          ? "要求する機種・ノズルに一致するプリンターがありません。"
-          : queue?.admission?.reason
-            ? (failureText[queue.admission.reason] ?? queue.admission.reason)
-            : "",
+      : !reading && !readError && !candidates.length
+        ? "プリンターを登録してください。"
+        : queue?.admission?.reason
+          ? (failureText[queue.admission.reason] ?? queue.admission.reason)
+          : "",
   );
   const disabled = $derived(
     !!importHold ||
@@ -77,10 +74,7 @@
       printers = p;
       printerId =
         pending?.printerId ??
-        choosePrinter(
-          destinations(p, conditions.required_machine_profile_key),
-          printerId,
-        );
+        choosePrinter(destinations(p), printerId || defaultPrinter);
       const value = printerId
         ? await request<QueueState>(
             `/api/queue?printer_id=${encodeURIComponent(printerId)}&plate_id=${id}`,
@@ -110,6 +104,7 @@
     }
   }
   function rememberPrinter() {
+    chosen = true;
     queue = undefined;
     notice = "";
     try {
@@ -196,6 +191,24 @@
     } catch {
       /* Ignore invalid browser storage. */
     }
+    // Without a remembered choice, start from the printer new plates take their defaults from.
+    chosen = !!printerId;
+    if (!chosen)
+      void request<{ default_printer_id: string | null }>(
+        "/api/default-settings",
+        { signal: controller.signal },
+      )
+        .then((defaults) => {
+          defaultPrinter = defaults.default_printer_id ?? "";
+          if (!chosen && !pending && defaultPrinter) {
+            printerId = defaultPrinter;
+            queue = undefined;
+            void refresh();
+          }
+        })
+        .catch(() => {
+          /* The first printer remains selected. */
+        });
     void refresh();
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();

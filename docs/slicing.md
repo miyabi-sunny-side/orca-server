@@ -29,7 +29,7 @@ GUIセッションは不要です。版を変更したバイナリや別の版�
 
 ## 設定と生成物
 
-機種・ノズルと工程・ビルドプレートは[プレート](plates.md#印刷条件を保存する)で指定します。
+機種・ノズル、工程、ビルドプレートは[プリンター](printer.md)の設定を使い、プレートの材料・仕上がりの条件と組み合わせて（プレート、プリンター）ごとに試算します。
 材料の基本プロファイルと温度の上書きは[材料設定](filaments.md)に保存します。
 候補は`GET /api/slicer/profiles?machine=URLエンコードしたmachine_profile_key`で取得できます。
 応答は`printer`、`processes`、`filaments`、`beds`、`defaults`、CLIの`version`です。

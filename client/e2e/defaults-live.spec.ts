@@ -4,11 +4,11 @@ import {mkdirSync} from 'node:fs';
 const ctx=JSON.parse(process.env.E2E_DEFAULTS_CONTEXT ?? '{}');
 test('saved defaults start complete and manual material survives at desktop and narrow widths',async({page,request})=>{
   test.skip(!!ctx.devices);test.setTimeout(60_000); mkdirSync(process.env.E2E_EVIDENCE_DIR!,{recursive:true});
-  const fields=()=>[page.getByLabel('要求する機種・ノズル'),materialButton(page),page.getByLabel('工程（品質）'),page.getByRole('combobox',{name:'ビルドプレート',exact:true})];
+  const removed=()=>['要求する機種・ノズル','工程（品質）','ビルドプレート'].map(name=>page.getByLabel(name,{exact:true}));
   for (const [width,colorScheme] of [[320,'dark'],[900,'light']] as const){
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
     await page.goto('/plates/new');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();
-    for(const [i,value] of [ctx.machine,ctx.first,ctx.process,ctx.bed].entries()) { if(i===1) await expectMaterial(page,value); else await expect(fields()[i]).toHaveValue(value); }
+    await expectMaterial(page,ctx.first);for(const field of removed())await expect(field).toHaveCount(0);
     await expect(page.getByText('未設定でも保存できます。',{exact:false})).toHaveCount(0);
     await page.getByLabel('プレート名',{exact:true}).fill(`Defaults ${width}`);await page.getByLabel('parts/cube.stl の個数').fill('10');
     if(width===900) await selectMaterial(page,ctx.second);
@@ -17,7 +17,7 @@ test('saved defaults start complete and manual material survives at desktop and 
     await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/defaults-${width}-${colorScheme}.png`,fullPage:true});
     await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);
     const id=new URL(page.url()).pathname.split('/')[2];const saved=await (await request.get('/api/plates/'+id)).json();
-    expect(saved.conditions).toEqual({required_machine_profile_key:ctx.machine,filament_id:width===900?ctx.second:ctx.first,process_profile_key:ctx.process,bed_type:ctx.bed,sparse_infill_pattern:'adaptivecubic',sparse_infill_density:15,wall_loops:2,brim_enabled:false,support_enabled:false,support_interface_filament_id:null,start_options:{bed_leveling:true,flow_calibration:true,timelapse:true,vibration_calibration:false}});
+    expect(saved.conditions).toEqual({filament_id:width===900?ctx.second:ctx.first,sparse_infill_pattern:'adaptivecubic',sparse_infill_density:15,wall_loops:2,brim_enabled:false,support_enabled:false,support_interface_filament_id:null,start_options:{bed_leveling:true,flow_calibration:true,timelapse:true,vibration_calibration:false}});
     expect(saved.models[0].quantity).toBe(10);
     await page.getByRole('button',{name:'構成を編集'}).click();
     await expectMaterial(page,saved.conditions.filament_id);
@@ -27,17 +27,21 @@ test('saved defaults start complete and manual material survives at desktop and 
   const clone=await cloneResponse.json();expect(clone.conditions).toEqual(old.conditions);
   for(const target of [old,clone]) {
     await page.goto('/plates/'+target.id);await page.getByRole('button',{name:'構成を編集'}).click();
-    for(const [i,value] of ['',null,'',''].entries()) { if(i===1) await expectMaterial(page,null); else await expect(fields()[i]).toHaveValue(value!); }
+    await expectMaterial(page,null);
     expect(await (await request.get('/api/plates/'+target.id)).json()).toEqual(target);
     await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByRole('button',{name:'構成を編集'})).toBeVisible();
-    const saved=await (await request.get('/api/plates/'+target.id)).json();expect(saved.version).toBe(target.version+1);expect(saved.conditions).toEqual(target.conditions);
+    const saved=await (await request.get('/api/plates/'+target.id)).json();expect(saved.version).toBe(target.version+1);
+    // Unset infill and walls show and save the default printer's process values.
+    expect(saved.conditions).toEqual({...target.conditions,sparse_infill_pattern:'crosshatch',sparse_infill_density:15,wall_loops:2});
   }
   const updated=await (await request.get('/api/plates/'+ctx.old)).json();
   await page.goto('/printers');await expect(page.getByLabel('新規プレートの初期値に使うプリンター')).toHaveValue('p1');
   await page.getByRole('link',{name:'設定を編集'}).click();await page.getByLabel('プレート種類').selectOption('High Temp Plate');
   await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(/\/printers$/);
   await page.reload();await expect(page.getByLabel('新規プレートの初期値に使うプリンター')).toHaveValue('p1');
-  await page.goto('/plates/new');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();await expect(fields()[3]).toHaveValue('High Temp Plate');
+  // The printer's bed belongs to the printer; creation still asks for no bed.
+  await page.goto('/plates/new');await page.getByRole('checkbox').check();await page.getByRole('button',{name:'構成を確認（1）'}).click();for(const field of removed())await expect(field).toHaveCount(0);
+  expect((await (await request.get('/api/printers/p1')).json()).bed_type).toBe('High Temp Plate');
   expect(await (await request.get('/api/plates/'+ctx.old)).json()).toEqual(updated);
 });
 

@@ -39,14 +39,10 @@
   let defaultsReading = $state(true);
   const edited = new Set<keyof Conditions>();
   async function loadDefaults() {
-    const query = conditions.required_machine_profile_key
-      ? `?machine=${encodeURIComponent(conditions.required_machine_profile_key)}`
-      : "";
     try {
-      const result = await request<DefaultSettings>(
-        `/api/default-settings${query}`,
-        { signal: controller.signal },
-      );
+      const result = await request<DefaultSettings>("/api/default-settings", {
+        signal: controller.signal,
+      });
       if (!controller.signal.aborted) {
         conditions = initialConditions(
           conditions,

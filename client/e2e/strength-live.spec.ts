@@ -21,10 +21,10 @@ test('details stay optional, persist strength and calculate shells in both theme
     await walls.fill('4');await expect(details.getByRole('status')).toContainText('上面10層・底面6層');
     await walls.fill('2');await expect(details.getByRole('status')).toContainText('上面5層・底面3層');
     await walls.fill('3');await expect(details.getByRole('status')).toContainText('上面8層・底面5層');
-    await page.getByLabel('工程（品質）').selectOption('0.16mm Fixture quality');
-    await expect(details.getByRole('status')).toContainText('上面11層・底面6層');
+    // The default printer's process gives the inherited layers; the plate has no process.
+    await expect(page.getByLabel('工程（品質）')).toHaveCount(0);
     await pattern.selectOption('gyroid');await density.fill('22.5');
-    await expect(details.getByRole('status')).toContainText('上面11層・底面6層');
+    await expect(details.getByRole('status')).toContainText('上面8層・底面5層');
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     await page.screenshot({path:`${out}/open-${width}-${colorScheme}.png`,fullPage:true});
     await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);

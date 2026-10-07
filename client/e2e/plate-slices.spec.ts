@@ -13,19 +13,20 @@ for (const colorScheme of ["dark", "light"] as const) {
       models: [
         { id: "item", name: "cube.stl", source: "cube.stl", quantity: 2 },
       ],
-      conditions: {
-        required_machine_profile_key: "P1S 0.4",
-        filament_id: "pla",
-        process_profile_key: "Standard",
-        bed_type: "Textured PEI Plate",
-      },
+      conditions: { filament_id: "pla" },
     };
-    let state = {
+    let state: Record<string, unknown> = {
         state: "calculating",
         seconds: null as number | null,
         error: null as string | null,
       },
+      mini: Record<string, unknown> | null = null,
       retries = 0;
+    const p1 = {
+      printer_id: "p1",
+      printer_name: "P1S",
+      machine_profile_key: "P1S 0.4",
+    };
     await page.route("**/api/**", (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path.endsWith("/slice")) {
@@ -34,7 +35,23 @@ for (const colorScheme of ["dark", "light"] as const) {
           state = { state: "calculating", seconds: null, error: null };
           return route.fulfill({ status: 202 });
         }
-        return route.fulfill({ json: state });
+        return route.fulfill({
+          json: {
+            printers: [
+              ...(mini
+                ? [
+                    {
+                      printer_id: "a1",
+                      printer_name: "A1 mini",
+                      machine_profile_key: "A1 mini 0.4",
+                      ...mini,
+                    },
+                  ]
+                : []),
+              { ...p1, ...state },
+            ],
+          },
+        });
       }
       if (path === `/api/plates/${id}`) return route.fulfill({ json: plate });
       if (path === "/api/filaments")
@@ -63,6 +80,36 @@ for (const colorScheme of ["dark", "light"] as const) {
     await expect(status).toContainText("試算中…");
     state = { state: "ready", seconds: 1140, error: null };
     await expect(status).toContainText("約19分");
+    // One printer keeps the single line; it does not name the printer.
+    await expect(status).not.toContainText("P1S");
+    await page.screenshot({
+      path: testInfo.outputPath(`one-printer-${colorScheme}.png`),
+      fullPage: true,
+    });
+    // With a second printer each line names its printer and why it cannot print.
+    mini = {
+      state: "failed",
+      seconds: null,
+      error: "Models must fit together on one plate",
+      reason: "unfit",
+    };
+    const rows = status.getByRole("listitem");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText("A1 mini · 台に乗りません");
+    await expect(rows.nth(1)).toContainText("P1S · 約19分");
+    await rows.nth(0).locator("summary").click();
+    await expect(rows.nth(0).getByRole("alert")).toContainText("台に乗りません");
+    await expect(rows.nth(0).getByRole("link", { name: /材料の設定/ })).toHaveCount(0);
+    mini = {
+      state: "failed",
+      seconds: null,
+      error: "Configure this material for the required machine and nozzle first",
+      reason: "material_setting",
+    };
+    await expect(rows.nth(0)).toContainText("A1 mini · 材料設定がありません");
+    await expect(
+      rows.nth(0).getByRole("link", { name: /材料の設定/ }),
+    ).toHaveAttribute("href", /\/filaments\/pla\?machine=A1%20mini%200\.4/);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

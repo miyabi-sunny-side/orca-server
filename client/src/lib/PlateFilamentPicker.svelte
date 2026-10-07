@@ -18,13 +18,11 @@
   };
   let {
     value,
-    machine,
     label = "フィラメント",
     clearLabel = "指定を解除",
     choose,
   }: {
     value: string | null;
-    machine: string | null;
     label?: string;
     clearLabel?: string;
     choose: (id: string | null) => void;
@@ -62,12 +60,10 @@
   // Capture the current scope before awaiting; a cancelled response cannot replace it.
   const search = $derived.by(() => {
     const id = value,
-      profile = machine,
       all = includeUnloaded;
     return async (q: string, signal: AbortSignal) => {
       const params = new URLSearchParams({ q, include_unloaded: String(all) });
       if (id) params.set("selected_id", id);
-      if (profile) params.set("machine", profile);
       const next = await request<Candidates>(`/api/plate-filaments?${params}`, {
         signal,
       });
@@ -171,11 +167,7 @@
               onclick={reload}>装填情報を再確認</button
             >{/if}
           {#if !result.printers.length && !includeUnloaded}<p class="caption">
-              {machine
-                ? "この機種・ノズルのプリンターがありません。"
-                : "プリンターがありません。"}<a href="/printers"
-                >プリンター設定</a
-              >
+              プリンターがありません。<a href="/printers">プリンター設定</a>
             </p>{/if}
         {/if}
       {/snippet}

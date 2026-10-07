@@ -101,9 +101,6 @@
           />
         {:else}
           <div class="conditions" aria-label="保存した印刷条件">
-            <p>
-              {conditions.required_machine_profile_key ?? "機種・ノズル未設定"}
-            </p>
             {#each roles as role}<p>
                 {#if roles.length > 1 || role === "secondary"}{role}:
                 {/if}
@@ -113,10 +110,6 @@
                     ? "材料を確認中"
                     : "フィラメント未設定")}
               </p>{/each}
-            <p>
-              {conditions.process_profile_key ?? "工程未設定"} · {conditions.bed_type ??
-                "ビルドプレート未設定"}
-            </p>
           </div>
           <button
             class="icon-btn large"
@@ -207,7 +200,4 @@
     overflow-wrap: anywhere
     p
       margin: var(--sp-1) 0
-    p:not(:first-child)
-      color: var(--c-muted)
-      font-size: var(--fs-sm)
 </style>

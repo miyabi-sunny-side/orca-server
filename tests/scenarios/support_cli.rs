@@ -242,7 +242,7 @@ pub fn support(mut rig: Rig) {
         } else {
             "parts/support-cantilever.stl"
         };
-        let conditions = json!({"required_machine_profile_key":MACHINE,"filament_id":rig.materials[main]["id"],"process_profile_key":PROCESS,"bed_type":BED,"support_enabled":on,"support_interface_filament_id":rig.materials[interface]["id"]});
+        let conditions = json!({"filament_id":rig.materials[main]["id"],"support_enabled":on,"support_interface_filament_id":rig.materials[interface]["id"]});
         rig.plate=rig.post("/api/plates/import",&json!({"name":name,"models":[{"name":source,"source":source,"quantity":1}],"conditions":conditions}),201);
         let job = rig.send(
             json!({"type":"add","plate_id":rig.plate["id"],"plate_version":rig.plate["version"]}),

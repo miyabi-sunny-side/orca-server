@@ -7,7 +7,7 @@ async function fixture(page: Page) {
     id: f.q.current.plate_id,
     name: "現在の名前",
     version: 7,
-    conditions: { required_machine_profile_key: "Bambu Lab P1S 0.4 nozzle" },
+    conditions: { filament_id: null },
     models: [],
   };
   const items = Array.from({ length: 50 }, (_, i) => ({

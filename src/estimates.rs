@@ -26,6 +26,21 @@ struct Record {
     attempt_id: Option<String>,
     #[serde(default)]
     output_key: Option<String>,
+    /// Why this printer cannot print the plate: `unfit` or `material_setting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+/// The two reasons a printer cannot print a plate that the page names; other failures keep
+/// their short message only.
+fn reason(error: &Error) -> Option<&'static str> {
+    match error {
+        Error::Invalid("Models must fit together on one plate") => Some("unfit"),
+        Error::Slicer(message) if message.contains("Model is outside the printable area") => {
+            Some("unfit")
+        }
+        Error::Conflict(crate::products::MISSING_SETTING) => Some("material_setting"),
+        _ => None,
+    }
 }
 fn digest(bytes: &[u8]) -> String {
     use std::fmt::Write;
@@ -66,15 +81,15 @@ fn input_key(path: &Path) -> Result<String> {
 }
 fn presentation(record: Option<&Record>) -> Value {
     record.map_or_else(
-        || json!({"state":"pending","seconds":null,"error":null}),
-        |r| json!({"state":r.state,"seconds":r.seconds,"error":r.error}),
+        || json!({"state":"pending","seconds":null,"error":null,"reason":null}),
+        |r| json!({"state":r.state,"seconds":r.seconds,"error":r.error,"reason":r.reason}),
     )
 }
-fn load(c: &Connection, plate: &str) -> Result<Option<(Value, Record)>> {
+fn load(c: &Connection, plate: &str, printer: &str) -> Result<Option<(Value, Record)>> {
     let row: Option<(String, String)> = c
         .query_row(
-            "SELECT plan_json,record_json FROM plate_slices WHERE plate_id=?1",
-            [plate],
+            "SELECT plan_json,record_json FROM plate_slices WHERE plate_id=?1 AND printer_id=?2",
+            [plate, printer],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
@@ -86,25 +101,29 @@ fn load(c: &Connection, plate: &str) -> Result<Option<(Value, Record)>> {
         ))
     }))
 }
-fn saved_plan(c: &Connection, plate: &Plate, profiles: &Profiles) -> Result<Value> {
-    let settings = queue::slice_settings(c, profiles, plate)?;
+fn saved_plan(c: &Connection, plate: &Plate, printer: &str, profiles: &Profiles) -> Result<Value> {
+    let settings = queue::slice_settings(c, profiles, plate, printer)?;
     Ok(plan(plate, &settings, &queue::originals(c, plate)?))
 }
-pub(crate) fn plate_view(
+/// The current result of one plate on one printer.
+pub(crate) fn pair_view(
     c: &Connection,
     plate: &Plate,
+    printer: &str,
     profiles: Option<&Profiles>,
 ) -> Result<Value> {
     let planned = profiles
         .ok_or(Error::Unavailable("OrcaSlicer is not configured"))
-        .and_then(|p| saved_plan(c, plate, p));
+        .and_then(|p| saved_plan(c, plate, printer, p));
     let planned = match planned {
         Ok(plan) => plan,
         Err(error) => {
-            return Ok(json!({"state":"failed","seconds":null,"error":queue::message(&error)}));
+            return Ok(
+                json!({"state":"failed","seconds":null,"error":queue::message(&error),"reason":reason(&error)}),
+            );
         }
     };
-    let record = load(c, &plate.id)?;
+    let record = load(c, &plate.id, printer)?;
     Ok(presentation(
         record
             .as_ref()
@@ -112,9 +131,59 @@ pub(crate) fn plate_view(
             .map(|(_, r)| r),
     ))
 }
-pub(crate) fn view(c: &Connection, job: &Job, profiles: Option<&Profiles>) -> Result<Value> {
+/// Every registered printer's result for a plate, in the printer list's order.
+pub(crate) fn plate_view(
+    c: &Connection,
+    plate: &Plate,
+    profiles: Option<&Profiles>,
+) -> Result<Value> {
+    let printers = c
+        .prepare("SELECT id,name,machine_profile_key FROM printers ORDER BY name,id")?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut views = Vec::new();
+    for (id, name, machine) in printers {
+        let mut view = pair_view(c, plate, &id, profiles)?;
+        view["printer_id"] = json!(id);
+        view["printer_name"] = json!(name);
+        view["machine_profile_key"] = json!(machine);
+        views.push(view);
+    }
+    Ok(json!({"printers":views}))
+}
+/// The printer cannot place the plate's models on its bed.
+pub(crate) fn check_fit(
+    c: &Connection,
+    plate: &Plate,
+    printer: &str,
+    profiles: &Profiles,
+) -> Result<()> {
+    if pair_view(c, plate, printer, Some(profiles))?["reason"] == "unfit" {
+        return Err(Error::Conflict(
+            "The models do not fit on this printer's build plate",
+        ));
+    }
+    Ok(())
+}
+pub(crate) fn view(
+    c: &Connection,
+    job: &Job,
+    printer: &str,
+    profiles: Option<&Profiles>,
+) -> Result<Value> {
     if job.state == "queued" {
-        return plate_view(c, &crate::plates::load(c, &job.plate_id)?, profiles);
+        return pair_view(
+            c,
+            &crate::plates::load(c, &job.plate_id)?,
+            printer,
+            profiles,
+        );
     }
     // The active attempt owns its duration; later plate edits cannot replace it.
     let raw: Option<String> = c.query_row(
@@ -146,11 +215,17 @@ pub(crate) fn retry(c: &Connection, _store: &Store, job: &str) -> Result<()> {
     )?;
     retry_plate(c, &plate)
 }
-fn save_record(c: &Connection, plate: &str, planned: &Value, record: &Record) -> Result<()> {
-    // One current generation per plate. Executions already have their own frozen files.
-    c.execute("INSERT INTO plate_slices(plate_id,plan_json,record_json) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM plates WHERE id=?1 AND deleted=0)
-        ON CONFLICT(plate_id) DO UPDATE SET plan_json=excluded.plan_json,record_json=excluded.record_json,checked_at=unixepoch()",
-        params![plate,planned.to_string(),serde_json::to_string(record).map_err(std::io::Error::other)?])?;
+fn save_record(
+    c: &Connection,
+    plate: &str,
+    printer: &str,
+    planned: &Value,
+    record: &Record,
+) -> Result<()> {
+    // One current generation per plate and printer. Executions already have their own frozen files.
+    c.execute("INSERT INTO plate_slices(plate_id,printer_id,plan_json,record_json) SELECT ?1,?4,?2,?3 WHERE EXISTS(SELECT 1 FROM plates WHERE id=?1 AND deleted=0) AND EXISTS(SELECT 1 FROM printers WHERE id=?4)
+        ON CONFLICT(plate_id,printer_id) DO UPDATE SET plan_json=excluded.plan_json,record_json=excluded.record_json,checked_at=unixepoch()",
+        params![plate,planned.to_string(),serde_json::to_string(record).map_err(std::io::Error::other)?,printer])?;
     Ok(())
 }
 fn record(plate: &Plate, settings: &Resolved, state: &str) -> Record {
@@ -162,17 +237,25 @@ fn record(plate: &Plate, settings: &Resolved, state: &str) -> Record {
         id: Some(uuid::Uuid::new_v4().to_string()),
         attempt_id: None,
         output_key: None,
+        reason: None,
     }
 }
-fn current(c: &Connection, plate: &Plate, planned: &Value, profiles: &Profiles) -> bool {
+fn current(
+    c: &Connection,
+    plate: &Plate,
+    printer: &str,
+    planned: &Value,
+    profiles: &Profiles,
+) -> bool {
     crate::plates::is_deleted(c, &plate.id).is_ok_and(|deleted| !deleted)
         && crate::plates::load(c, &plate.id)
-            .and_then(|p| saved_plan(c, &p, profiles))
+            .and_then(|p| saved_plan(c, &p, printer, profiles))
             .is_ok_and(|p| &p == planned)
 }
 fn reuse(
     store: &Store,
     plate: &str,
+    printer: &str,
     key: &str,
     path: &Path,
     count: usize,
@@ -182,8 +265,8 @@ fn reuse(
         .db
         .connection()?
         .query_row(
-            "SELECT record_json,project,gcode FROM plate_slices WHERE plate_id=?1 AND input_key=?2 AND project IS NOT NULL AND gcode IS NOT NULL",
-            params![plate, key],
+            "SELECT record_json,project,gcode FROM plate_slices WHERE plate_id=?1 AND printer_id=?3 AND input_key=?2 AND project IS NOT NULL AND gcode IS NOT NULL",
+            params![plate, key, printer],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
@@ -222,6 +305,7 @@ async fn compute(
     slicer: &Slicer,
     source: Option<&Source>,
     execution: &Execution,
+    printer: &str,
     originals: Vec<Option<Vec<u8>>>,
     path: &Path,
 ) -> Result<()> {
@@ -232,7 +316,7 @@ async fn compute(
     let calculation = async {
         let count = queue::write_inputs(path, plate, settings, originals, source).await?;
         let key = input_key(path)?;
-        if let Some(mut cached) = reuse(store, &plate.id, &key, path, count, settings)? {
+        if let Some(mut cached) = reuse(store, &plate.id, printer, &key, path, count, settings)? {
             cached.state = "ready".into();
             cached.error = None;
             result = cached;
@@ -240,8 +324,8 @@ async fn compute(
         }
         {
             let c = store.db.connection()?;
-            if current(&c, plate, &planned, &slicer.profiles) {
-                save_record(&c, &plate.id, &planned, &result)?;
+            if current(&c, plate, printer, &planned, &slicer.profiles) {
+                save_record(&c, &plate.id, printer, &planned, &result)?;
             }
         }
         slicer
@@ -264,9 +348,10 @@ async fn compute(
         Err(error) => {
             result.state = "failed".into();
             result.error = Some(queue::message(&error));
+            result.reason = reason(&error).map(Into::into);
             let c = store.db.connection()?;
-            if current(&c, plate, &planned, &slicer.profiles) {
-                save_record(&c, &plate.id, &planned, &result)?;
+            if current(&c, plate, printer, &planned, &slicer.profiles) {
+                save_record(&c, &plate.id, printer, &planned, &result)?;
             }
             return Err(error);
         }
@@ -274,7 +359,7 @@ async fn compute(
     // Source content can change while Orca is running. Never publish that old result as current.
     let still_current = {
         let c = store.db.connection()?;
-        current(&c, plate, &planned, &slicer.profiles)
+        current(&c, plate, printer, &planned, &slicer.profiles)
     };
     if !still_current {
         return Ok(());
@@ -287,7 +372,7 @@ async fn compute(
             .and_then(|_| input_key(scratch.path()));
         if !verification.as_ref().is_ok_and(|latest| latest == &key) {
             let c = store.db.connection()?;
-            if current(&c, plate, &planned, &slicer.profiles) {
+            if current(&c, plate, printer, &planned, &slicer.profiles) {
                 result.state = if verification.is_err() {
                     "failed"
                 } else {
@@ -296,7 +381,7 @@ async fn compute(
                 .into();
                 result.seconds = None;
                 result.error = verification.err().map(|e| queue::message(&e));
-                save_record(&c, &plate.id, &planned, &result)?;
+                save_record(&c, &plate.id, printer, &planned, &result)?;
             }
             return Ok(());
         }
@@ -305,9 +390,9 @@ async fn compute(
     let gcode = std::fs::read(path.join("print.gcode.3mf"))?;
     let mut c = store.db.connection()?;
     let tx = c.transaction()?;
-    if current(&tx, plate, &planned, &slicer.profiles) {
-        save_record(&tx, &plate.id, &planned, &result)?;
-        tx.execute("UPDATE plate_slices SET input_key=?1,project=?2,gcode=?3,checked_at=unixepoch(),generated_at=CASE WHEN ?4 OR generated_at IS NULL THEN unixepoch() ELSE generated_at END WHERE plate_id=?5",params![key,project,gcode,generated,plate.id])?;
+    if current(&tx, plate, printer, &planned, &slicer.profiles) {
+        save_record(&tx, &plate.id, printer, &planned, &result)?;
+        tx.execute("UPDATE plate_slices SET input_key=?1,project=?2,gcode=?3,checked_at=unixepoch(),generated_at=CASE WHEN ?4 OR generated_at IS NULL THEN unixepoch() ELSE generated_at END WHERE plate_id=?5 AND printer_id=?6",params![key,project,gcode,generated,plate.id,printer])?;
     }
     tx.commit()?;
     Ok(())
@@ -317,22 +402,24 @@ pub(crate) async fn prepare(
     slicer: &Slicer,
     source: Option<&Source>,
     execution: &Execution,
+    printer: &str,
     originals: Vec<Option<Vec<u8>>>,
     path: &Path,
 ) -> Result<()> {
     let _lock = store.slice_lock.lock().await;
-    compute(store, slicer, source, execution, originals, path).await
+    compute(store, slicer, source, execution, printer, originals, path).await
 }
-fn pending(store: &Store, slicer: &Slicer) -> Result<Vec<String>> {
+/// Every plate on every registered printer whose result is missing, stale or due a recheck.
+fn pending(store: &Store, slicer: &Slicer) -> Result<Vec<(String, String)>> {
     let c = store.db.connection()?;
-    let ids = c
-        .prepare("SELECT id FROM plates WHERE deleted=0 ORDER BY id")?
-        .query_map([], |r| r.get::<_, String>(0))?
+    let pairs = c
+        .prepare("SELECT p.id,r.id FROM plates p CROSS JOIN printers r WHERE p.deleted=0 ORDER BY p.id,r.id")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut pending = Vec::new();
-    for id in ids {
+    for (id, printer) in pairs {
         let plate = crate::plates::load(&c, &id)?;
-        let planned = saved_plan(&c, &plate, &slicer.profiles);
+        let planned = saved_plan(&c, &plate, &printer, &slicer.profiles);
         let planned = match planned {
             Ok(p) => p,
             Err(error) => {
@@ -344,20 +431,24 @@ fn pending(store: &Store, slicer: &Slicer) -> Result<Vec<String>> {
                     id: None,
                     attempt_id: None,
                     output_key: None,
+                    reason: reason(&error).map(Into::into),
                 };
-                if load(&c, &id)?.as_ref().is_none_or(|(_, previous)| {
-                    previous.state != record.state || previous.error != record.error
-                }) {
-                    save_record(&c, &id, &Value::Null, &record)?;
+                if load(&c, &id, &printer)?
+                    .as_ref()
+                    .is_none_or(|(_, previous)| {
+                        previous.state != record.state || previous.error != record.error
+                    })
+                {
+                    save_record(&c, &id, &printer, &Value::Null, &record)?;
                 }
                 continue;
             }
         };
-        let previous = load(&c, &id)?;
+        let previous = load(&c, &id, &printer)?;
         let due = c
             .query_row(
-                "SELECT checked_at<=unixepoch()-?2 FROM plate_slices WHERE plate_id=?1",
-                params![id, RECHECK_SECONDS],
+                "SELECT checked_at<=unixepoch()-?2 FROM plate_slices WHERE plate_id=?1 AND printer_id=?3",
+                params![id, RECHECK_SECONDS, printer],
                 |r| r.get::<_, bool>(0),
             )
             .optional()?
@@ -367,7 +458,7 @@ fn pending(store: &Store, slicer: &Slicer) -> Result<Vec<String>> {
             .is_none_or(|(p, r)| p != &planned || r.state == "pending")
             || due
         {
-            pending.push(id);
+            pending.push((id, printer));
         }
     }
     Ok(pending)
@@ -384,7 +475,7 @@ pub(crate) fn start(store: Store, slicer: Option<Slicer>, source: Option<Source>
         // ponytail: one CLI slot and one cache worker; use per-plate locks if parallel slicing is introduced.
         loop {
             if let Ok(ids) = pending(&store, &slicer) {
-                for id in ids {
+                for (id, printer) in ids {
                     let _lock = store.slice_lock.lock().await;
                     let work = (|| -> Result<_> {
                         let c = store.db.connection()?;
@@ -392,7 +483,8 @@ pub(crate) fn start(store: Store, slicer: Option<Slicer>, source: Option<Source>
                             return Err(Error::NotFound);
                         }
                         let plate = crate::plates::load(&c, &id)?;
-                        let settings = queue::slice_settings(&c, &slicer.profiles, &plate)?;
+                        let settings =
+                            queue::slice_settings(&c, &slicer.profiles, &plate, &printer)?;
                         let originals = queue::originals(&c, &plate)?;
                         Ok((
                             Execution {
@@ -410,6 +502,7 @@ pub(crate) fn start(store: Store, slicer: Option<Slicer>, source: Option<Source>
                                 &slicer,
                                 source.as_ref(),
                                 &execution,
+                                &printer,
                                 originals,
                                 path.path(),
                             )
@@ -442,4 +535,26 @@ pub(crate) fn actual(
         return Err(Error::Conflict("Execution is no longer active"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_placement_and_missing_material_settings_name_a_reason() {
+        for (error, expected) in [
+            (Error::Invalid("Models must fit together on one plate"), Some("unfit")),
+            (
+                Error::Slicer("OrcaSlicer slice: Model is outside the printable area (exit status: 1; reference p)".into()),
+                Some("unfit"),
+            ),
+            (Error::Conflict(crate::products::MISSING_SETTING), Some("material_setting")),
+            (Error::Slicer("OrcaSlicer arrange: CLI exited abnormally (exit status: 1; reference p)".into()), None),
+            (Error::Invalid("OrcaSlicer did not slice every model on the plate"), None),
+            (Error::Upstream("Model source is unavailable"), None),
+            (Error::Timeout, None),
+        ] {
+            assert_eq!(reason(&error), expected, "{error:?}");
+        }
+    }
 }

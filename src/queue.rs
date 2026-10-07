@@ -348,7 +348,7 @@ struct Preparation {
 }
 
 fn jobs(c: &Connection, pid: &str) -> Result<Vec<Job>> {
-    Ok(c.prepare("SELECT j.id,j.plate_id,coalesce(e.name,p.name),coalesce(e.ams_slot_id,''),coalesce(e.filament_id,p.filament_id,''),coalesce(e.required_machine_profile_key,p.required_machine_profile_key,''),coalesce(e.process_profile_key,p.process_profile_key,''),coalesce(e.bed_type,p.bed_type,''),j.state,j.attempt_id,e.artifact_path,j.last_error,json_extract(e.attempt_json,'$.failure') FROM print_jobs j JOIN plates p ON p.id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('completed','cancelled') ORDER BY j.position,j.id")?
+    Ok(c.prepare("SELECT j.id,j.plate_id,coalesce(e.name,p.name),coalesce(e.ams_slot_id,''),coalesce(e.filament_id,p.filament_id,''),coalesce(e.required_machine_profile_key,r.machine_profile_key),coalesce(e.process_profile_key,r.default_process_profile_key),coalesce(e.bed_type,r.bed_type),j.state,j.attempt_id,e.artifact_path,j.last_error,json_extract(e.attempt_json,'$.failure') FROM print_jobs j JOIN plates p ON p.id=j.plate_id JOIN printers r ON r.id=j.printer_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.printer_id=?1 AND j.state NOT IN ('completed','cancelled') ORDER BY j.position,j.id")?
         .query_map([pid],|r|Ok(Job{id:r.get(0)?,plate_id:r.get(1)?,name:r.get(2)?,specification:Specification{feed:if r.get::<_,Option<String>>(9)?.is_some()&&r.get::<_,String>(3)?.is_empty(){Feed::External}else{Feed::Ams},ams_slot_id:r.get(3)?,filament_id:r.get(4)?,required_machine_profile_key:r.get(5)?,process_profile_key:r.get(6)?,bed_type:r.get(7)?},state:r.get(8)?,attempt_id:r.get(9)?,artifact_path:r.get(10)?,last_error:r.get(11)?,failure:r.get::<_,Option<String>>(12)?.and_then(|s|serde_json::from_str(&s).ok())}))?
         .collect::<std::result::Result<_,_>>()?)
 }
@@ -406,7 +406,7 @@ pub(crate) fn resolve(
     profiles: &Profiles,
     plate: &crate::plates::Plate,
 ) -> Result<Resolved> {
-    let mut settings = slice_settings(c, profiles, plate)?;
+    let mut settings = slice_settings(c, profiles, plate, pid)?;
     if s.feed == Feed::External {
         settings.external = true;
         return Ok(settings);
@@ -450,15 +450,13 @@ pub(crate) fn slice_settings(
     c: &Connection,
     profiles: &Profiles,
     plate: &crate::plates::Plate,
+    printer: &str,
 ) -> Result<Resolved> {
     plate.ensure_printable()?;
     let conditions = &plate.conditions;
-    let missing =
-        || Error::Conflict("Complete the plate machine, material, process and bed conditions");
-    let machine = conditions
-        .required_machine_profile_key
-        .as_deref()
-        .ok_or_else(missing)?;
+    let missing = || Error::Conflict("Select the plate material");
+    let (machine, process, bed) = printer_conditions(c, printer)?;
+    let machine = machine.as_str();
     let material = plate.roles().first().copied().ok_or_else(missing)?;
     let filament_id = conditions.role_id(material)?;
     let slice_binding = |id: &str| -> Result<Binding> {
@@ -477,9 +475,9 @@ pub(crate) fn slice_settings(
     let setting = main.setting.as_ref().expect("resolved setting");
     let selection = Selection {
         machine: machine.to_owned(),
-        process: conditions.process_profile_key.clone().ok_or_else(missing)?,
+        process,
         filament: setting.base_profile_key.clone(),
-        bed: conditions.bed_type.clone().ok_or_else(missing)?,
+        bed,
     };
     let mut resolved = profiles.resolved(&selection)?;
     let primary = crate::support::material_profile(
@@ -574,6 +572,16 @@ fn available(
     resolved.check_bindings(c, device, status)?;
     Ok(resolved)
 }
+/// The machine, default process and bed the printer slices with.
+pub(crate) fn printer_conditions(c: &Connection, pid: &str) -> Result<(String, String, String)> {
+    c.query_row(
+        "SELECT machine_profile_key,default_process_profile_key,bed_type FROM printers WHERE id=?1",
+        [pid],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()?
+    .ok_or(Error::NotFound)
+}
 pub(crate) fn planned(
     c: &Connection,
     pid: &str,
@@ -582,36 +590,21 @@ pub(crate) fn planned(
 ) -> Result<Specification> {
     plate.ensure_printable()?;
     let condition = &plate.conditions;
-    let missing =
-        || Error::Conflict("Complete the plate machine, material, process and bed conditions");
-    let machine = condition
-        .required_machine_profile_key
-        .as_ref()
-        .ok_or_else(missing)?;
     let roles = plate.roles();
     let filament = roles
         .first()
-        .ok_or_else(missing)
+        .ok_or(Error::Conflict("Select the plate material"))
         .and_then(|r| condition.role_id(*r))?;
     for role in roles {
         condition.role_id(role)?;
     }
-    let process = condition.process_profile_key.as_ref().ok_or_else(missing)?;
-    let bed = condition.bed_type.as_ref().ok_or_else(missing)?;
-    let registered: String = c.query_row(
-        "SELECT machine_profile_key FROM printers WHERE id=?1",
-        [pid],
-        |r| r.get(0),
-    )?;
-    if machine != &registered {
-        return Err(Error::Conflict(
-            "Required machine or nozzle differs from the registered configuration",
-        ));
-    }
+    let (machine, process, bed) = printer_conditions(c, pid)?;
+    // Name the missing setting rather than an empty AMS when the printer's machine changed.
+    crate::products::load_setting(c, filament, &machine)?;
     let ams_slot_id = match feed {
         Feed::External => String::new(),
         Feed::Ams => {
-            crate::ams::resolve(c, pid, filament, machine)?
+            crate::ams::resolve(c, pid, filament, &machine)?
                 .into_iter()
                 .find(|s| s.ams_id < 4)
                 .ok_or(Error::Conflict(
@@ -624,9 +617,9 @@ pub(crate) fn planned(
         feed,
         ams_slot_id,
         filament_id: filament.to_owned(),
-        required_machine_profile_key: machine.clone(),
-        process_profile_key: process.clone(),
-        bed_type: bed.clone(),
+        required_machine_profile_key: machine,
+        process_profile_key: process,
+        bed_type: bed,
     })
 }
 /// Whether the external spool can print `materials` (one per filament) now.
@@ -869,20 +862,17 @@ impl Service {
         let mut waiting = Vec::new();
         for job in list.iter().filter(|j| j.state == "queued") {
             let mut value = json!(job);
-            value["estimate"] =
-                crate::estimates::view(c, job, self.slicer.as_ref().map(|s| s.profiles.as_ref()))?;
+            value["estimate"] = crate::estimates::view(
+                c,
+                job,
+                &self.device.id,
+                self.slicer.as_ref().map(|s| s.profiles.as_ref()),
+            )?;
             let plate = crate::plates::load(c, &job.plate_id)?;
             value["name"] = json!(plate.name);
             value["plate_version"] = json!(plate.version);
             value["plate_deleted"] = json!(crate::plates::is_deleted(c, &job.plate_id)?);
-            for key in [
-                "required_machine_profile_key",
-                "filament_id",
-                "process_profile_key",
-                "bed_type",
-            ] {
-                value[key] = json!(plate.conditions)[key].clone();
-            }
+            value["filament_id"] = json!(plate.conditions.filament_id);
             value["ams_slot_id"] = Value::Null;
             value["feed"] = json!(printer_feed(status));
             let hold = self.plan(c, &plate, status).map(|spec| {
@@ -929,6 +919,7 @@ impl Service {
                 value["estimate"] = crate::estimates::view(
                     c,
                     job,
+                    &self.device.id,
                     self.slicer.as_ref().map(|s| s.profiles.as_ref()),
                 )?;
                 // What can be skipped in the running print; the printer reports what it skipped.
@@ -1277,6 +1268,7 @@ impl Service {
             .as_ref()
             .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
         let specification = planned(c, &self.device.id, plate, printer_feed(status))?;
+        crate::estimates::check_fit(c, plate, &self.device.id, &slicer.profiles)?;
         available(
             c,
             &self.device,
@@ -1361,6 +1353,7 @@ impl Service {
                 .ok_or(Error::Unavailable("OrcaSlicer is not configured"))?,
             self.source.as_ref(),
             &execution,
+            &self.device.id,
             originals,
             &path,
         )
@@ -1786,7 +1779,7 @@ mod tests {
         .unwrap();
         c.execute("UPDATE ams_slots SET filament_id=NULL", [])
             .unwrap();
-        let offline = slice_settings(&c, profiles, &plate).unwrap();
+        let offline = slice_settings(&c, profiles, &plate, "p1").unwrap();
         assert_eq!(offline.profiles, original.profiles);
         assert_eq!(offline.roles, original.roles);
         assert!(planned(&c, "p1", &plate, Feed::Ams).is_err());
@@ -2009,10 +2002,7 @@ mod tests {
                 None,
                 crate::plates::Edit {
                     conditions: crate::plates::Conditions {
-                        required_machine_profile_key: Some(MACHINE.into()),
                         filament_id: Some("pla".into()),
-                        process_profile_key: Some(Selection::default().process),
-                        bed_type: Some(crate::profiles::BEDS[0].into()),
                         strength: crate::strength::Strength::default(),
                         brim_enabled: false,
                         ..Default::default()
@@ -2052,7 +2042,7 @@ mod tests {
             .unwrap()
     }
     #[tokio::test]
-    async fn plate_conditions_gate_addition_and_freeze_only_at_preparation() {
+    async fn printer_conditions_resolve_waiting_jobs_and_freeze_only_at_preparation() {
         let root = tempfile::tempdir().unwrap();
         let s = service(root.path(), "one").await;
         let raw =
@@ -2064,28 +2054,14 @@ mod tests {
         let add = || {
             command(&s, serde_json::from_value(json!({"type":"add","plate_id":plate.id,"plate_version":s.store.get(&plate.id).unwrap().version})).unwrap())
         };
+        // The material is the only condition the plate must name; the printer has the rest.
         assert!(s.mutate(&add(), &status()).is_err());
-        let configured = json!({"required_machine_profile_key":MACHINE,"filament_id":"pla","process_profile_key":Selection::default().process,"bed_type":crate::profiles::BEDS[0]});
-        for missing in [
-            "required_machine_profile_key",
-            "filament_id",
-            "bed_type",
-            "process_profile_key",
-        ] {
-            let mut conditions = configured.clone();
-            conditions[missing] = Value::Null;
-            if missing == "required_machine_profile_key" {
-                conditions["process_profile_key"] = Value::Null;
-            }
-            edit_conditions(&s, &plate.id, conditions);
-            assert!(s.mutate(&add(), &status()).is_err(), "{missing}");
-        }
+        let plate = edit_conditions(&s, &plate.id, json!({"filament_id":"pla"}));
         let set_conditions = |bed: &str| {
-            let mut value = configured.clone();
-            value["bed_type"] = json!(bed);
-            edit_conditions(&s, &plate.id, value)
+            let mut device = s.device.clone();
+            device.settings.bed_type = bed.into();
+            s.store.db.save(&device).unwrap();
         };
-        set_conditions(crate::profiles::BEDS[0]);
         let mut stale = status();
         stale.synchronized = false;
         assert!(s.mutate(&add(), &stale).is_err());
@@ -2115,13 +2091,16 @@ mod tests {
                 cleared: true,
             },
         );
-        let changed = set_conditions(crate::profiles::BEDS[3]);
-        assert!(s.mutate(&before, &status()).is_err());
-        let prep = s
-            .mutate(&command(&s, before.action.clone()), &status())
-            .unwrap()
-            .unwrap();
-        assert_eq!(prep.execution.plate.version, changed.version);
+        // Changing the printer's bed changes the waiting job without touching the queue fence.
+        set_conditions(crate::profiles::BEDS[3]);
+        assert_eq!(
+            jobs(&s.store.db.connection().unwrap(), "one").unwrap()[0]
+                .specification
+                .bed_type,
+            crate::profiles::BEDS[3]
+        );
+        let prep = s.mutate(&before, &status()).unwrap().unwrap();
+        assert_eq!(prep.execution.plate.version, plate.version);
         assert_eq!(
             prep.execution.settings.selection.bed,
             crate::profiles::BEDS[3]

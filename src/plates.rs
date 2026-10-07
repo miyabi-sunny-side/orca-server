@@ -127,12 +127,9 @@ fn is_primary(roles: &[crate::model_import::Role]) -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Conditions {
-    pub required_machine_profile_key: Option<String>,
     pub filament_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secondary_filament_id: Option<String>,
-    pub process_profile_key: Option<String>,
-    pub bed_type: Option<String>,
     pub brim_enabled: bool,
     pub support_enabled: bool,
     pub support_interface_filament_id: Option<String>,
@@ -204,19 +201,8 @@ impl Conditions {
         );
         Ok(())
     }
-    fn validate(
-        &self,
-        c: &rusqlite::Connection,
-        profiles: Option<&crate::profiles::Profiles>,
-    ) -> Result<()> {
+    fn validate(&self, c: &rusqlite::Connection) -> Result<()> {
         self.strength.validate()?;
-        if self
-            .bed_type
-            .as_ref()
-            .is_some_and(|bed| !crate::profiles::BEDS.contains(&bed.as_str()))
-        {
-            return Err(Error::Invalid("Unknown bed type"));
-        }
         for id in [
             &self.filament_id,
             &self.secondary_filament_id,
@@ -227,48 +213,32 @@ impl Conditions {
         {
             crate::products::product_id(c, id)?;
         }
-        if let Some(machine) = &self.required_machine_profile_key {
-            if !c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM printers WHERE machine_profile_key=?1)",
-                [machine],
-                |r| r.get::<_, bool>(0),
-            )? {
-                return Err(Error::Conflict(
-                    "Register a matching machine and nozzle before saving these conditions",
-                ));
-            }
-            let profiles = profiles.ok_or(Error::Unavailable("OrcaSlicer is not configured"))?;
-            profiles.machine(machine)?;
-            if let Some(process) = &self.process_profile_key {
-                profiles.resolve_process(machine, process, self)?;
-            }
-            for id in self
-                .filament_id
-                .as_deref()
-                .into_iter()
-                .chain(self.interface_id())
-            {
-                let setting = crate::products::load_setting(c, id, machine)?;
-                let filament = crate::database::load_filaments(c)?
-                    .into_iter()
-                    .find(|f| f.id == id)
-                    .ok_or(Error::NotFound)?;
-                profiles.resolve_filament(&setting, &filament.data.material)?;
-            }
-        } else if self.process_profile_key.is_some() {
-            return Err(Error::Invalid(
-                "Select the required machine before a process profile",
-            ));
-        }
         Ok(())
     }
+}
+/// Executions frozen before schema 24 also stored the machine, process and bed in the plate.
+/// The printer owns them now; the frozen execution keeps its own copy in `settings.selection`.
+fn stored_conditions<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Conditions, D::Error> {
+    let mut value = serde_json::Value::deserialize(d)?;
+    if let Some(map) = value.as_object_mut() {
+        for key in [
+            "required_machine_profile_key",
+            "process_profile_key",
+            "bed_type",
+        ] {
+            map.remove(key);
+        }
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Plate {
     pub id: String,
     pub version: i64,
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "stored_conditions")]
     pub conditions: Conditions,
     pub models: Vec<Model>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -434,7 +404,7 @@ impl Store {
                 .min()
                 .expect("validated roles"),
         );
-        input.conditions.validate(&tx, self.profiles.as_deref())?;
+        input.conditions.validate(&tx)?;
         tx.execute(
             "INSERT INTO plates(id,name) VALUES (?1,?2)",
             rusqlite::params![id, input.name.trim()],
@@ -492,7 +462,7 @@ impl Store {
         validate_items(&models)?;
         let mut c = self.db.connection()?;
         let tx = c.transaction()?;
-        conditions.validate(&tx, self.profiles.as_deref())?;
+        conditions.validate(&tx)?;
         let id = if let Some(id) = id {
             valid_id(id)?;
             if tx.execute(
@@ -696,8 +666,8 @@ pub(crate) fn is_deleted(c: &rusqlite::Connection, id: &str) -> Result<bool> {
 }
 pub(crate) fn load(c: &rusqlite::Connection, id: &str) -> Result<Plate> {
     let (name, version, conditions) = c
-        .query_row("SELECT name,version,required_machine_profile_key,filament_id,process_profile_key,bed_type,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled,support_enabled,support_interface_filament_id,secondary_filament_id,start_options_json FROM plates WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?, Conditions { required_machine_profile_key:r.get(2)?,filament_id:r.get(3)?,process_profile_key:r.get(4)?,bed_type:r.get(5)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(6)?,sparse_infill_density:r.get(7)?,wall_loops:r.get(8)? }, brim_enabled:r.get(9)?,support_enabled:r.get(10)?,support_interface_filament_id:r.get(11)?,secondary_filament_id:r.get(12)?,start_options:r.get::<_,Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }))
+        .query_row("SELECT name,version,filament_id,sparse_infill_pattern,sparse_infill_density,wall_loops,brim_enabled,support_enabled,support_interface_filament_id,secondary_filament_id,start_options_json FROM plates WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Conditions { filament_id:r.get(2)?,strength:crate::strength::Strength { sparse_infill_pattern:r.get(3)?,sparse_infill_density:r.get(4)?,wall_loops:r.get(5)? }, brim_enabled:r.get(6)?,support_enabled:r.get(7)?,support_interface_filament_id:r.get(8)?,secondary_filament_id:r.get(9)?,start_options:r.get::<_,Option<String>>(10)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default() }))
         })
         .optional()?
         .ok_or(Error::NotFound)?;
@@ -733,7 +703,7 @@ pub(crate) fn migrate_conditions(c: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 fn save_conditions(c: &rusqlite::Connection, id: &str, v: &Conditions) -> Result<()> {
-    c.execute("UPDATE plates SET required_machine_profile_key=?1,filament_id=?2,process_profile_key=?3,bed_type=?4,sparse_infill_pattern=?6,sparse_infill_density=?7,wall_loops=?8,brim_enabled=?9,support_enabled=?10,support_interface_filament_id=?11,secondary_filament_id=?12,start_options_json=?13 WHERE id=?5", rusqlite::params![v.required_machine_profile_key,v.filament_id,v.process_profile_key,v.bed_type,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled,v.support_enabled,v.support_interface_filament_id,v.secondary_filament_id,serde_json::to_string(&v.start_options).map_err(std::io::Error::other)?])?;
+    c.execute("UPDATE plates SET filament_id=?1,sparse_infill_pattern=?3,sparse_infill_density=?4,wall_loops=?5,brim_enabled=?6,support_enabled=?7,support_interface_filament_id=?8,secondary_filament_id=?9,start_options_json=?10 WHERE id=?2", rusqlite::params![v.filament_id,id,v.strength.sparse_infill_pattern,v.strength.sparse_infill_density,v.strength.wall_loops,v.brim_enabled,v.support_enabled,v.support_interface_filament_id,v.secondary_filament_id,serde_json::to_string(&v.start_options).map_err(std::io::Error::other)?])?;
     Ok(())
 }
 fn save_roles(
@@ -855,7 +825,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
         let mut input = edit("天馬ルームケース: base前", 10);
-        input.conditions.bed_type = Some("Textured PEI Plate".into());
         input.conditions.strength.wall_loops = Some(4);
         input.conditions.strength.sparse_infill_density = Some(30.0);
         input.conditions.brim_enabled = true;
@@ -1051,7 +1020,8 @@ mod tests {
         let store = Store::open(root.path()).unwrap();
         let kept = store.edit(None, edit("Philips holder", 1)).unwrap();
         let other = store.edit(None, edit("Philips holder spare", 1)).unwrap();
-        store.db.connection().unwrap().execute("INSERT INTO plate_slices(plate_id,plan_json,record_json) VALUES (?1,'{}','{\"state\":\"ready\"}')", [&other.id]).unwrap();
+        store.db.connection().unwrap().execute("INSERT INTO printers(id,name,host,serial,access_code,tls_certificate,machine_profile_key,default_process_profile_key,bed_type,nozzle_material,mqtt_port,ftps_port,start_timeout_secs) VALUES ('p','P','h','s','a','t','m','p','b','unknown',1,1,1)", []).unwrap();
+        store.db.connection().unwrap().execute("INSERT INTO plate_slices(plate_id,printer_id,plan_json,record_json) VALUES (?1,'p','{}','{\"state\":\"ready\"}')", [&other.id]).unwrap();
         let slice = |id: &str| -> Option<String> {
             store
                 .db
@@ -1252,13 +1222,13 @@ mod tests {
     fn nullable_conditions_survive_save_reload_and_legacy_snapshots() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
-        let raw = serde_json::json!({"name":"unconfigured", "models":[{"name":"part.stl","source":"part.stl","quantity":1}], "conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null}});
+        let raw = serde_json::json!({"name":"unconfigured", "models":[{"name":"part.stl","source":"part.stl","quantity":1}], "conditions":{"filament_id":null}});
         let saved = store
             .edit(None, serde_json::from_value(raw).unwrap())
             .unwrap();
         let value = serde_json::to_value(&saved).unwrap();
         assert!(value["conditions"].is_object());
-        assert_eq!(value["conditions"].as_object().unwrap().len(), 11);
+        assert_eq!(value["conditions"].as_object().unwrap().len(), 8);
         assert!(
             value["conditions"]
                 .as_object()
@@ -1285,7 +1255,7 @@ mod tests {
         let c = store.db.connection().unwrap();
         assert_eq!(
             c.query_row(
-                "SELECT required_machine_profile_key,filament_id,bed_type FROM plates",
+                "SELECT filament_id,secondary_filament_id,support_interface_filament_id FROM plates",
                 [],
                 |r| Ok((
                     r.get::<_, Option<String>>(0)?,

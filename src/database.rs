@@ -146,7 +146,7 @@ impl Database {
                 tx.pragma_update(None, "user_version", 1)
                     .map_err(Error::from)?;
             }
-            1..=23 => {}
+            1..=24 => {}
             _ => {
                 return Err(Error::Unavailable(
                     "Database schema is newer than this server; use a compatible version",
@@ -307,6 +307,9 @@ impl Database {
         }
         if version < 23 {
             tx.execute_batch("ALTER TABLE plates ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)); PRAGMA user_version=23;")?;
+        }
+        if version < 24 {
+            tx.execute_batch(include_str!("../migrations/024-printer-slices.sql"))?;
         }
         check_references(&tx)?;
         tx.commit().map_err(Error::from)?;
@@ -582,6 +585,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
         let add = r#"{"epoch":"e","generation":3,"request_id":"r","action":{"type":"add","plate_id":"p","plate_version":1,"feed":"external"}}"#;
+        crate::legacy_schema::plate_conditions_v23(&db.connection().unwrap());
         db.connection().unwrap().execute_batch(&format!("INSERT INTO plates(id,name) VALUES ('p','P'); INSERT INTO print_jobs(id,printer_id,plate_id,state,position) VALUES ('a','stable-id','p','queued',0),('b','stable-id','p','needs_attention',1); ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams' CHECK(feed IN ('ams','external')); UPDATE print_jobs SET feed='external' WHERE id='b'; UPDATE printers SET queue_request='{add}'; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=21;")).unwrap();
         drop(db);
         let reopen = || {
@@ -622,6 +626,7 @@ mod tests {
         );
         // A recorded feed change has no replacement; the next request starts afresh.
         let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+        crate::legacy_schema::plate_conditions_v23(&c);
         c.execute_batch(r#"ALTER TABLE print_jobs ADD COLUMN feed TEXT NOT NULL DEFAULT 'ams'; UPDATE printers SET queue_request='{"epoch":"e","generation":4,"request_id":"s","action":{"type":"feed","job_id":"a","feed":"external"}}'; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=21;"#).unwrap();
         drop(c);
         assert_eq!(reopen().1, None);
@@ -630,6 +635,7 @@ mod tests {
     fn version_23_keeps_existing_plates_unarchived_and_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path(), || Ok(Some(device()))).unwrap();
+        crate::legacy_schema::plate_conditions_v23(&db.connection().unwrap());
         db.connection().unwrap().execute_batch("ALTER TABLE plates DROP COLUMN archived; INSERT INTO plates(id,name,version) VALUES ('kept','Kept',3),('gone','Gone',1); UPDATE plates SET deleted=1 WHERE id='gone'; PRAGMA user_version=22;").unwrap();
         drop(db);
         let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
@@ -652,6 +658,182 @@ mod tests {
             ]
         );
     }
+    /// Schema 23 with two printers, plates on the first printer's conditions and frozen work.
+    fn legacy_v23(root: &Path) {
+        let db = Database::open(root, || Ok(Some(device()))).unwrap();
+        let c = db.connection().unwrap();
+        let mut other = device();
+        other.id = "other".into();
+        other.settings.serial = "OTHER".into();
+        other.settings.bed_type = crate::profiles::BEDS[1].into();
+        save(&c, &other).unwrap();
+        crate::legacy_schema::plate_conditions_v23(&c);
+        let (machine, process, bed) = (
+            crate::profiles::PRINTER,
+            "0.20mm Standard @BBL X1C",
+            crate::profiles::BEDS[0],
+        );
+        c.execute_batch("INSERT INTO filament_products VALUES ('pla','PLA','Fixture','PLA',NULL); INSERT INTO filaments VALUES ('pla','pla','PLA','FFFFFFFF');").unwrap();
+        for (id, deleted, process, timelapse) in [
+            ("same", false, Some(process), true),
+            (
+                "other-process",
+                false,
+                Some("0.16mm Optimal @BBL X1C"),
+                false,
+            ),
+            ("gone", true, Some(process), false),
+            ("blank", false, None, false),
+        ] {
+            c.execute("INSERT INTO plates(id,name,version,deleted,filament_id,required_machine_profile_key,process_profile_key,bed_type,wall_loops,brim_enabled,start_options_json) VALUES (?1,?1,4,?2,'pla',?3,?4,?5,4,1,?6)",
+                params![id,deleted,process.map(|_|machine),process,process.map(|_|bed),format!(r#"{{"bed_leveling":true,"flow_calibration":true,"timelapse":{timelapse},"vibration_calibration":false}}"#)]).unwrap();
+            c.execute("INSERT INTO plate_items(id,plate_id,position,name,source_kind,model_key,quantity) VALUES (?1,?1,0,'part.stl','scad','part.stl',3)", [id]).unwrap();
+            c.execute("INSERT INTO plate_slices(plate_id,plan_json,input_key,record_json,project,gcode,checked_at,generated_at) VALUES (?1,'{\"plan\":1}','key','{\"state\":\"ready\",\"seconds\":1140}',X'50',X'47',5,6)", [id]).unwrap();
+        }
+        c.execute_batch(&format!(r#"INSERT INTO print_executions(id,job_id,printer_id,plate_id,name,ams_slot_id,filament_id,required_machine_profile_key,process_profile_key,bed_type,artifact_path,execution_json,attempt_json)
+                VALUES ('attempt','printing','stable-id','same','same','slot','pla','{machine}','{process}','{bed}','jobs/printing/attempt','{{"plate":{{"conditions":{{"required_machine_profile_key":"{machine}"}}}}}}','{{"phase":"printing"}}');
+            INSERT INTO print_jobs(id,printer_id,plate_id,state,position,attempt_id) VALUES ('printing','stable-id','same','printing',0,'attempt'),('waiting','stable-id','same','queued',1,NULL),('waiting-gone','stable-id','gone','queued',2,NULL);
+            UPDATE printers SET queue_generation=7,queue_request='{{"request_id":"r"}}' WHERE id='stable-id';"#)).unwrap();
+    }
+    fn rows(c: &Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut query = c.prepare(sql).unwrap();
+        let width = query.column_count();
+        query
+            .query_map([], |r| (0..width).map(|i| r.get(i)).collect())
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+    const FROZEN: &str = "SELECT * FROM print_executions ORDER BY id";
+    type Slice = (String, String, Vec<u8>, Vec<u8>, String);
+    const QUEUE: &str = "SELECT j.id,j.state,j.position,j.attempt_id,p.queue_generation,p.queue_request FROM print_jobs j JOIN printers p ON p.id=j.printer_id ORDER BY j.position";
+    #[test]
+    fn version_24_moves_conditions_to_printers_and_slices_to_matching_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_v23(dir.path());
+        let (frozen, queue) = {
+            let c = Connection::open(dir.path().join("orca.sqlite3")).unwrap();
+            (rows(&c, FROZEN), rows(&c, QUEUE))
+        };
+        let db = Database::open(dir.path(), || panic!("must not reimport")).unwrap();
+        let c = db.connection().unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            24
+        );
+        let dropped: i64 = c.query_row("SELECT count(*) FROM pragma_table_info('plates') WHERE name IN ('required_machine_profile_key','process_profile_key','bed_type')", [], |r| r.get(0)).unwrap();
+        assert_eq!(dropped, 0);
+        // A result moves to every printer whose conditions it was sliced with; others recompute.
+        let slices: Vec<Slice> = c
+            .prepare("SELECT plate_id,printer_id,project,gcode,record_json FROM plate_slices ORDER BY plate_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let ready = r#"{"state":"ready","seconds":1140}"#.to_owned();
+        assert_eq!(
+            slices,
+            [
+                (
+                    "gone".into(),
+                    "stable-id".into(),
+                    b"P".to_vec(),
+                    b"G".to_vec(),
+                    ready.clone()
+                ),
+                (
+                    "same".into(),
+                    "stable-id".into(),
+                    b"P".to_vec(),
+                    b"G".to_vec(),
+                    ready
+                )
+            ]
+        );
+        assert_eq!(rows(&c, FROZEN), frozen);
+        assert_eq!(rows(&c, QUEUE), queue);
+        let plate = crate::plates::load(&c, "same").unwrap();
+        assert_eq!((plate.version, plate.models[0].quantity), (4, 3));
+        assert_eq!(
+            serde_json::to_value(&plate.conditions).unwrap(),
+            serde_json::json!({
+                "filament_id":"pla","brim_enabled":true,"support_enabled":false,"support_interface_filament_id":null,
+                "sparse_infill_pattern":null,"sparse_infill_density":null,"wall_loops":4,
+                "start_options":{"bed_leveling":true,"flow_calibration":true,"timelapse":true,"vibration_calibration":false}
+            })
+        );
+        // Frozen executions still name the machine inside their plate; they keep loading.
+        let mut legacy = serde_json::to_value(&plate).unwrap();
+        legacy["conditions"]["required_machine_profile_key"] = crate::profiles::PRINTER.into();
+        legacy["conditions"]["process_profile_key"] = "0.20mm Standard @BBL X1C".into();
+        legacy["conditions"]["bed_type"] = crate::profiles::BEDS[0].into();
+        assert_eq!(
+            serde_json::from_value::<crate::plates::Plate>(legacy).unwrap(),
+            plate
+        );
+        // New input naming them is rejected rather than silently ignored.
+        assert!(
+            serde_json::from_value::<crate::plates::Conditions>(
+                serde_json::json!({"bed_type":crate::profiles::BEDS[0]})
+            )
+            .is_err()
+        );
+        // Removing a printer removes only its results.
+        drop(c);
+        db.delete("stable-id").unwrap_err();
+        db.connection()
+            .unwrap()
+            .execute_batch("DELETE FROM print_jobs; DELETE FROM print_executions;")
+            .unwrap();
+        db.delete("stable-id").unwrap();
+        let left: i64 = db
+            .connection()
+            .unwrap()
+            .query_row("SELECT count(*) FROM plate_slices", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+    #[test]
+    fn version_24_failure_keeps_the_previous_schema_and_data() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_v23(dir.path());
+        let path = dir.path().join("orca.sqlite3");
+        // An index makes dropping the column fail after the slices were already copied.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE INDEX legacy_bed ON plates(bed_type)")
+            .unwrap();
+        let before = {
+            let c = Connection::open(&path).unwrap();
+            (
+                rows(&c, "SELECT * FROM plates ORDER BY id"),
+                rows(&c, "SELECT * FROM plate_slices ORDER BY plate_id"),
+                rows(&c, FROZEN),
+                rows(&c, QUEUE),
+            )
+        };
+        assert!(Database::open(dir.path(), || panic!("must not reimport")).is_err());
+        let c = Connection::open(&path).unwrap();
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            23
+        );
+        assert_eq!(
+            (
+                rows(&c, "SELECT * FROM plates ORDER BY id"),
+                rows(&c, "SELECT * FROM plate_slices ORDER BY plate_id"),
+                rows(&c, FROZEN),
+                rows(&c, QUEUE),
+            ),
+            before
+        );
+        c.execute_batch("DROP INDEX legacy_bed").unwrap();
+        drop(c);
+        Database::open(dir.path(), || panic!("must not reimport")).unwrap();
+    }
     #[test]
     fn defaults_migrate_and_keep_one_reference_without_rewriting_plates() {
         let dir = tempfile::tempdir().unwrap();
@@ -664,7 +846,7 @@ mod tests {
         let c = db.connection().unwrap();
         assert_eq!(
             c.query_row(
-                "SELECT required_machine_profile_key FROM plates WHERE id='legacy'",
+                "SELECT filament_id FROM plates WHERE id='legacy'",
                 [],
                 |r| r.get::<_, Option<String>>(0)
             )
@@ -881,8 +1063,12 @@ mod tests {
             .unwrap(),
             "white"
         );
-        let conditions: (Option<String>,Option<String>,Option<String>,Option<String>)=c.query_row("SELECT required_machine_profile_key,filament_id,process_profile_key,bed_type FROM plates WHERE id='plate'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
-        assert_eq!(conditions, (None, None, None, None));
+        let material: Option<String> = c
+            .query_row("SELECT filament_id FROM plates WHERE id='plate'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(material, None);
         assert_eq!(
             c.query_row(
                 "SELECT attempt_id FROM print_jobs WHERE id='job'",
@@ -1061,7 +1247,7 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            23
+            24
         );
         let bad = tempfile::tempdir().unwrap();
         legacy(bad.path())

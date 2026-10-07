@@ -213,12 +213,8 @@ fn queue_survives_crashes_without_replaying_prints() {
     until(|| rig.broker.requests().len() > requests, 12);
     rig.idle();
     rig.next(&first, 409);
-    assert!(
-        rig.queue()["waiting"][0]["hold_reason"]
-            .as_str()
-            .unwrap()
-            .contains("nozzle")
-    );
+    let reason = rig.queue()["waiting"][0]["hold_reason"].clone();
+    assert!(reason.as_str().unwrap().contains("nozzle"), "{reason}");
     let requests = rig.broker.requests().len();
     rig.put("/api/printers/p1", &settings, 200);
     until(|| rig.broker.requests().len() > requests, 12);
@@ -420,6 +416,7 @@ fn stopped_discard_preserves_recovery_across_empty_queue_and_restart() {
         rig.phase("needs_attention");
         if !initially_empty {
             rig.stop(false);
+            legacy_schema::plate_conditions_v23(&rig.db());
             rig.db()
                 .execute_batch(
                     "ALTER TABLE printers DROP COLUMN recovery_attempt; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=17;",

@@ -499,6 +499,17 @@ impl Rig {
     pub fn put(&self, path: &str, body: &Value, expected: u16) -> Value {
         self.request("PUT", path, Some(body), expected)
     }
+    /// One printer's result in `GET /api/plates/{id}/slice` (the fixture's `p1` by default).
+    pub fn slice(&self, path: &str) -> Value {
+        self.slice_on(path, "p1")
+    }
+    pub fn slice_on(&self, path: &str, printer: &str) -> Value {
+        array(&self.get(path)["printers"])
+            .iter()
+            .find(|v| v["printer_id"] == printer)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
     pub fn queue(&self) -> Value {
         self.get("/api/queue?printer_id=p1")
     }
@@ -532,7 +543,7 @@ impl Rig {
     }
     pub fn specification(&self, slot: u64) -> Value {
         let slot = self.slot(slot);
-        json!({"ams_slot_id":slot["id"],"filament_id":slot["filament_id"],"required_machine_profile_key":MACHINE,"process_profile_key":PROCESS,"bed_type":BED})
+        json!({"ams_slot_id":slot["id"],"filament_id":slot["filament_id"]})
     }
     pub fn command(&self, action: Value, view: Option<&Value>) -> Value {
         let q = view.cloned().unwrap_or_else(|| self.queue());
@@ -800,7 +811,7 @@ impl Rig {
         self.db()
             .query_row(
                 &if column == "estimate_json" {
-                    "SELECT CASE WHEN j.state='queued' THEN s.record_json ELSE e.estimate_json END FROM print_jobs j LEFT JOIN plate_slices s ON s.plate_id=j.plate_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?1".to_owned()
+                    "SELECT CASE WHEN j.state='queued' THEN s.record_json ELSE e.estimate_json END FROM print_jobs j LEFT JOIN plate_slices s ON s.plate_id=j.plate_id AND s.printer_id=j.printer_id LEFT JOIN print_executions e ON e.id=j.attempt_id WHERE j.id=?1".to_owned()
                 } else {
                     format!("SELECT {column} FROM print_executions WHERE id=(SELECT attempt_id FROM print_jobs WHERE id=?1)")
                 },
@@ -811,7 +822,7 @@ impl Rig {
     }
     pub fn cached_artifact(&self, job: &Value, column: &str) -> Vec<u8> {
         assert!(["project", "gcode"].contains(&column));
-        self.db().query_row(&format!("SELECT {column} FROM plate_slices WHERE plate_id=(SELECT plate_id FROM print_jobs WHERE id=?1)"), [id(job)], |r|r.get(0)).unwrap()
+        self.db().query_row(&format!("SELECT s.{column} FROM plate_slices s JOIN print_jobs j ON j.plate_id=s.plate_id AND j.printer_id=s.printer_id WHERE j.id=?1"), [id(job)], |r|r.get(0)).unwrap()
     }
     pub fn estimated(&self, job: &Value) -> Value {
         until(
@@ -846,6 +857,90 @@ impl Rig {
     }
 }
 impl Rig {
+    /// Write `parts/large.stl`: the 20 mm cube scaled to 200 × 200 × 10 mm, which fits the
+    /// P1S (256 mm) but not the A1 mini (180 mm) bed.
+    pub fn large_model(&self) {
+        let mut large = self.files.lock().unwrap()["parts/cube.stl"].clone();
+        let count = u32::from_le_bytes(large[80..84].try_into().unwrap()) as usize;
+        for triangle in 0..count {
+            for (axis, offset) in (96 + triangle * 50..132 + triangle * 50)
+                .step_by(4)
+                .enumerate()
+            {
+                let scale = [10., 10., 0.5][axis % 3];
+                let value =
+                    f32::from_le_bytes(large[offset..offset + 4].try_into().unwrap()) * scale;
+                large[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        self.files
+            .lock()
+            .unwrap()
+            .insert("parts/large.stl".to_owned(), large);
+    }
+    /// Register an A1 mini 0.4 with its bundled default process and bed on its own isolated
+    /// MQTT peer. Returns the peer and the printer ID.
+    pub fn register_mini(&self) -> (Peer, String) {
+        let mini = "Bambu Lab A1 mini 0.4 nozzle";
+        let query = reqwest::Url::parse_with_params(
+            "http://localhost/api/slicer/profiles",
+            [("machine", mini)],
+        )
+        .unwrap();
+        let defaults =
+            self.get(&format!("{}?{}", query.path(), query.query().unwrap()))["defaults"].clone();
+        let peer = Peer::broker(self.root.path(), "trusted", "MINI");
+        let settings = merge(
+            &printer_settings(&self.get("/api/printers/p1")),
+            &json!({"name":"A1 mini","serial":"MINI","mqtt_port":peer.port,"machine_profile_key":mini,
+                "default_process_profile_key":defaults["process"],"bed_type":defaults["bed"],
+                "access_code":SECRET,
+                "tls_certificate":fs::read_to_string(self.root.path().join("trusted.pem")).unwrap()}),
+        );
+        let device = self.post("/api/printers", &settings, 201);
+        (peer, id(&device).to_owned())
+    }
+    /// Give `material` a setting for the printer's machine from its generic PLA profile.
+    pub fn configure_material(&self, material: &str, machine: &str) {
+        let query =
+            reqwest::Url::parse_with_params("http://localhost/", [("machine", machine)]).unwrap();
+        let choices = self.get(&format!(
+            "/api/filaments/{material}/profiles?{}",
+            query.query().unwrap()
+        ));
+        let base = array(&choices)
+            .iter()
+            .find(|p| p["key"].as_str().unwrap().starts_with("Generic PLA"))
+            .unwrap()["key"]
+            .clone();
+        self.post(
+            &format!("/api/filaments/{material}/settings"),
+            &json!({"machine_profile_key":machine,"base_profile_key":base,"overrides_json":{}}),
+            201,
+        );
+    }
+    /// Report a full status from `peer` and map `material` into its AMS slot 3.
+    pub fn load_material(&self, peer: &Peer, printer: &str, material: &Value) {
+        peer.send(&self.full);
+        until(
+            || {
+                self.get(&format!("/api/printer/status?printer_id={printer}"))["synchronized"]
+                    == true
+            },
+            12,
+        );
+        let inventory = self.get(&format!("/api/printers/{printer}/ams"));
+        let slot = array(&inventory["slots"])
+            .iter()
+            .find(|s| s["slot_index"] == 3)
+            .unwrap()
+            .clone();
+        self.put(
+            &format!("/api/printers/{printer}/ams/{}", id(&slot)),
+            &json!({"revision":slot["revision"],"filament_id":material}),
+            204,
+        );
+    }
     pub fn rows(&self, sql: &str, args: &[&str]) -> Vec<Vec<rusqlite::types::Value>> {
         let db = self.db();
         let mut statement = db.prepare(sql).unwrap();

@@ -1,4 +1,4 @@
-const emptyDefaults={"default_printer_id":null,"conditions":{"required_machine_profile_key":null,"filament_id":null,"process_profile_key":null,"bed_type":null},"reason":"printer"};
+const emptyDefaults={"default_printer_id":null,"conditions":{"filament_id":null},"reason":"printer"};
 import { test, expect } from '@playwright/test';
 
 test('a plate saves model references and quantities with nullable print conditions', async ({ page }) => {
@@ -21,7 +21,7 @@ test('a plate saves model references and quantities with nullable print conditio
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await expect(page).toHaveURL(/plates\/11111111-1111-4111-8111-111111111111$/);
   await expect(page.getByRole('button', { name: '印刷キューへ' })).toBeVisible();
-  expect(saved).toEqual({ name: '机の箱', conditions: {required_machine_profile_key:null,filament_id:null,process_profile_key:null,bed_type:null,sparse_infill_pattern:null,sparse_infill_density:null,wall_loops:null,brim_enabled:false,support_enabled:false,support_interface_filament_id:null}, models: [{ name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] });
+  expect(saved).toEqual({ name: '机の箱', conditions: {filament_id:null,sparse_infill_pattern:null,sparse_infill_density:null,wall_loops:null,brim_enabled:false,support_enabled:false,support_interface_filament_id:null}, models: [{ name: 'parts/box.stl', source: 'parts/box.stl', quantity: 3 }] });
   await expect(page.getByRole('button', { name: /parts\/box.stl.*3個/ })).toBeVisible();
   await expect(page.getByText('3個', { exact: true })).toBeVisible();
 });

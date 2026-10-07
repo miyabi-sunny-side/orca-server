@@ -190,11 +190,12 @@ pub fn nozzle_material() {
     rig.configure(Some(spec.clone()), None);
     let admission_path = format!("/api/queue?printer_id=p1&plate_id={}", id(&rig.plate));
     assert_eq!(rig.get(&admission_path)["admission"]["allowed"], true);
+    // The printer owns the machine and nozzle; a plate cannot name another one.
     for machine in ["Bambu Lab P1S 0.2 nozzle", "Bambu Lab A1 mini 0.2 nozzle"] {
         let mut data = edit(&rig.plate);
         data["conditions"]["required_machine_profile_key"] = json!(machine);
         let path = format!("/api/plates/{}", id(&rig.plate));
-        rig.put(&path, &data, 409);
+        rig.put(&path, &data, 422);
         assert_eq!(rig.get(&path), rig.plate);
     }
     let action = rig.add_action(Some(spec), None);

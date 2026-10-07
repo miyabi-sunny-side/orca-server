@@ -31,14 +31,15 @@ test('loaded/all selection, keyboard and persistence at 320/375/900px in both th
     const main=materialButton(page);
     await main.focus();await page.keyboard.press('Enter');
     await expect(search(page)).toBeFocused();await expect(dialog(page).getByLabel(allLabel)).not.toBeChecked();
-    await expect(dialog(page).locator('.choices button')).toHaveCount(3);
-    await expect(option(page,c.mini_material)).toHaveCount(0);await expect(option(page,c.future)).toHaveCount(0);
+    await expect(dialog(page).locator('.choices button')).toHaveCount(4);
+    // Plates name no machine: every printer's loaded materials are candidates.
+    await expect(option(page,c.mini_material)).toHaveCount(1);await expect(option(page,c.future)).toHaveCount(0);
     expect(await main.evaluate(e=>e.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
-    await search(page).fill('Fixture');await expect(dialog(page).locator('.choices button')).toHaveCount(3);
+    await search(page).fill('Fixture');await expect(dialog(page).locator('.choices button')).toHaveCount(4);
     await dialog(page).getByLabel(allLabel).check();await expect(search(page)).toHaveValue('Fixture');
     await expect(dialog(page).locator('.choices button')).toHaveCount(5);
     await dialog(page).getByLabel(allLabel).uncheck();await expect(search(page)).toHaveValue('Fixture');
-    await expect(dialog(page).locator('.choices button')).toHaveCount(3);
+    await expect(dialog(page).locator('.choices button')).toHaveCount(4);
     await fit(page);await page.screenshot({path:`${out}/modal-${width}-${colorScheme}.png`});
     // Tab is trapped in the modal; each closing path restores the initiating control.
     await dialog(page).getByRole('button',{name:'閉じる',exact:true}).focus();await page.keyboard.press('Shift+Tab');
@@ -51,11 +52,11 @@ test('loaded/all selection, keyboard and persistence at 320/375/900px in both th
     await main.click();await dialog(page).getByLabel(allLabel).check();await search(page).fill('GF');
     await expect(option(page,c.future)).toBeVisible();await search(page).press('ArrowDown');await expect(option(page,c.future)).toBeFocused();await page.keyboard.press('Enter');
     await expect(main).toBeFocused();await expect(main).toContainText('未装填');
-    await main.click();await expect(dialog(page).getByLabel(allLabel)).not.toBeChecked();await expect(dialog(page).locator('.choices button')).toHaveCount(3);await expect(option(page,c.future)).toHaveCount(0);
+    await main.click();await expect(dialog(page).getByLabel(allLabel)).not.toBeChecked();await expect(dialog(page).locator('.choices button')).toHaveCount(4);await expect(option(page,c.future)).toHaveCount(0);
     await page.keyboard.press('Escape');await expectMaterial(page,c.future);
     await page.locator('summary').filter({hasText:'詳細設定'}).click();await page.getByLabel('サポートを使う').check();
     await expect(supportButton(page)).toContainText('PETG-GF');
-    await supportButton(page).click();await expect(search(page)).toBeFocused();await expect(dialog(page).locator('.choices button')).toHaveCount(3);
+    await supportButton(page).click();await expect(search(page)).toBeFocused();await expect(dialog(page).locator('.choices button')).toHaveCount(4);
     await search(page).fill('PLA 青');await expect(option(page,c.blue)).toBeVisible();await option(page,c.blue).click();await expect(supportButton(page)).toBeFocused();
     await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(/\/plates\/[0-9a-f-]{36}$/);
     const id=new URL(page.url()).pathname.split('/')[2];const saved=await (await request.get('/api/plates/'+id)).json();
@@ -100,10 +101,10 @@ test('late and failed responses retain query, scope and selection',async({page,r
   failing=false;await dialog(page).getByRole('button',{name:'検索をやり直す'}).click();await expect(dialog(page).getByRole('alert')).toHaveCount(0);await expect(search(page)).toHaveValue('lost');
   await expect(dialog(page).getByText('一致する材料がありません。',{exact:false})).toBeVisible();
   await search(page).press('Escape');await expectMaterial(page,c.white);
-  await page.getByLabel('要求する機種・ノズル').selectOption(c.mini);await expectMaterial(page,c.white);await expect(materialButton(page)).toContainText('未装填');
-  await materialButton(page).click();await expect(dialog(page).locator('.choices button')).toHaveCount(1);await expect(option(page,c.mini_material)).toBeVisible();await search(page).press('Escape');
-  await page.getByLabel('要求する機種・ノズル').selectOption({label:'未設定'});await materialButton(page).click();await expect(dialog(page).locator('.choices button')).toHaveCount(4);
-  await option(page,c.blue).click();await expect(page.getByLabel('要求する機種・ノズル')).toHaveValue('');
+  // Plates name no machine: the candidates are every printer's loaded materials.
+  await expect(page.getByLabel('要求する機種・ノズル')).toHaveCount(0);
+  await materialButton(page).click();await expect(dialog(page).locator('.choices button')).toHaveCount(4);await expect(option(page,c.mini_material)).toBeVisible();
+  await option(page,c.blue).click();
   await expectMaterial(page,c.blue);
 });
 
@@ -112,7 +113,7 @@ test('unknown, unmapped, empty and missing references remain distinct; clear sav
   // Removing a mapping leaves physical material present, and offers the AMS correction path.
   const inventory=await (await request.get('/api/printers/p1/ams')).json();const slot=inventory.slots.find((s:any)=>s.slot_index===3);
   expect((await request.put('/api/printers/p1/ams/'+slot.id,{data:{revision:slot.revision,filament_id:null}})).status()).toBe(204);
-  await materialButton(page).click();await expect(dialog(page).getByText(/未割当の材料/)).toBeVisible();await expect(dialog(page).getByRole('link',{name:'AMSの材料割当'})).toHaveAttribute('href','/printers/p1/ams');await expect(option(page,c.blue)).toHaveCount(0);
+  await materialButton(page).click();const unmapped=dialog(page).getByText(/^P1S: 未割当の材料/);await expect(unmapped).toBeVisible();await expect(unmapped.getByRole('link',{name:'AMSの材料割当'})).toHaveAttribute('href','/printers/p1/ams');await expect(option(page,c.blue)).toHaveCount(0);
   await search(page).fill('PLA');await request.post(c.control,{data:{offline:true}});
   await expect.poll(async()=>{const r=await (await request.get('/api/plate-filaments')).json();return r.printers.every((p:any)=>p.state==='unconfirmed');}).toBe(true);
   await dialog(page).getByLabel(allLabel).check();await dialog(page).getByLabel(allLabel).uncheck();await expect(search(page)).toHaveValue('PLA');
@@ -131,8 +132,6 @@ test('unknown, unmapped, empty and missing references remain distinct; clear sav
   await request.post(c.control,{data:{missing:true,plate_id:c.plate}});await edit(page);await expect(materialButton(page)).toContainText('登録が見つかりません');
   await materialButton(page).click();await dialog(page).getByLabel(allLabel).check();await expect(dialog(page).locator('.choices button')).toHaveCount(5);await expect(option(page,'missing-material')).toHaveCount(0);await search(page).press('Escape');
   await expect(materialButton(page)).toContainText('登録が見つかりません');
-  await expect(page.getByLabel('工程（品質）').locator('option:checked')).not.toContainText('組合せを確認');
-  await expect(page.getByText('工程が要求する機種・ノズルに対応していません。',{exact:false})).toHaveCount(0);
   await expect(page.getByRole('link',{name:'材料設定へ'})).toHaveCount(0);
   await page.screenshot({path:out+'/missing-reference.png',fullPage:true});
   await selectMaterial(page,c.future);await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page.getByRole('button',{name:'構成を編集'})).toBeVisible();

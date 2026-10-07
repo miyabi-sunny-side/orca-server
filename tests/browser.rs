@@ -409,3 +409,35 @@ fn ui_audit() {
         &[("E2E_UI_PHASE", phase)],
     );
 }
+/// Real CLI: a plate names no machine, shows each printer's result, and starts with the
+/// printer's process and bed over isolated MQTT/FTPS.
+#[test]
+#[ignore = "requires Chromium and official Orca 2.4.2"]
+fn printer_slices() {
+    let mut rig = Rig::with_options("browser-printer-slices", "v3", Some(&appdir()));
+    rig.launch();
+    rig.seed();
+    rig.large_model();
+    // The printer, not the plate, decides the process and bed of the start.
+    let mut printer = printer_settings(&rig.get("/api/printers/p1"));
+    printer["default_process_profile_key"] = json!("0.16mm Optimal @BBL X1C");
+    printer["bed_type"] = json!("Cool Plate");
+    rig.put("/api/printers/p1", &printer, 200);
+    let (peer, mini) = rig.register_mini();
+    rig.configure_material(id(&rig.materials[1]), "Bambu Lab A1 mini 0.4 nozzle");
+    rig.load_material(&peer, &mini, &rig.materials[1]["id"]);
+    rig.browser(
+        "E2E_PRINTER_SLICES_CONTEXT",
+        &json!({"mini":mini,"material":rig.materials[1]["id"],"model":"parts/large.stl"}),
+        None,
+    );
+    until(|| rig.broker.prints().len() == 1, 30);
+    assert!(peer.prints().is_empty());
+    let uploaded = rig.ftp.contents().last().unwrap().clone();
+    let settings = zip_json(&uploaded, "Metadata/project_settings.config");
+    assert_eq!(settings["print_settings_id"], "0.16mm Optimal @BBL X1C");
+    assert_eq!(settings["curr_bed_type"], "Cool Plate");
+    assert_eq!(settings["printer_settings_id"], MACHINE);
+    std::fs::write(rig.output.join("started.gcode.3mf"), uploaded).unwrap();
+    rig.check();
+}

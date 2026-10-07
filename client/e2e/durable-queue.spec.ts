@@ -1,10 +1,10 @@
 import { test, expect } from '@playwright/test';
-const machine='Bambu Lab P1S 0.4 nozzle', mini='Bambu Lab A1 mini 0.2 nozzle', quality='Standard', bed='Textured PEI Plate';
+const machine='Bambu Lab P1S 0.4 nozzle', mini='Bambu Lab A1 mini 0.2 nozzle';
 for(const colorScheme of ['dark','light'] as const) {
   test(`${colorScheme}: detail adds directly and preserves an unknown request through reload`,async({page})=>{
     await page.setViewportSize({width:375,height:812});await page.emulateMedia({colorScheme});
-    const plate={id:'11111111-1111-4111-8111-111111111111',version:1,name:'繰り返し印刷するプレート',models:[{id:'item',name:'part.stl',source:'part.stl',quantity:10}],conditions:{required_machine_profile_key:machine,filament_id:'white',process_profile_key:quality,bed_type:bed}};
-    const printers=[{id:'p1',name:'P1S',machine_profile_key:machine},...[3,1,2].map(n=>({id:`a${n}`,name:`A1 mini ${n}`,machine_profile_key:mini}))];
+    const plate={id:'11111111-1111-4111-8111-111111111111',version:1,name:'繰り返し印刷するプレート',models:[{id:'item',name:'part.stl',source:'part.stl',quantity:10}],conditions:{filament_id:'white'}};
+    const printers=[{id:'p1',name:'P1S',machine_profile_key:machine}];
     let requests:any[]=[],waiting:any[]=[],reads=0,fail=true;
     await page.route('**/api/**',async route=>{
       const path=new URL(route.request().url()).pathname;
@@ -35,10 +35,10 @@ for(const colorScheme of ['dark','light'] as const) {
     await expect(page).toHaveURL(/\/plates\/11111111-1111-4111-8111-111111111111$/);
     await expect(page.getByLabel('使用するAMSスロット')).toHaveCount(0);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    // The same machine profile can match three physical printers; remember only a valid choice.
-    plate.conditions.required_machine_profile_key=mini;
+    // Every registered printer is a destination; remember only a valid choice.
+    printers.push(...[3,1,2].map(n=>({id:`a${n}`,name:`A1 mini ${n}`,machine_profile_key:mini})));
     await page.reload();await expect(page.getByLabel('追加先のプリンター')).toHaveValue('a1');
-    await expect(page.getByLabel('追加先のプリンター').locator('option')).toHaveCount(3);
+    await expect(page.getByLabel('追加先のプリンター').locator('option')).toHaveCount(4);
     await page.getByLabel('追加先のプリンター').selectOption('a2');await page.reload();
     await expect(page.getByLabel('追加先のプリンター')).toHaveValue('a2');
     printers.splice(printers.findIndex(p=>p.id==='a2'),1);await page.reload();

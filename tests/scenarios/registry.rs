@@ -128,7 +128,7 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
             )
     );
     saved = edit(&saved);
-    saved["conditions"] = json!({"filament_id":material["id"],"required_machine_profile_key":MACHINE,"process_profile_key":p1_profiles["defaults"]["process"],"bed_type":p1_profiles["defaults"]["bed"]});
+    saved["conditions"] = json!({"filament_id":material["id"]});
     saved = rig.put(&path, &saved, 200);
     let add = json!({"type":"add","plate_id":plate_id,"plate_version":saved["version"]});
     command(&rig, &ids[1], add.clone(), 409);
@@ -497,7 +497,7 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        23
+        24
     );
     assert!(
         peers

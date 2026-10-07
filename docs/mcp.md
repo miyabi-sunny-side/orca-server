@@ -37,10 +37,7 @@ SCAD参照の作成・更新には、サーバーの[SCAD_LIVE_URL](container.md
       {"name":"Gridfinity/bin.stl","source":"Gridfinity/bin.stl","quantity":10}
     ],
     "conditions": {
-      "required_machine_profile_key":null,
-      "filament_id":null,
-      "process_profile_key":null,
-      "bed_type":null
+      "filament_id":null
     }
   }
 }
@@ -55,9 +52,10 @@ SCAD参照の作成・更新には、サーバーの[SCAD_LIVE_URL](container.md
 既存モデルの`id`を保持してください。アップロード済みSTLはそのプレート内のモデルIDと`source:null`で保持できます。
 MCPからファイル本体をアップロードする操作はありません。
 
-条件を選ぶ際は`plate_options`の所持機候補、製品の色ID、機種別の共通設定を使います。
-機種・主材料・工程・ベッド・インフィル・充填率・壁の枚数は、新規作成の省略・`null`にサーバーが[保存済みの初期値とAMS材料](plates.md#新規作成の初期値)を適用します。明示した有効値を優先します。
-`profiles.defaults`からAIが条件を推測する必要はありません。保存応答の`conditions`を確認してください。
+`plate.conditions`は材料（`filament_id`・`secondary_filament_id`・`support_interface_filament_id`）、`sparse_infill_pattern`・`sparse_infill_density`・`wall_loops`、`brim_enabled`・`support_enabled`、`start_options`です。
+機種・ノズル、工程、ビルドプレートはプリンターが持ちます。`required_machine_profile_key`・`process_profile_key`・`bed_type`を送ると、黙って無視せず入力エラーになります。
+主材料・インフィル・充填率・壁の枚数は、新規作成の省略・`null`にサーバーが[保存済みの初期値とAMS材料](plates.md#新規作成の初期値)を適用します。明示した有効値を優先します。
+保存応答の`conditions`を確認してください。所要時間は`plate_slice_get`がプリンターごとに返します。
 更新ではこれらの省略・`null`が解除となるため、保持する条件も送ります。
 ブリム・サポートの有無は省略時OFF、`null`は不可です。[サポート接触面の材料](plates.md#サポートを使う)も`conditions`で指定できます。
 保存成功と印刷可能は別です。`plate_admission`で、選んだ実機に追加できるかと理由を確認できます。
@@ -154,6 +152,8 @@ FINISH、再起動、画面表示だけでは次の印刷を始めません。�
 | `plate_list` | 任意の`q: string`。保存済みプレートの検索。アーカイブ済みは含みません。 |
 | `plate_get` | `id: string`。詳細・版・管理画面パス。 |
 | `plate_save` | 任意の`id: string`と`plate`。新規はID省略、更新は現在版を含む全構成。形式は[プレートAPI](plates.md)。 |
+| `plate_slice_get` | `id: string`。`printers`にプリンターごとの状態・秒数・理由（`unfit`は台に乗らない、`material_setting`はその機種の材料設定なし）。[形式](plates.md#プリンターごとの試算)。 |
+| `plate_slice_retry` | `id: string`。全プリンターの試算をやり直します。キュー追加・印刷は行いません。 |
 | `filament_products` | 引数なし。製品・色・共通設定一覧。 |
 | `filament_product` | `id: string`。製品詳細と解決済み温度。 |
 | `filament_product_save` | 任意の`id`と`data: {name,vendor,material,bambu_filament_id}`。最後の項目は文字列またはnull。 |
@@ -166,15 +166,15 @@ FINISH、再起動、画面表示だけでは次の印刷を始めません。�
 | `ams_assign` | `printer_id`、`slot_id`、`revision: integer`、`filament_id: string or null`。色IDの割当/解除。最後の項目は省略不可。 |
 | `ams_resolve` | `printer_id`、`filament_id`。現在使用できる候補と開始時の優先slot。 |
 | `ams_prioritize` | `printer_id`、`priority: {filament_id,order:[{id,revision}]}`。現在の同一材料グループ全件を使用順に指定。 |
-| `plate_options` | 任意の`machine`。所持機の機種/ノズル一覧と、指定機種の工程・材料・bed候補。 |
+| `plate_options` | 任意の`machine`。所持機の機種/ノズル一覧と、指定機種の工程・材料・bed候補。プリンターの設定と材料の機種別設定に使います。 |
 | `plate_admission` | `printer_id`、`plate_id`。現在版の`plate_version`、実機が今使う給材元`feed`、`allowed`、`reason`。 |
 | `queue_get` | `printer_id`。現在ジョブ・待機先頭・可否・復旧できない理由・要求に使う識別値。 |
 | `queue_continue` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`next_job: string or null`、`removed_job: string or null`。開始・継続または最後の取り外し完了。 |
 | `printer_control` | `printer_id`、`control`（[本体の操作API](printer.md#本体の操作api)の`action`と項目）。一時停止・停止・温度・照明・ロードなど。利用者が対象機へ明示的に指示した場合だけ使います。 |
 | `queue_retry` | `printer_id`、`epoch`、`generation: integer`、`request_id`、`expected_job: string`。要確認ジョブを固定済み条件から新しい試行で再印刷。 |
 
-`plate_admission`は、条件の不足、実機との不一致、未同期や該当材料の未装填など、通常のキュー追加と同じ判断を返します。
-機種候補は要求profile、`printer_id`は実物を識別します。同型機が複数あるときも対象を区別してください。
+`plate_admission`は、材料の不足、その機種の材料設定の不足、台に乗らないこと、未同期や該当材料の未装填など、通常のキュー追加と同じ判断を返します。
+`printer_id`は実物を識別します。同型機が複数あるときも対象を区別してください。
 AMSの使用順は印刷開始時の順序です。機器の自動補充順や現在の印刷を変更する操作ではありません。
 
 ## エラーと結果不明時

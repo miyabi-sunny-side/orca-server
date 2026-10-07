@@ -1,6 +1,7 @@
 # プレートAPI
 
-プレートは再利用するモデルの構成です。名前、モデルの参照・個数、印刷条件を保存します。
+プレートは再利用するモデルの構成です。名前、モデルの参照・個数、材料と仕上がりの条件を保存します。
+機種・ノズル、工程、ビルドプレートはプレートではなく[プリンター](printer.md)が持ちます。所要時間は（プレート、プリンター）の組ごとに試算します。
 SCADモデルは保存時に役割を確認し、キュー追加後の試算と印刷準備の開始時にも最新の形状を取得します。直接アップロードしたSTLと取り込んだ3MFの元ファイルはSQLite内に保管します。
 起動方法は[README](../README.md)、キューへの追加は[キューAPI](queue.md)を参照してください。
 
@@ -17,8 +18,8 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 新規保存は201とプレートJSONを返します。`id`は固定の識別子、`version`は編集の競合を防ぐ整数です。
 `models`には各項目の`id`、`name`、`source`、`quantity`を返します。役割付き3MFでは読取り専用の`roles`も返します。
 `source`はSCADの相対パス、直接アップロードでは`null`です。アップロード直後の個数は1です。
-`conditions`は要求する機種/ノズル、材料、工程、ビルドプレート、インフィル・充填率・壁の枚数、ブリム・サポートの有無、接触面の材料を持ちます。
-機種から壁の枚数までの7項目は、新規作成の省略・`null`に[保存済みの初期値](#新規作成の初期値)を使い、取得できない項目だけ`null`になります。
+`conditions`は材料、インフィル・充填率・壁の枚数、ブリム・サポートの有無、接触面の材料、開始オプションを持ちます。
+主材料と詳細3項目は、新規作成の省略・`null`に[保存済みの初期値](#新規作成の初期値)を使い、取得できない項目だけ`null`になります。
 ブリム・サポートは省略時にOFFです。接触面の材料を省略すると、サポートON時に主材料を使います。
 材料の温度は共通設定を参照し、プレートへコピーしません。生成3MFや過去のrevisionも含みません。
 
@@ -34,6 +35,8 @@ curl --fail --get http://127.0.0.1:3000/api/plates --data-urlencode 'q=dsbx'
 | プレート取得 | `GET /api/plates/{id}` |
 | 構成を編集 | `PUT /api/plates/{id}`（JSON） |
 | 一覧から論理削除 | `DELETE /api/plates/{id}` |
+| プリンターごとの試算 | `GET /api/plates/{id}/slice` |
+| 全プリンターで再試算 | `POST /api/plates/{id}/slice` |
 | アーカイブ | `PUT /api/plates/{id}/archive` |
 | アーカイブから復元 | `DELETE /api/plates/{id}/archive` |
 | 未保存の公開SCADモデル取得 | `GET /api/scad/model?path=相対パス` |
@@ -173,11 +176,8 @@ SCAD参照は設定済みソースから毎回取得し、応答は`Cache-Contro
   "version": 1,
   "name": "Desk parts",
   "conditions": {
-    "required_machine_profile_key": null,
     "filament_id": null,
     "secondary_filament_id": null,
-    "process_profile_key": null,
-    "bed_type": null,
     "sparse_infill_pattern": null,
     "sparse_infill_density": null,
     "wall_loops": null,
@@ -200,33 +200,31 @@ SCAD参照は設定済みソースから毎回取得し、応答は`Cache-Contro
 
 ## 新規作成の初期値
 
-新しいプレートは、登録したプリンターの機種・ノズル、既定の工程、プレート種類が選択済みで開きます。
-材料は、その機器の同期済みAMSをスロット順で調べ、装填中・色ID割当済み・機種用設定が有効な先頭を選びます。
+新しいプレートの材料は、初期値に使うプリンターの同期済みAMSをスロット順で調べ、装填中・色ID割当済み・その機種用の設定が有効な先頭を選びます。
 空・未確認・設定不足のスロットは飛ばします。別機器や未装填の材料で補いません。必要な項目だけ変更して保存してください。
 
 機器が1台なら自動で既定になります。複数なら「プリンター」一覧の「新規プレートの初期値に使うプリンター」で選びます。
-工程・プレート種類は、その機器の「設定を編集」で変更できます。保存済みプレートや進行中の印刷には反映しません。
-既存プレートの機種・材料・工程・ベッドは空欄だけを補い、保存で確定します。読取りが遅れても手動選択は戻しません。
+詳細設定に示す工程由来の層数は、このプリンターの工程で計算します。
+既存プレートの材料は空欄だけを補い、保存で確定します。読取りが遅れても手動選択は戻しません。
 
 導入時の初期値はインフィルがアダプティブキュービック、充填率15%、壁2周です。
 「プリンター」一覧の「新規プレートの詳細初期値」で変更し、「初期値を保存」を押してください。
 この3項目はSQLiteの`default_settings`に保存します。変更は新規プレートに適用し、保存済みプレートへ遡及しません。
 
-`GET /api/default-settings`は`default_printer_id`、10項目の`conditions`、不足理由の`reason`を返します。`brim_enabled`と`support_enabled`は常に`false`、`support_interface_filament_id`は`null`で、全体の初期値としては変更しません。
+`GET /api/default-settings`は`default_printer_id`、`conditions`、不足理由の`reason`を返します。`brim_enabled`と`support_enabled`は常に`false`、`support_interface_filament_id`は`null`で、全体の初期値としては変更しません。
 対応方式の一覧は`infill_patterns`に入ります。
-`?machine=登録機種のkey`を指定すると、その機種との互換性も確認します。
 `PUT /api/default-settings`に`{"default_printer_id":"機器ID"}`を送ると保存し、204を返します。未知IDは404です。
 機器削除後に1台だけ残れば自動選択し、複数台が残れば未選択になります。
-機種・工程・ベッドは参照先の`printers`、材料は現在のAMSから取得します。
+材料は参照先のプリンターの現在のAMSから取得します。
 3つの詳細初期値を変更する場合も同じPUTを使います。省略・`null`の詳細初期値は保持します。
 
 ```json
 {"default_printer_id":"機器ID","sparse_infill_pattern":"gyroid","sparse_infill_density":25,"wall_loops":4}
 ```
 
-機種・材料・工程・ベッドと詳細3項目は、REST・MCPとも新規作成の省略・`null`だけを補い、明示した有効値を優先します。
+主材料と詳細3項目は、REST・MCPとも新規作成の省略・`null`だけを補い、明示した有効値を優先します。
 機器未登録・未同期などで初期値を決められない場合は空欄を残し、画面に不足理由と設定先を表示します。
-これら7項目は、プレート更新APIで`null`を送ると解除し、初期値を再適用しません。
+これら4項目は、プレート更新APIで`null`を送ると解除し、初期値を再適用しません。
 
 ## インフィルと壁を変更する
 
@@ -279,10 +277,7 @@ STLアップロードでも、multipartの`conditions`フィールドへ同じJS
 
 | 項目 | 値と取得先 |
 | --- | --- |
-| `required_machine_profile_key` | `GET /api/printers`の`machine_profile_key`を重複除去した候補。実機IDではありません。 |
-| `filament_id` | `GET /api/filaments`の製品/色ID。機種指定時はその機種に対応する共通材料設定が必要です。 |
-| `process_profile_key` | [プロファイルAPI](slicing.md#設定と生成物)の対応する`processes`。 |
-| `bed_type` | 同APIの`beds`。 |
+| `filament_id` | `GET /api/filaments`の製品/色ID。試算・印刷には、各プリンターの機種に対応する共通材料設定が必要です。 |
 | `sparse_infill_pattern` | `GET /api/default-settings`の`infill_patterns`。例：`adaptivecubic`、`crosshatch`、`gyroid`。 |
 | `sparse_infill_density` | 0〜100の数値。小数可。単位は%。 |
 | `wall_loops` | 0〜1000の整数。単位は周。 |
@@ -291,14 +286,31 @@ STLアップロードでも、multipartの`conditions`フィールドへ同じJS
 | `support_interface_filament_id` | 登録材料ID。ON時に省略・`null`なら主材料へ解決します。OFF時も指定値を保持します。 |
 | `start_options` | 開始時に本体へ送る`bed_leveling`・`flow_calibration`・`timelapse`・`vibration_calibration`（真偽値）。省略した項目と`null`はBambuStudioの印刷ダイアログと同じ既定（順に有効・有効・有効・無効）です。 |
 
-ブリム・サポートの有無と開始オプション以外の8項目はDB/APIでnullableです。開始オプションは準備開始時に固定し、印刷中の変更は次の印刷から使います。詳細3項目の`null`は工程の値を継承します。機種未設定なら工程も未設定にします。保存時は登録実機、存在する材料、
-工程と機種の組合せ、温度設定、ベッド種別を確認します。異なるノズル用profileや未登録機種へ自動変更しません。
+ブリム・サポートの有無と開始オプション以外の項目はDB/APIでnullableです。開始オプションは準備開始時に固定し、印刷中の変更は次の印刷から使います。詳細3項目の`null`は工程の値を継承します。
+保存時は存在する材料と値の範囲を確認します。`required_machine_profile_key`・`process_profile_key`・`bed_type`はプリンターの設定なので、指定すると入力エラー（`PUT`は422、作成・取込は400）になります。
 材料の装填と実機の同期は保存条件ではなく、[キュー追加時](queue.md#プレートを追加する)に確認します。
 
 DB移行では旧プレートのNULLを維持し、ブリム・サポートをOFF、接触面材料を未設定として追加します。詳細3項目は全体初期値を当てず、上記の工程継承を使います。
 画面で編集して保存するまで元の内容を変更しません。
-待機中のジョブはプレートの現在の条件を参照し、条件変更で開始先の実機を自動変更しません。
-機種が合わなくなった待機分は理由を表示して保留します。準備開始後の版・条件・試行・出力は保持します。
+待機中のジョブはプレートの現在の条件と、追加先プリンターの機種・工程・ベッドを参照します。条件変更で開始先の実機を自動変更しません。
+刷れなくなった待機分は理由を表示して保留します。準備開始後の版・条件・試行・出力は保持します。
+
+## プリンターごとの試算
+
+`GET /api/plates/{id}/slice`は、登録した全プリンターの結果を`printers`の配列で返します。
+各要素は`printer_id`、`printer_name`、`machine_profile_key`、`state`（`pending`・`calculating`・`ready`・`failed`）、`seconds`、`error`、`reason`です。
+`reason`は刷れない理由で、`unfit`は台に乗らない（配置の失敗）、`material_setting`はその機種の材料設定がないことを示します。ほかの失敗は`null`で、`error`に短い理由が入ります。
+
+```json
+{"printers":[
+  {"printer_id":"…","printer_name":"A1 mini","machine_profile_key":"Bambu Lab A1 mini 0.4 nozzle","state":"failed","seconds":null,"error":"Models must fit together on one plate","reason":"unfit"},
+  {"printer_id":"p1","printer_name":"P1S","machine_profile_key":"Bambu Lab P1S 0.4 nozzle","state":"ready","seconds":8011,"error":null,"reason":null}
+]}
+```
+
+プリンターを追加すると全プレートを試算し、削除するとそのプリンターの結果を消します。準備開始済みの実行入力は消しません。
+プリンターの機種・工程・ベッドを変えると、そのプリンターの結果だけを再計算します。
+台に乗らないプリンターへのキュー追加は拒否します。詳細画面は1台なら名前の下に1行、複数台ならプリンターごとの行で示します。
 
 ## 制限と保存先
 

@@ -23,11 +23,9 @@ test('duplicate, add and replace keep quantity, drafts and conditions at narrow 
     for(const button of [page.getByRole('button',{name:'モデルを追加',exact:true}),page.getByRole('button',{name:front+'を差し替え'})])expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     await details(page).click();await page.getByLabel('壁の枚数（周）').fill('5');await page.getByLabel('充填率（%）').fill('25');
     await page.getByRole('combobox',{name:'インフィル',exact:true}).selectOption('adaptivecubic');
-    await page.getByRole('combobox',{name:'ビルドプレート',exact:true}).selectOption('High Temp Plate');
     await page.getByLabel('ブリムを付ける').uncheck();
     await page.getByRole('button',{name:/^接触面のフィラメント:/}).click();
     await page.getByRole('dialog').locator(`button[data-filament-id="${ctx.second_material}"]`).click();
-    const machine=await page.getByLabel('要求する機種・ノズル').inputValue(),process=await page.getByLabel('工程（品質）').inputValue();
     await page.getByRole('button',{name:front+'を差し替え',exact:true}).click();
     await expect(page.getByRole('searchbox',{name:'モデル名で検索'})).toBeFocused();
     await expect(page.getByRole('button',{name:front+' 選択済み',exact:true})).toBeDisabled();
@@ -39,8 +37,7 @@ test('duplicate, add and replace keep quantity, drafts and conditions at narrow 
     await expect(page.getByLabel(back+' の個数')).toHaveValue('10');await expect(page.getByLabel('プレート名',{exact:true})).toHaveValue(draftName);
     await expect(page.getByLabel('壁の枚数（周）')).toHaveValue('5');await expect(page.getByLabel('充填率（%）')).toHaveValue('25');
     await expect(page.getByRole('combobox',{name:'インフィル',exact:true})).toHaveValue('adaptivecubic');
-    await expect(page.getByLabel('要求する機種・ノズル')).toHaveValue(machine);await expect(page.getByLabel('工程（品質）')).toHaveValue(process);
-    await expect(page.getByRole('combobox',{name:'ビルドプレート',exact:true})).toHaveValue('High Temp Plate');await expect(page.getByLabel('ブリムを付ける')).not.toBeChecked();
+    await expect(page.getByLabel('ブリムを付ける')).not.toBeChecked();
     expect(await (await request.get(url)).json()).toEqual(copy);
     await page.getByRole('button',{name:'モデルを追加',exact:true}).click();
     await page.getByRole('searchbox').fill('bin');await page.getByRole('checkbox',{name:bin,exact:true}).check();
@@ -54,7 +51,7 @@ test('duplicate, add and replace keep quantity, drafts and conditions at narrow 
     await fit(page);await page.getByLabel('プレート名',{exact:true}).scrollIntoViewIfNeeded();await page.screenshot({path:`${out}/edited-${width}-${colorScheme}.png`,fullPage:true});
     await page.getByRole('button',{name:'保存',exact:true}).click();await expect(page).toHaveURL(new RegExp('/plates/'+id+'$'));await page.reload();
     const saved=await (await request.get(url)).json();expect(saved.name).toBe(draftName);expect(saved.models.map((m:any)=>[m.source,m.quantity])).toEqual([[back,10],[bin,1]]);
-    expect(saved.conditions).toEqual({...ctx.source.conditions,wall_loops:5,sparse_infill_density:25,sparse_infill_pattern:'adaptivecubic',bed_type:'High Temp Plate',brim_enabled:false,support_interface_filament_id:ctx.second_material});
+    expect(saved.conditions).toEqual({...ctx.source.conditions,wall_loops:5,sparse_infill_density:25,sparse_infill_pattern:'adaptivecubic',brim_enabled:false,support_interface_filament_id:ctx.second_material});
     expect(await (await request.get('/api/plates/'+ctx.source.id)).json()).toEqual(ctx.source);
     // Cancelling the entire editor does not save even after temporary empty composition.
     await page.getByRole('button',{name:'構成を編集'}).click();

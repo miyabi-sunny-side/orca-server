@@ -3,15 +3,12 @@
   import {
     request,
     defaultStartOptions,
-    ApiError,
     type PlateConditions,
     type DefaultSettings,
     type Printer,
-    type Profiles,
-    type FilamentSetting,
     type MaterialRole,
   } from "./api";
-  import { machineChoices, roleFields } from "./plate";
+  import { roleFields } from "./plate";
   import StrengthFields from "./StrengthFields.svelte";
   import PlateFilamentPicker from "./PlateFilamentPicker.svelte";
   let {
@@ -35,31 +32,23 @@
     printer: "プリンターを登録すると初期値を使えます。",
     printer_selection: "初期値に使うプリンターを選んでください。",
     profiles: "プリンターの機種・ノズルとプロファイルを確認してください。",
-    process: "この機種に対応する既定の工程を選んでください。",
     ams_sync:
       "AMSの現在の装填を確認できません。プリンターとの接続を確認してください。",
     material: "AMSに、この機種で使える割当済みの材料がありません。",
   };
   const missing = $derived(
-    [
-      value.required_machine_profile_key,
-      ...roles.map((role) => value[roleFields[role]]),
-      value.process_profile_key,
-      value.bed_type,
-    ].some((v) => v == null),
+    roles.map((role) => value[roleFields[role]]).some((v) => v == null),
   );
   const mainMaterial = $derived(
     value[roleFields[roles[0] ?? "primary"]] ?? null,
   );
   let printers = $state<Printer[]>([]),
-    profiles = $state<Profiles>();
-  let setting = $state<FilamentSetting>(),
     loading = $state(true),
-    error = $state(""),
-    conditionError = $state(""),
-    reading = $state(false),
-    materialFound = $state(false);
-  const machines = $derived(machineChoices(printers));
+    error = $state("");
+  // The printer owns the machine and process; the default printer's show inherited values.
+  const preview = $derived(
+    printers.find((p) => p.id === defaults?.default_printer_id) ?? printers[0],
+  );
   const controller = new AbortController();
   async function load() {
     loading = true;
@@ -78,48 +67,6 @@
   onMount(() => {
     void load();
     return () => controller.abort();
-  });
-  $effect(() => {
-    const machine = value.required_machine_profile_key,
-      material = mainMaterial;
-    const read = new AbortController();
-    profiles = undefined;
-    setting = undefined;
-    materialFound = false;
-    conditionError = "";
-    reading = !!machine;
-    if (machine)
-      void Promise.allSettled([
-        request<Profiles>(
-          `/api/slicer/profiles?machine=${encodeURIComponent(machine)}`,
-          { signal: read.signal },
-        ),
-        material
-          ? request<{ settings: FilamentSetting[] }>(
-              `/api/filaments/${material}`,
-              { signal: read.signal },
-            ).catch((e) => {
-              if (e instanceof ApiError && e.status === 404) return undefined;
-              throw e;
-            })
-          : Promise.resolve(undefined),
-      ])
-        .then(([p, f]) => {
-          if (!read.signal.aborted) {
-            if (p.status === "fulfilled") profiles = p.value;
-            else conditionError = (p.reason as Error).message;
-            if (f.status === "fulfilled") {
-              materialFound = !!f.value;
-              setting = f.value?.settings.find(
-                (s) => s.machine_profile_key === machine,
-              );
-            } else conditionError = (f.reason as Error).message;
-          }
-        })
-        .finally(() => {
-          if (!read.signal.aborted) reading = false;
-        });
-    return () => read.abort();
   });
 </script>
 
@@ -144,73 +91,23 @@
           : "/printers"}>設定を確認</a
       >
     </p>{/if}
-  <label class="field"
-    ><span>要求する機種・ノズル</span><select
-      bind:value={value.required_machine_profile_key}
-      onchange={() => changed("required_machine_profile_key")}
-      disabled={loading}
-    >
-      <option value={null}>未設定</option>
-      {#if value.required_machine_profile_key && !machines.includes(value.required_machine_profile_key)}<option
-          value={value.required_machine_profile_key}
-          >{value.required_machine_profile_key}（登録機なし）</option
-        >{/if}
-      {#each machines as machine}<option value={machine}>{machine}</option
-        >{/each}
-    </select></label
-  >
-  {#if !loading && !machines.length}<p class="caption">
-      <a href="/printers/new">プリンターを登録</a
-      >すると、所持機の機種・ノズルを選べます。
-    </p>{/if}
   {#each roles as role (role)}<PlateFilamentPicker
       label={roles.length === 1 && role === "primary"
         ? "フィラメント"
         : `${role}のフィラメント`}
       value={value[roleFields[role]] ?? null}
-      machine={value.required_machine_profile_key}
       choose={(id) => {
         value[roleFields[role]] = id;
         changed(roleFields[role]);
       }}
     />{/each}
-  <label class="field"
-    ><span>工程（品質）</span><select
-      bind:value={value.process_profile_key}
-      onchange={() => changed("process_profile_key")}
-      disabled={reading}
-    >
-      <option value={null}>未設定</option>
-      {#if value.process_profile_key && !profiles?.processes.includes(value.process_profile_key)}<option
-          value={value.process_profile_key}
-          >{value.process_profile_key}（組合せを確認）</option
-        >{/if}
-      {#each profiles?.processes ?? [] as process}<option value={process}
-          >{process}</option
-        >{/each}
-    </select></label
-  >
-  <label class="field"
-    ><span>ビルドプレート</span><select
-      bind:value={value.bed_type}
-      onchange={() => changed("bed_type")}
-      disabled={reading}
-    >
-      <option value={null}>未設定</option>
-      {#if value.bed_type && !profiles?.beds.includes(value.bed_type)}<option
-          value={value.bed_type}>{value.bed_type}（組合せを確認）</option
-        >{/if}
-      {#each profiles?.beds ?? [] as bed}<option value={bed}>{bed}</option
-        >{/each}
-    </select></label
-  >
   <details class="settings-details">
     <summary>詳細設定</summary>
     <StrengthFields
       bind:value
       patterns={defaults?.infill_patterns}
-      machine={value.required_machine_profile_key}
-      process={value.process_profile_key}
+      machine={preview?.machine_profile_key}
+      process={preview?.default_process_profile_key}
       {legacy}
       {changed}
     />
@@ -239,7 +136,6 @@
         label="接触面のフィラメント"
         clearLabel="主材料と同じにする"
         value={value.support_interface_filament_id ?? mainMaterial}
-        machine={value.required_machine_profile_key}
         choose={(id) => {
           value.support_interface_filament_id = id;
           changed("support_interface_filament_id");
@@ -266,27 +162,15 @@
       </label>
     {/each}
   </details>
-  {#if loading || reading}<p class="caption" role="status">
+  {#if loading}<p class="caption" role="status">
       印刷条件を確認しています…
     </p>{/if}
-  {#if error || conditionError}<div class="notice">
-      <p role="alert">{error || conditionError}</p>
+  {#if error}<div class="notice">
+      <p role="alert">{error}</p>
       <button class="btn" type="button" onclick={() => void load()}
         >条件を読み直す</button
       >
     </div>{/if}
-  {#if !reading && materialFound && value.required_machine_profile_key && mainMaterial && (!setting || setting.error)}<p
-      class="notice"
-    >
-      この機種で使う材料設定を確認してください。<a
-        href={`/filaments/${mainMaterial}`}>材料設定へ</a
-      >
-    </p>{/if}
-  {#if !reading && profiles && value.process_profile_key && !profiles.processes.includes(value.process_profile_key)}<p
-      class="notice"
-    >
-      工程が要求する機種・ノズルに対応していません。工程を選び直すか、未設定に戻してください。
-    </p>{/if}
 </fieldset>
 
 <style lang="sass">

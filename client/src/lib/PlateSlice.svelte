@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { request, type Plate, type Filament } from "./api";
-  import { estimateText, failureText, type Estimate } from "./queue";
+  import { estimateText, failureText, type PrinterEstimate } from "./queue";
   let {
     plate,
     filaments,
     edit,
   }: { plate: Plate; filaments: Filament[]; edit: () => void } = $props();
-  let estimate = $state<Estimate>(),
+  let estimates = $state<PrinterEstimate[]>(),
     error = $state(""),
     reading = $state(false),
     retrying = $state(false);
@@ -23,19 +23,20 @@
       ].filter((id): id is string => !!id),
     ),
   ]);
-  const materialError = $derived(
-    estimate?.error?.includes("material") ||
-      estimate?.error?.includes("filament"),
-  );
+  const materialError = (estimate: PrinterEstimate) =>
+    estimate.reason === "material_setting" ||
+    estimate.error?.includes("material") ||
+    estimate.error?.includes("filament");
   async function refresh() {
     if (reading || retrying) return;
     reading = true;
     try {
-      const value = await request<Estimate>(`/api/plates/${plate.id}/slice`, {
-        signal: controller.signal,
-      });
+      const value = await request<{ printers: PrinterEstimate[] }>(
+        `/api/plates/${plate.id}/slice`,
+        { signal: controller.signal },
+      );
       if (!controller.signal.aborted) {
-        estimate = value;
+        estimates = value.printers;
         error = "";
       }
     } catch (cause) {
@@ -53,7 +54,13 @@
         signal: controller.signal,
       });
       if (!controller.signal.aborted) {
-        estimate = { state: "pending", seconds: null, error: null };
+        estimates = estimates?.map((e) => ({
+          ...e,
+          state: "pending",
+          seconds: null,
+          error: null,
+          reason: null,
+        }));
         error = "";
       }
     } catch (cause) {
@@ -73,18 +80,23 @@
   });
 </script>
 
-<div aria-label="プレートの試算" class="plate-slice">
-  {#if estimate?.state === "failed"}
+{#snippet result(estimate: PrinterEstimate, named: boolean)}
+  {@const text = named
+    ? `${estimate.printer_name} · ${estimateText(estimate)}`
+    : estimateText(estimate)}
+  {#if estimate.state === "failed"}
     <details>
-      <summary class="caption">{estimateText(estimate)}</summary>
-      <p role="alert">{failureText[estimate.error ?? ""] ?? estimate.error}</p>
+      <summary class="caption">{text}</summary>
+      <p role="alert">
+        {failureText[estimate.error ?? ""] ?? estimate.error}
+      </p>
       <div class="actions">
         <button class="btn" onclick={edit}>プレートの条件を編集</button>
-        {#if materialError}
+        {#if materialError(estimate)}
           {#each materialIds as id}
             <a
               class="btn"
-              href={`/filaments/${id}?machine=${encodeURIComponent(plate.conditions.required_machine_profile_key ?? "")}`}
+              href={`/filaments/${id}?machine=${encodeURIComponent(estimate.machine_profile_key)}`}
             >
               {filaments.find((f) => f.id === id)?.name ??
                 "フィラメント"}の材料の設定
@@ -99,9 +111,25 @@
       </div>
     </details>
   {:else}
-    <p class="caption" role="status">
-      {estimate ? estimateText(estimate) : "試算を確認中…"}
+    <p class="caption" role="status">{text}</p>
+  {/if}
+{/snippet}
+
+<div aria-label="プレートの試算" class="plate-slice">
+  {#if !estimates}
+    <p class="caption" role="status">試算を確認中…</p>
+  {:else if !estimates.length}
+    <p class="caption">
+      プリンターがありません。<a href="/printers/new">プリンターを登録</a>
     </p>
+  {:else if estimates.length === 1}
+    {@render result(estimates[0], false)}
+  {:else}
+    <ul aria-label="プリンターごとの試算">
+      {#each estimates as estimate (estimate.printer_id)}
+        <li>{@render result(estimate, true)}</li>
+      {/each}
+    </ul>
   {/if}
   {#if error}
     <p role="alert">計算状態を取得できませんでした。{error}</p>
@@ -119,6 +147,14 @@
     overflow-wrap: anywhere
     p
       margin: var(--sp-1) 0
+    ul
+      list-style: none
+      margin: 0
+      padding: 0
+    li > p
+      min-height: 44px
+      align-content: center
+      margin: 0
     summary
       cursor: pointer
       min-height: 44px

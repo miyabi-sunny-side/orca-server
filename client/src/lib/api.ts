@@ -27,11 +27,8 @@ export type PlateConditions = Strength & {
   brim_enabled?: boolean;
   support_enabled?: boolean;
   support_interface_filament_id?: string | null;
-  required_machine_profile_key: string | null;
   filament_id: string | null;
   secondary_filament_id?: string | null;
-  process_profile_key: string | null;
-  bed_type: string | null;
 };
 export type DefaultSettings = {
   default_printer_id: string | null;
@@ -41,7 +38,6 @@ export type DefaultSettings = {
     | "printer"
     | "printer_selection"
     | "profiles"
-    | "process"
     | "ams_sync"
     | "material"
     | null;

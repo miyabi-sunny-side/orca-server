@@ -209,6 +209,23 @@ describe("queue estimates", () => {
     expect(
       estimateText({ state: "failed", seconds: null, error: "upstream" }),
     ).toBe("試算できませんでした");
+    expect(
+      estimateText({
+        state: "failed",
+        seconds: null,
+        error: "Models must fit together on one plate",
+        reason: "unfit",
+      }),
+    ).toBe("台に乗りません");
+    expect(
+      estimateText({
+        state: "failed",
+        seconds: null,
+        error:
+          "Configure this material for the required machine and nozzle first",
+        reason: "material_setting",
+      }),
+    ).toBe("材料設定がありません");
     for (const [seconds, expected] of [
       [1, "約1分"],
       [1140, "約19分"],

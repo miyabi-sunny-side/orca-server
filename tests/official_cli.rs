@@ -20,6 +20,11 @@ fn estimates() {
 }
 #[test]
 #[ignore = "requires official Orca 2.4.2"]
+fn printer_fit() {
+    scenario::printer_fit(&appdir());
+}
+#[test]
+#[ignore = "requires official Orca 2.4.2"]
 fn strength() {
     scenario::strength(&appdir());
 }

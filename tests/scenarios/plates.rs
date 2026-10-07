@@ -136,11 +136,11 @@ pub fn plate_archive(browser: bool) {
     let other = rig.configure(None, Some(other));
     for target in [&plate, &other] {
         until(
-            || rig.get(&format!("/api/plates/{}/slice", id(target)))["state"] == "ready",
+            || rig.slice(&format!("/api/plates/{}/slice", id(target)))["state"] == "ready",
             12,
         );
     }
-    let (snapshot, calls) = (rig.get(&slice), rig.traces().len());
+    let (snapshot, calls) = (rig.slice(&slice), rig.traces().len());
     let listed = |rig: &Rig, query: &str| -> Vec<Value> {
         array(&rig.get(&format!("/api/plates{query}"))).to_vec()
     };
@@ -150,7 +150,7 @@ pub fn plate_archive(browser: bool) {
     assert!(!listed(&rig, "").iter().any(|p| p["id"] == plate["id"]));
     assert_eq!(listed(&rig, "?archived=true"), std::slice::from_ref(&plate));
     assert_eq!(rig.get(&path), plate);
-    assert_eq!(rig.get(&slice), snapshot);
+    assert_eq!(rig.slice(&slice), snapshot);
     // Archived plates can still be queued; the existing admission path is unchanged.
     let job = rig.add(3);
     assert_eq!(job["plate_id"], plate["id"]);
@@ -171,7 +171,7 @@ pub fn plate_archive(browser: bool) {
         );
     }
     assert_eq!(rig.get(&path), plate);
-    assert_eq!(rig.get(&slice), snapshot);
+    assert_eq!(rig.slice(&slice), snapshot);
     assert_eq!(rig.traces().len(), calls);
     assert_eq!(array(&rig.queue()["waiting"]).len(), 1);
     assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
@@ -186,22 +186,11 @@ pub fn plate_admission(browser: bool) {
     let fid = rig.materials[1]["id"].clone();
     let conditions = base["conditions"].clone();
     let mini = "Bambu Lab A1 mini 0.2 nozzle";
-    for key in [
-        None,
-        Some("required_machine_profile_key"),
-        Some("filament_id"),
-        Some("process_profile_key"),
-        Some("bed_type"),
+    // The material is the only condition a plate needs; the printer has the rest.
+    for missing in [
+        nullable(&conditions),
+        merge(&conditions, &json!({"filament_id":null})),
     ] {
-        let mut missing = conditions.clone();
-        if let Some(key) = key {
-            missing[key] = Value::Null;
-        } else {
-            missing = nullable(&conditions);
-        }
-        if missing["required_machine_profile_key"].is_null() {
-            missing["process_profile_key"] = Value::Null;
-        }
         let plate = save(&rig, &base, missing);
         assert_eq!(admission(&rig, &plate, "p1")["admission"]["allowed"], false);
         add(&rig, &plate, "p1", 409);
@@ -209,10 +198,10 @@ pub fn plate_admission(browser: bool) {
     }
     base = save(&rig, &base, conditions.clone());
     for (key, value, status) in [
-        ("required_machine_profile_key", "unowned machine", 409),
         ("filament_id", "missing material", 404),
-        ("process_profile_key", "wrong process", 400),
-        ("bed_type", "wrong bed", 400),
+        ("required_machine_profile_key", MACHINE, 422),
+        ("process_profile_key", PROCESS, 422),
+        ("bed_type", BED, 422),
     ] {
         let mut data = edit(&base);
         data["conditions"][key] = json!(value);
@@ -229,7 +218,7 @@ pub fn plate_admission(browser: bool) {
         .collect();
     assert_eq!(array(&rig.get("/api/printers")).len(), 4);
     add(&rig, &base, id(&peers[0].1), 409);
-    let mini_plate=rig.post("/api/plates/import",&json!({"name":"mini plate","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":10}],"conditions":merge(&conditions,&json!({"required_machine_profile_key":mini}))}),201);
+    let mini_plate=rig.post("/api/plates/import",&json!({"name":"mini plate","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":2}],"conditions":conditions}),201);
     for (_, device) in &peers {
         assert_eq!(
             admission(&rig, &mini_plate, id(device))["admission"]["allowed"],
@@ -270,11 +259,7 @@ pub fn plate_admission(browser: bool) {
         Some(&q),
     );
     let old_version = base["version"].clone();
-    base = save(
-        &rig,
-        &base,
-        merge(&conditions, &json!({"bed_type":"High Temp Plate"})),
-    );
+    base = save(&rig, &base, merge(&conditions, &json!({"wall_loops":3})));
     rig.post("/api/queue?printer_id=p1", &request, 409);
     add(
         &rig,
@@ -282,6 +267,10 @@ pub fn plate_admission(browser: bool) {
         "p1",
         409,
     );
+    // A waiting job follows the printer's bed.
+    let mut printer = printer_settings(&rig.get("/api/printers/p1"));
+    printer["bed_type"] = json!("High Temp Plate");
+    rig.put("/api/printers/p1", &printer, 200);
     assert_eq!(rig.queue()["waiting"][0]["bed_type"], "High Temp Plate");
     rig.idle();
     for (_, device) in &peers[..2] {
@@ -317,7 +306,7 @@ pub fn creation_defaults(browser: bool) {
     assert_eq!(first["default_printer_id"], "p1");
     assert_eq!(
         first["conditions"],
-        json!({"required_machine_profile_key":MACHINE,"filament_id":rig.materials[0]["id"],"process_profile_key":PROCESS,"bed_type":BED,"sparse_infill_pattern":"adaptivecubic","sparse_infill_density":15.0,"wall_loops":2,"brim_enabled":false,"support_enabled":false,"support_interface_filament_id":null,
+        json!({"filament_id":rig.materials[0]["id"],"sparse_infill_pattern":"adaptivecubic","sparse_infill_density":15.0,"wall_loops":2,"brim_enabled":false,"support_enabled":false,"support_interface_filament_id":null,
             "start_options":{"bed_leveling":true,"flow_calibration":true,"timelapse":true,"vibration_calibration":false}})
     );
     assert!(first["reason"].is_null());
@@ -326,10 +315,7 @@ pub fn creation_defaults(browser: bool) {
     let requests = rig.broker.requests().len();
     rig.put("/api/printers/p1", &settings, 200);
     let initial = create(&rig, Some(nullable(&first["conditions"])));
-    assert_eq!(
-        initial["conditions"],
-        merge(&first["conditions"], &json!({"bed_type":"Cool Plate"}))
-    );
+    assert_eq!(initial["conditions"], first["conditions"]);
     let uploaded = rig.upload("Uploaded defaults", &[("cube.stl", fixture("cube.stl"))]);
     assert_eq!(uploaded["conditions"], initial["conditions"]);
     assert_eq!(
@@ -342,15 +328,12 @@ pub fn creation_defaults(browser: bool) {
         .0,
         403
     );
-    let manual = create(
-        &rig,
-        Some(json!({"filament_id":rig.materials[1]["id"],"bed_type":"High Temp Plate"})),
-    );
+    let manual = create(&rig, Some(json!({"filament_id":rig.materials[1]["id"]})));
     assert_eq!(
         manual["conditions"],
         merge(
             &initial["conditions"],
-            &json!({"filament_id":rig.materials[1]["id"],"bed_type":"High Temp Plate"})
+            &json!({"filament_id":rig.materials[1]["id"]})
         )
     );
     let mut old = save(&rig, &initial, nullable(&first["conditions"]));
@@ -386,7 +369,7 @@ pub fn creation_defaults(browser: bool) {
     assign(&rig, "p1", 0, rig.materials[0]["id"].clone());
     assign(&rig, "p1", 3, rig.materials[1]["id"].clone());
     if browser {
-        rig.browser("E2E_DEFAULTS_CONTEXT",&json!({"machine":MACHINE,"process":PROCESS,"bed":"Cool Plate","first":rig.materials[0]["id"],"second":rig.materials[1]["id"],"old":old["id"]}),None);
+        rig.browser("E2E_DEFAULTS_CONTEXT",&json!({"first":rig.materials[0]["id"],"second":rig.materials[1]["id"],"old":old["id"]}),None);
     }
     old = save(&rig, &old, nullable(&first["conditions"]));
     // MCP's independently discovered creation_defaults_match_rest covers the same creation/clear contract.
@@ -456,7 +439,7 @@ pub fn creation_defaults(browser: bool) {
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        23
+        24
     );
     let db = rig.db();
     let columns: Vec<String> = db
