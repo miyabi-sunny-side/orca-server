@@ -473,3 +473,27 @@ fn production_like_schema_23_keeps_plates_results_and_frozen_work() {
     assert_eq!(rig.traces().len(), calls);
     rig.check();
 }
+
+#[test]
+fn retry_and_cached_records_keep_the_gcode_prediction() {
+    let mut rig = Rig::new("plate-slice-retry-seconds");
+    rig.launch();
+    rig.seed();
+    rig.configure(None, None);
+    let slice = format!("/api/plates/{}/slice", id(&rig.plate));
+    until(|| rig.slice(&slice)["state"] == "ready", 12);
+    let calls = rig.traces().len();
+    rig.post(&slice, &json!({}), 202);
+    until(|| rig.slice(&slice)["state"] == "ready", 12);
+    assert_eq!(rig.slice(&slice)["seconds"], 1140);
+    // Records saved by the earlier retry bug: ready with a cached G-code but no seconds.
+    rig.db()
+        .execute(
+            "UPDATE plate_slices SET record_json=json_set(record_json,'$.seconds',NULL),checked_at=0 WHERE plate_id=?1",
+            [id(&rig.plate)],
+        )
+        .unwrap();
+    until(|| rig.slice(&slice)["seconds"] == 1140, 12);
+    assert_eq!(rig.traces().len(), calls);
+    rig.check();
+}

@@ -273,7 +273,7 @@ fn reuse(
     let Some((raw, project, gcode)) = cached else {
         return Ok(None);
     };
-    let Ok(record) = serde_json::from_str::<Record>(&raw) else {
+    let Ok(mut record) = serde_json::from_str::<Record>(&raw) else {
         return Ok(None);
     };
     if record.output_key.as_deref() != Some(&digest(&gcode)) {
@@ -296,6 +296,8 @@ fn reuse(
             return Ok(None);
         }
     }
+    // A retry clears seconds but keeps the cache; the restored G-code owns the prediction.
+    record.seconds = Some(artifacts::estimated_seconds(&path.join("print.gcode.3mf"))?);
     Ok(Some(record))
 }
 
