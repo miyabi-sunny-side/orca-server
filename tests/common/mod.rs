@@ -396,7 +396,7 @@ impl Rig {
             plate: Value::Null,
             process: None,
             http: reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(20))
                 .no_proxy()
                 .build()
                 .unwrap(),
