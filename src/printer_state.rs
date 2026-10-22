@@ -541,13 +541,18 @@ impl State {
                 let Some(raw) = raw.as_object() else {
                     continue;
                 };
-                if !ams.units.iter().any(|unit| unit.id == id) {
-                    ams.units.push(Unit {
-                        id,
-                        ..Unit::default()
+                let index = ams
+                    .units
+                    .iter()
+                    .position(|unit| unit.id == id)
+                    .unwrap_or_else(|| {
+                        ams.units.push(Unit {
+                            id,
+                            ..Unit::default()
+                        });
+                        ams.units.len() - 1
                     });
-                }
-                let unit = ams.units.iter_mut().find(|unit| unit.id == id).unwrap();
+                let unit = &mut ams.units[index];
                 update(&mut unit.humidity, raw, "humidity", |v| {
                     number(v)
                         .filter(|&v| v <= 5)
@@ -564,13 +569,18 @@ impl State {
                         let Some(raw) = raw.as_object() else {
                             continue;
                         };
-                        if !unit.trays.iter().any(|tray| tray.id == id) {
-                            unit.trays.push(Tray {
-                                id,
-                                ..Tray::default()
+                        let index = unit
+                            .trays
+                            .iter()
+                            .position(|tray| tray.id == id)
+                            .unwrap_or_else(|| {
+                                unit.trays.push(Tray {
+                                    id,
+                                    ..Tray::default()
+                                });
+                                unit.trays.len() - 1
                             });
-                        }
-                        let tray = unit.trays.iter_mut().find(|tray| tray.id == id).unwrap();
+                        let tray = &mut unit.trays[index];
                         // An id-only tray has no material data (for example, not read yet).
                         // Presence comes only from tray_exist_bits, as in BambuStudio: diffs omit
                         // unchanged bits, so clearing a bit here would later erase the read tray.
