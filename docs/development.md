@@ -42,8 +42,8 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 
 ## 開発環境での検証
 
-GitHub Actionsはformatter・型検査・lintと、画面・Rust・コンテナのビルドを行います。
-テストは開発環境で実行します。Linuxで全項目を検証するには、次のコマンドを使います。
+formatter・型検査・lint・テスト・ビルドは、commit前に開発環境で実行します。GitHub Actionsは検査しません。
+Linuxで全項目を検証するには、次のコマンドを使います。
 
 ```sh
 export ORCA_APPDIR=/path/to/squashfs-root
@@ -122,7 +122,7 @@ P1S 0.4mm、0.20mm Standard、Generic PLA High Speed、Textured PEI Plateの構�
 - `build.rs`: ビルド済み画面の存在確認と変更追跡。
 - [DESIGN.md](../DESIGN.md): 画面・テーマ・操作の設計。
 - `Dockerfile`: 画面とRustのビルド、非rootの実行イメージ。
-- `.github/workflows/`: CIとタグによるコンテナ公開。
+- `.github/workflows/`: タグによるコンテナ公開。
 
 `client/dist`はコンパイル時に取り込まれ、実行時の静的ファイル配置は不要です。
 未知の`/api/*`は404を返します。それ以外のURLには画面を返します。
