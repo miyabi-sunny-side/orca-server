@@ -2,7 +2,6 @@ use crate::{artifact::*, common::*};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path};
 
-#[allow(clippy::too_many_lines)] // Keep this end-to-end observation sequence together.
 pub fn layout(appdir: &Path) {
     let mut rig = Rig::with_options("official-layout", "v3", Some(appdir));
     rig.launch();
@@ -54,76 +53,11 @@ pub fn layout(appdir: &Path) {
             .clone();
         rig.next(&job, 200);
         until(|| rig.broker.prints().len() == index + 1, 90);
-        let project = fs::read(rig.artifact("project.3mf")).expect("project artifact is readable");
-        let printed =
-            fs::read(rig.artifact("print.gcode.3mf")).expect("print artifact is readable");
-        assert_eq!(
-            rig.ftp.contents().last(),
-            Some(&printed),
-            "uploaded bytes match the print artifact"
-        );
-        geometry(
-            &project,
-            &printed,
-            if index == 0 { 256. } else { 180. },
-            if index == 0 { 250. } else { 180. },
-        );
-        let settings = zip_json(&printed, "Metadata/project_settings.config");
-        let gcode = String::from_utf8(zip_read(&printed, "Metadata/plate_1.gcode"))
-            .expect("G-code is UTF-8");
-        assert!(
-            gcode.len() > 1000 && gcode.contains("215"),
-            "G-code is substantial and uses the 215 nozzle override"
-        );
-        assert_eq!(
-            settings["printer_settings_id"], *machine,
-            "slice uses the printer's machine profile"
-        );
-        assert_eq!(
-            settings["nozzle_diameter"],
-            json!([if index == 0 { "0.4" } else { "0.2" }]),
-            "nozzle diameter follows the machine profile"
-        );
-        assert_eq!(
-            settings["nozzle_temperature"][0], "215",
-            "material override sets the nozzle temperature"
-        );
-        assert!(
-            !zip::ZipArchive::new(std::io::Cursor::new(&project))
-                .expect("project artifact is a zip archive")
-                .file_names()
-                .any(|n| std::path::Path::new(n)
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("gcode"))),
-            "project artifact contains no G-code"
-        );
-        fs::write(rig.output.join(format!("{index}-project.3mf")), project)
-            .expect("output directory is writable");
-        fs::write(rig.output.join(format!("{index}-print.gcode.3mf")), printed)
-            .expect("output directory is writable");
+        check_printed(&rig, index, machine);
         rig.finish();
         rig.discard();
     }
-    let mut cube = rig.files.lock().expect("files lock is not poisoned")["parts/cube.stl"].clone();
-    let count = u32::from_le_bytes(
-        cube[80..84]
-            .try_into()
-            .expect("STL triangle count is 4 bytes"),
-    ) as usize;
-    for triangle in 0..count {
-        for offset in (96 + triangle * 50..132 + triangle * 50).step_by(4) {
-            let scaled = f32::from_le_bytes(
-                cube[offset..offset + 4]
-                    .try_into()
-                    .expect("STL float is 4 bytes"),
-            ) * 20.;
-            cube[offset..offset + 4].copy_from_slice(&scaled.to_le_bytes());
-        }
-    }
-    rig.files
-        .lock()
-        .expect("files lock is not poisoned")
-        .insert("parts/cube.stl".to_owned(), cube);
+    enlarge_cube(&rig);
     let action = rig.add_action(Some(spec), None);
     let job = array(&rig.send(action, 200)["waiting"])
         .last()
@@ -143,7 +77,6 @@ pub fn layout(appdir: &Path) {
     );
 }
 
-#[allow(clippy::too_many_lines)] // Keep this end-to-end observation sequence together.
 pub fn estimates(appdir: &Path) {
     let mut rig = Rig::with_options("official-estimates", "v3", Some(appdir));
     rig.launch();
@@ -164,28 +97,7 @@ pub fn estimates(appdir: &Path) {
             .clone();
         let (snapshot, directory, bytes) = estimate(&rig, &job);
         let seconds = prediction(&bytes);
-        let gcode =
-            String::from_utf8(zip_read(&bytes, "Metadata/plate_1.gcode")).expect("G-code is UTF-8");
-        let total = gcode
-            .lines()
-            .find_map(|line| line.split_once("total estimated time: ").map(|(_, v)| v))
-            .expect("G-code reports the total estimated time");
-        let parsed: u64 = total
-            .split_whitespace()
-            .map(|word| {
-                let (number, unit) = word.split_at(word.len() - 1);
-                number
-                    .parse::<u64>()
-                    .expect("duration amount is an integer")
-                    * match unit {
-                        "d" => 86400,
-                        "h" => 3600,
-                        "m" => 60,
-                        "s" => 1,
-                        _ => panic!("unknown duration unit"),
-                    }
-            })
-            .sum();
+        let parsed = gcode_total_seconds(&bytes);
         assert!(
             seconds.abs_diff(parsed) <= 1,
             "prediction {seconds}s matches G-code total {parsed}s"
@@ -261,6 +173,106 @@ pub fn estimates(appdir: &Path) {
         &rig.output.join("result.json"),
         &json!({"seconds":results,"cached_bytes_reused":true}),
     );
+}
+
+/// Checks the uploaded print and project artifacts of one layout case.
+fn check_printed(rig: &Rig, index: usize, machine: &str) {
+    let project = fs::read(rig.artifact("project.3mf")).expect("project artifact is readable");
+    let printed = fs::read(rig.artifact("print.gcode.3mf")).expect("print artifact is readable");
+    assert_eq!(
+        rig.ftp.contents().last(),
+        Some(&printed),
+        "uploaded bytes match the print artifact"
+    );
+    geometry(
+        &project,
+        &printed,
+        if index == 0 { 256. } else { 180. },
+        if index == 0 { 250. } else { 180. },
+    );
+    let settings = zip_json(&printed, "Metadata/project_settings.config");
+    let gcode =
+        String::from_utf8(zip_read(&printed, "Metadata/plate_1.gcode")).expect("G-code is UTF-8");
+    assert!(
+        gcode.len() > 1000 && gcode.contains("215"),
+        "G-code is substantial and uses the 215 nozzle override"
+    );
+    assert_eq!(
+        settings["printer_settings_id"], machine,
+        "slice uses the printer's machine profile"
+    );
+    assert_eq!(
+        settings["nozzle_diameter"],
+        json!([if index == 0 { "0.4" } else { "0.2" }]),
+        "nozzle diameter follows the machine profile"
+    );
+    assert_eq!(
+        settings["nozzle_temperature"][0], "215",
+        "material override sets the nozzle temperature"
+    );
+    assert!(
+        !zip::ZipArchive::new(std::io::Cursor::new(&project))
+            .expect("project artifact is a zip archive")
+            .file_names()
+            .any(|n| std::path::Path::new(n)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("gcode"))),
+        "project artifact contains no G-code"
+    );
+    fs::write(rig.output.join(format!("{index}-project.3mf")), project)
+        .expect("output directory is writable");
+    fs::write(rig.output.join(format!("{index}-print.gcode.3mf")), printed)
+        .expect("output directory is writable");
+}
+
+/// Scales the stored cube 20x so it no longer fits the build plate.
+fn enlarge_cube(rig: &Rig) {
+    let mut cube = rig.files.lock().expect("files lock is not poisoned")["parts/cube.stl"].clone();
+    let count = u32::from_le_bytes(
+        cube[80..84]
+            .try_into()
+            .expect("STL triangle count is 4 bytes"),
+    ) as usize;
+    for triangle in 0..count {
+        for offset in (96 + triangle * 50..132 + triangle * 50).step_by(4) {
+            let scaled = f32::from_le_bytes(
+                cube[offset..offset + 4]
+                    .try_into()
+                    .expect("STL float is 4 bytes"),
+            ) * 20.;
+            cube[offset..offset + 4].copy_from_slice(&scaled.to_le_bytes());
+        }
+    }
+    rig.files
+        .lock()
+        .expect("files lock is not poisoned")
+        .insert("parts/cube.stl".to_owned(), cube);
+}
+
+/// Reads the total estimated time that `OrcaSlicer` wrote into the G-code.
+fn gcode_total_seconds(bytes: &[u8]) -> u64 {
+    let gcode =
+        String::from_utf8(zip_read(bytes, "Metadata/plate_1.gcode")).expect("G-code is UTF-8");
+    let total = gcode
+        .lines()
+        .find_map(|line| line.split_once("total estimated time: ").map(|(_, v)| v))
+        .expect("G-code reports the total estimated time");
+    total
+        .split_whitespace()
+        .map(|word| {
+            let (number, unit) = word.split_at(word.len() - 1);
+            number
+                .parse::<u64>()
+                .expect("duration amount is an integer")
+                * match unit {
+                    "d" => 86400,
+                    "h" => 3600,
+                    "m" => 60,
+                    "s" => 1,
+                    _ => panic!("unknown duration unit"),
+                }
+        })
+        .sum()
 }
 
 #[allow(clippy::too_many_lines)] // Keep this end-to-end observation sequence together.
