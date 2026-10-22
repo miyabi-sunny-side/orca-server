@@ -15,7 +15,7 @@ fn without_ams(rig: &Rig, spool_material: &str) -> Value {
 /// `base` reporting `state` for the latest start.
 fn reporting(rig: &Rig, base: &Value, state: &str, error: u64) -> Value {
     let prints = rig.broker.prints();
-    let command = prints.last().unwrap();
+    let command = prints.last().expect("a print was started");
     let mut report = base.clone();
     report["print"] = merge(
         &report["print"],

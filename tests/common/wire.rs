@@ -4,7 +4,7 @@ pub fn packet(header: u8, body: &[u8]) -> Vec<u8> {
     let mut bytes = vec![header];
     let mut length = body.len();
     loop {
-        let digit = u8::try_from(length % 128).unwrap();
+        let digit = u8::try_from(length % 128).expect("length % 128 fits in u8");
         length /= 128;
         bytes.push(digit | if length == 0 { 0 } else { 128 });
         if length == 0 {

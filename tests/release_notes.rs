@@ -9,7 +9,7 @@ fn update(path: &std::path::Path) -> std::process::Output {
         .arg(path)
         .arg("ghcr.io/example/app:0.1.0@sha256:new")
         .output()
-        .unwrap()
+        .expect("python3 runs the release notes script")
 }
 #[test]
 fn changes_only_leading_image_and_preserves_changelog() {

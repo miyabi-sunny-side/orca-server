@@ -20,15 +20,20 @@ fn entries(rig: &Rig, query: &str) -> Vec<Value> {
     array(&journal(rig, query)["entries"]).to_vec()
 }
 fn seqs(entries: &[Value]) -> Vec<u64> {
-    entries.iter().map(|e| e["seq"].as_u64().unwrap()).collect()
+    entries
+        .iter()
+        .map(|e| e["seq"].as_u64().expect("journal entry has a numeric seq"))
+        .collect()
 }
 fn on_disk(rig: &Rig) -> (String, u64) {
     let mut text = String::new();
     let mut bytes = 0;
-    for file in fs::read_dir(rig.store.join("journal")).unwrap() {
-        let path = file.unwrap().path();
-        bytes += fs::metadata(&path).unwrap().len();
-        text += &fs::read_to_string(path).unwrap();
+    for file in fs::read_dir(rig.store.join("journal")).expect("journal directory is readable") {
+        let path = file.expect("journal directory entry is readable").path();
+        bytes += fs::metadata(&path)
+            .expect("journal file metadata is readable")
+            .len();
+        text += &fs::read_to_string(path).expect("journal file is UTF-8 text");
     }
     (text, bytes)
 }

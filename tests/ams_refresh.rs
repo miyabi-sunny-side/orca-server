@@ -7,20 +7,28 @@ use std::{thread, time::Duration};
 const REFRESH: &str = "/api/printers/p1/ams/refresh";
 
 fn reply(rig: &Rig, report: Option<&Value>) {
-    *rig.broker.pushall_reply.lock().unwrap() = report.map(|r| serde_json::to_vec(r).unwrap());
+    *rig.broker
+        .pushall_reply
+        .lock()
+        .expect("pushall reply mutex is not poisoned") =
+        report.map(|r| serde_json::to_vec(r).expect("report serializes to JSON"));
 }
 /// A refresh that waits for the server's full 15 s printer timeout (the harness client stops at 10 s).
 fn refresh_slowly(rig: &Rig, expected: u16) -> Value {
     let response = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
-        .unwrap()
+        .expect("HTTP client builds")
         .post(format!("{}{REFRESH}", rig.base))
         .json(&json!({}))
         .send()
-        .unwrap();
-    assert_eq!(response.status().as_u16(), expected);
-    response.json().unwrap()
+        .expect("AMS refresh request reaches the server");
+    assert_eq!(
+        response.status().as_u16(),
+        expected,
+        "unexpected AMS refresh status"
+    );
+    response.json().expect("AMS refresh response is JSON")
 }
 fn pushes(rig: &Rig) -> usize {
     rig.broker.requests().len()

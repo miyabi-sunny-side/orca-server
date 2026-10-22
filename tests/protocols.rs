@@ -31,49 +31,93 @@ fn mqtt(version: &str) {
     rig.full["print"]["access_code"] = json!(SECRET);
     rig.launch();
     let status = || rig.get("/api/printer/status");
-    assert_eq!(status()["connection"], "synchronizing");
-    assert_eq!(status()["ready_to_print"], false);
-    rig.broker
-        .report(serde_json::to_vec(&rig.full).unwrap(), true, None);
+    assert_eq!(
+        status()["connection"],
+        "synchronizing",
+        "connection is synchronizing before the first full report"
+    );
+    assert_eq!(
+        status()["ready_to_print"],
+        false,
+        "printer is not ready before synchronizing"
+    );
+    rig.broker.report(
+        serde_json::to_vec(&rig.full).expect("full report serializes to JSON"),
+        true,
+        None,
+    );
     rig.broker.send(
         &json!({"print":{"command":"push_status","msg":1,"gcode_state":"IDLE","print_error":0}}),
     );
     thread::sleep(Duration::from_millis(300));
-    assert_eq!(status()["synchronized"], false);
+    assert_eq!(
+        status()["synchronized"],
+        false,
+        "an incremental report must not synchronize"
+    );
     rig.broker.send(&rig.full);
     until(|| status()["ready_to_print"] == true, 12);
     rig.broker.send(&json!({"print":{"command":"push_status","msg":1,"gcode_state":"RUNNING","mc_percent":25,"ams":{"ams":[{"id":"0","tray":[{"id":"0","remain":60}]}]}}}));
     until(|| status()["print"]["percent"] == 25, 12);
     let observed = status();
-    assert_eq!(observed["ready_to_print"], false);
-    assert_eq!(observed["ams"]["units"][0]["trays"][0]["material"], "PLA");
     assert_eq!(
-        observed["ams"]["units"][0]["trays"][0]["remaining_percent"],
-        60
+        observed["ready_to_print"], false,
+        "a RUNNING printer is not ready to print"
+    );
+    assert_eq!(
+        observed["ams"]["units"][0]["trays"][0]["material"], "PLA",
+        "AMS tray material comes from the full report"
+    );
+    assert_eq!(
+        observed["ams"]["units"][0]["trays"][0]["remaining_percent"], 60,
+        "incremental report updates the AMS tray remain"
     );
     rig.broker.report(
-        serde_json::to_vec(&rig.full).unwrap(),
+        serde_json::to_vec(&rig.full).expect("full report serializes to JSON"),
         false,
         Some("device/OTHER/report"),
     );
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(status()["print"]["state"], "RUNNING");
+    assert_eq!(
+        status()["print"]["state"],
+        "RUNNING",
+        "reports for another device are ignored"
+    );
     rig.broker.action(Action::Disconnect);
     until(|| status()["connection"] == "disconnected", 12);
     until(|| rig.broker.requests().len() == 2, 12);
-    assert_eq!(status()["synchronized"], false);
-    assert!(status()["print"]["state"].is_null());
+    assert_eq!(
+        status()["synchronized"],
+        false,
+        "disconnect clears synchronization"
+    );
+    assert!(
+        status()["print"]["state"].is_null(),
+        "disconnect clears the print state"
+    );
     rig.broker
         .send(&json!({"print":{"command":"push_status","msg":1,"mc_percent":50}}));
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(status()["ready_to_print"], false);
+    assert_eq!(
+        status()["ready_to_print"],
+        false,
+        "an incremental report after reconnect does not make the printer ready"
+    );
     let mut resumed = rig.full.clone();
     resumed["print"]["gcode_state"] = json!("RUNNING");
     resumed["print"]["mc_percent"] = json!(50);
     rig.broker.send(&resumed);
     until(|| status()["synchronized"] == true, 12);
-    assert_eq!(status()["print"]["state"], "RUNNING");
-    assert_eq!(status()["ready_to_print"], false);
+    assert_eq!(
+        status()["print"]["state"],
+        "RUNNING",
+        "the resumed full report restores the print state"
+    );
+    assert_eq!(
+        status()["ready_to_print"],
+        false,
+        "a RUNNING printer is not ready to print"
+    );
     rig.broker.report(b"broken".to_vec(), false, None);
     until(|| status()["synchronized"] == false, 12);
     rig.broker.send(&rig.full);
@@ -95,8 +139,15 @@ fn mqtt(version: &str) {
         || rig.get("/api/printer/status")["connection"] == "disconnected",
         12,
     );
-    assert_eq!(rig.get("/api/printer/status")["ready_to_print"], false);
-    assert!(wrong.requests().is_empty());
+    assert_eq!(
+        rig.get("/api/printer/status")["ready_to_print"],
+        false,
+        "a printer behind a rejected certificate is not ready"
+    );
+    assert!(
+        wrong.requests().is_empty(),
+        "no MQTT request reaches a broker with the wrong certificate"
+    );
     rig.stop(false);
     rig.env.retain(|k, _| !k.starts_with("P1_"));
     rig.env.insert(
@@ -109,8 +160,14 @@ fn mqtt(version: &str) {
     );
     rig.launch();
     let status = rig.get("/api/printer/status");
-    assert_eq!(status["connection"], "unconfigured");
-    assert_eq!(status["ready_to_print"], false);
+    assert_eq!(
+        status["connection"], "unconfigured",
+        "a printer without P1_ settings is unconfigured"
+    );
+    assert_eq!(
+        status["ready_to_print"], false,
+        "an unconfigured printer is not ready"
+    );
     rig.stop(false);
     rig.check();
     for path in [
@@ -142,13 +199,25 @@ fn printer_start(version: &str) {
     rig.next(&job, 200);
     until(|| rig.broker.prints().len() == 1, 12);
     let command = rig.broker.prints()[0].clone();
-    assert_eq!(command["url"], format!("ftp:///{}", rig.ftp.uploads()[0]));
-    assert_eq!(command["param"], "Metadata/plate_1.gcode");
-    assert_eq!(command["ams_mapping"], json!([3]));
-    assert_eq!(command["use_ams"], true);
     assert_eq!(
-        rig.ftp.contents().last().unwrap(),
-        &std::fs::read(rig.artifact("print.gcode.3mf")).unwrap()
+        command["url"],
+        format!("ftp:///{}", rig.ftp.uploads()[0]),
+        "print command points to the uploaded file"
+    );
+    assert_eq!(
+        command["param"], "Metadata/plate_1.gcode",
+        "print command selects plate 1 gcode"
+    );
+    assert_eq!(
+        command["ams_mapping"],
+        json!([3]),
+        "print command maps the job to AMS slot 3"
+    );
+    assert_eq!(command["use_ams"], true, "print command uses the AMS");
+    assert_eq!(
+        rig.ftp.contents().last().expect("a file was uploaded"),
+        &std::fs::read(rig.artifact("print.gcode.3mf")).expect("print artifact is readable"),
+        "uploaded file matches the built artifact"
     );
     rig.start_phase("awaiting_confirmation");
     rig.broker.send(
@@ -158,7 +227,11 @@ fn printer_start(version: &str) {
     rig.start_phase("awaiting_confirmation");
     rig.broker.send(&json!({"print":{"command":"project_file","sequence_id":command["sequence_id"],"result":"success"}}));
     rig.start_phase("accepted");
-    assert_eq!(rig.queue()["current"]["state"], "preparing");
+    assert_eq!(
+        rig.queue()["current"]["state"],
+        "preparing",
+        "an accepted start shows the job as preparing"
+    );
     let mut unrelated = rig.full.clone();
     unrelated["print"] = merge(
         &unrelated["print"],
@@ -172,7 +245,11 @@ fn printer_start(version: &str) {
     rig.broker.action(Action::Disconnect);
     rig.start_phase("unknown");
     until(|| rig.broker.requests().len() == 2, 12);
-    assert_eq!(rig.broker.prints().len(), 1);
+    assert_eq!(
+        rig.broker.prints().len(),
+        1,
+        "reconnect does not resend the print command"
+    );
     rig.report("RUNNING");
     rig.start_phase("printing");
     rig.report("FINISH");
@@ -183,7 +260,11 @@ fn printer_start(version: &str) {
     rig.ftp.action(Action::Fail);
     rig.next(&job, 200);
     rig.start_phase("upload_failed");
-    assert_eq!(rig.broker.prints().len(), 1);
+    assert_eq!(
+        rig.broker.prints().len(),
+        1,
+        "a failed upload does not send a print command"
+    );
     let retry = |rig: &Rig, job: &serde_json::Value| {
         rig.send(
             json!({"type":"retry","expected_job":job["id"],"cleared":true}),
@@ -199,18 +280,31 @@ fn printer_start(version: &str) {
     until(|| rig.queue()["printer"]["ready_to_print"] == false, 12);
     rig.ftp.release();
     rig.start_phase("not_sent");
-    assert_eq!(rig.broker.prints().len(), 1);
+    assert_eq!(
+        rig.broker.prints().len(),
+        1,
+        "an upload to a busy printer does not send a print command"
+    );
     rig.idle();
     retry(&rig, &job);
     until(|| rig.broker.prints().len() == 2, 12);
-    let rejected = rig.broker.prints().last().unwrap().clone();
+    let rejected = rig
+        .broker
+        .prints()
+        .last()
+        .expect("the retried print command was sent")
+        .clone();
     rig.broker.send(&json!({"print":{"command":"project_file","sequence_id":rejected["sequence_id"],"result":"fail"}}));
     rig.start_phase("rejected");
     retry(&rig, &job);
     until(|| rig.broker.prints().len() == 3, 12);
     rig.start_phase("unknown");
     until(|| rig.broker.requests().len() == 3, 12);
-    assert_eq!(rig.broker.prints().len(), 3);
+    assert_eq!(
+        rig.broker.prints().len(),
+        3,
+        "reconnect after an unknown start does not resend the print command"
+    );
     rig.idle();
     rig.send(
         json!({"type":"retry","expected_job":job["id"],"cleared":false}),
@@ -229,9 +323,19 @@ fn printer_start(version: &str) {
     job = rig.add(3);
     rig.next(&job, 200);
     rig.start_phase("upload_failed");
-    assert!(wrong.tls_failures.load(Ordering::SeqCst) > 0);
-    assert!(wrong.uploads().is_empty());
-    assert_eq!(rig.broker.prints().len(), 3);
+    assert!(
+        wrong.tls_failures.load(Ordering::SeqCst) > 0,
+        "FTPS with the wrong certificate is rejected"
+    );
+    assert!(
+        wrong.uploads().is_empty(),
+        "nothing is uploaded to an untrusted FTPS server"
+    );
+    assert_eq!(
+        rig.broker.prints().len(),
+        3,
+        "a failed upload does not send a print command"
+    );
     rig.check();
 }
 #[test]
@@ -265,19 +369,23 @@ mod codec {
 }
 
 fn no_secret_files(path: &std::path::Path) {
-    for entry in std::fs::read_dir(path).unwrap() {
-        let path = entry.unwrap().path();
+    for entry in std::fs::read_dir(path).expect("store directory is readable") {
+        let path = entry.expect("store directory entry is readable").path();
         if path.is_dir() {
             no_secret_files(&path);
-        } else if path.file_name().unwrap() != "orca.sqlite3"
+        } else if path.file_name().expect("store file has a name") != "orca.sqlite3"
             && !path
                 .file_name()
-                .unwrap()
+                .expect("store file has a name")
                 .to_string_lossy()
                 .starts_with("orca.sqlite3-")
         {
-            let bytes = std::fs::read(path).unwrap();
-            assert!(!bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()));
+            let bytes = std::fs::read(&path).expect("store file is readable");
+            assert!(
+                !bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+                "{} contains the printer access code",
+                path.display()
+            );
         }
     }
 }

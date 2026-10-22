@@ -99,7 +99,11 @@ fn queue(appdir: Option<&std::path::Path>) {
         rig.post("/api/plates/import",&json!({"name":name,"models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":2}]}),201);
     }
     rig.browser("E2E_QUEUE_CONTEXT", &json!({}), Some(&control));
-    assert_eq!(rig.ftp.contents().len(), rig.broker.prints().len() + 1);
+    assert_eq!(
+        rig.ftp.contents().len(),
+        rig.broker.prints().len() + 1,
+        "FTP should hold one more file than the prints started"
+    );
     write_json(
         &rig.output.join("protocol-result.json"),
         &json!({"prints":rig.broker.prints().len(),"uploads":rig.ftp.uploads().len(),"official_cli":appdir.is_some()}),

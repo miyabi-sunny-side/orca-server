@@ -3,9 +3,14 @@ use crate::common::*;
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, thread, time::Duration};
 fn profiles(rig: &Rig, machine: &str) -> Value {
-    let mut url = reqwest::Url::parse("http://fixture/api/slicer/profiles").unwrap();
+    let mut url =
+        reqwest::Url::parse("http://fixture/api/slicer/profiles").expect("fixture URL is valid");
     url.query_pairs_mut().append_pair("machine", machine);
-    rig.get(&format!("{}?{}", url.path(), url.query().unwrap()))
+    rig.get(&format!(
+        "{}?{}",
+        url.path(),
+        url.query().expect("URL has the machine query")
+    ))
 }
 fn queue(rig: &Rig, pid: &str) -> Value {
     rig.get(&format!("/api/queue?printer_id={pid}"))
@@ -37,7 +42,7 @@ fn slot(rig: &Rig, pid: &str, index: u64) -> Value {
     array(&inventory(rig, pid)["slots"])
         .iter()
         .find(|s| s["ams_id"] == 0 && s["slot_index"] == index)
-        .unwrap()
+        .expect("AMS has the requested slot")
         .clone()
 }
 #[allow(clippy::too_many_lines)]
@@ -45,7 +50,8 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
     let mut rig = Rig::with_options("registry", "v1", appdir);
     rig.env
         .retain(|key, _| !key.starts_with("P1_") && key != "SCAD_LIVE_URL");
-    let pem = fs::read_to_string(rig.root.path().join("trusted.pem")).unwrap();
+    let pem = fs::read_to_string(rig.root.path().join("trusted.pem"))
+        .expect("fixture TLS certificate is readable");
     let peers: Vec<_> = (0..2)
         .map(|i| {
             (
@@ -54,33 +60,45 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
             )
         })
         .collect();
-    let full: Value = serde_json::from_slice(&fixture("p1_status.json")).unwrap();
+    let full: Value =
+        serde_json::from_slice(&fixture("p1_status.json")).expect("status fixture is JSON");
     let plate_id = uuid::Uuid::new_v4().to_string();
     let revision = uuid::Uuid::new_v4().to_string();
     let artifacts = rig.store.join(&plate_id).join("revisions").join(&revision);
-    fs::create_dir_all(&artifacts).unwrap();
-    fs::write(artifacts.join("0.stl"), fixture("cube.stl")).unwrap();
+    fs::create_dir_all(&artifacts).expect("artifact directory is creatable");
+    fs::write(artifacts.join("0.stl"), fixture("cube.stl")).expect("model artifact is writable");
     fs::write(
         artifacts.join("print.gcode.3mf"),
         fixture("p1_print.gcode.3mf"),
     )
-    .unwrap();
+    .expect("print artifact is writable");
     write_json(
         &rig.store.join(&plate_id).join("plate.json"),
         &json!({"format_version":1,"id":plate_id,"revision":revision,"name":"Routing cube","settings":{},"models":[{"name":"cube.stl","path":format!("revisions/{revision}/0.stl"),"source":null}],"project":null,"print":format!("revisions/{revision}/print.gcode.3mf")}),
     );
     let a1 = "Bambu Lab A1 mini 0.2 nozzle";
     rig.launch();
-    assert_eq!(rig.get("/api/printers"), json!([]));
+    assert_eq!(
+        rig.get("/api/printers"),
+        json!([]),
+        "no printers are registered initially"
+    );
     assert!(
         array(&rig.get("/api/printers/profiles"))
             .iter()
-            .any(|m| m["key"] == a1 && m["nozzle_diameter"] == "0.2")
+            .any(|m| m["key"] == a1 && m["nozzle_diameter"] == "0.2"),
+        "A1 mini 0.2 machine profile is listed"
     );
     let a1_profiles = profiles(&rig, a1);
     let p1_profiles = rig.get("/api/slicer/profiles");
-    assert_eq!(a1_profiles["defaults"]["machine"], a1);
-    assert!(!array(&a1_profiles["processes"]).contains(&p1_profiles["defaults"]["process"]));
+    assert_eq!(
+        a1_profiles["defaults"]["machine"], a1,
+        "A1 profiles default to the A1 machine"
+    );
+    assert!(
+        !array(&a1_profiles["processes"]).contains(&p1_profiles["defaults"]["process"]),
+        "A1 processes exclude the P1 default process"
+    );
     rig.request("GET", "/api/slicer/profiles?machine=unknown", None, 400);
     if browser {
         rig.browser_env("E2E_REGISTRY_SETTINGS",&json!({"name":"UI second","host":"127.0.0.1","serial":"UISECOND","access_code":SECRET,"tls_certificate":pem,"machine_profile_key":MACHINE,"default_process_profile_key":p1_profiles["defaults"]["process"],"bed_type":p1_profiles["defaults"]["bed"],"nozzle_material":"unknown"}),None,&[("E2E_REGISTRY_CERT",rig.root.path().join("trusted.pem").display().to_string())]);
@@ -101,8 +119,16 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
         peer.send(&report);
         until(|| status(&rig, &ids[i])["ready_to_print"] == true, 12);
     }
-    assert_eq!(status(&rig, &ids[0])["print"]["percent"], 0);
-    assert_eq!(status(&rig, &ids[1])["print"]["percent"], 17);
+    assert_eq!(
+        status(&rig, &ids[0])["print"]["percent"],
+        0,
+        "first printer reports its own progress"
+    );
+    assert_eq!(
+        status(&rig, &ids[1])["print"]["percent"],
+        17,
+        "second printer reports its own progress"
+    );
     rig.request("GET", "/api/printer/status", None, 409);
     rig.request("GET", "/api/printer/status?printer_id=missing", None, 404);
     let material=rig.post("/api/filaments",&json!({"name":"PLA for routing","vendor":"Fixture","material":"PLA","color":"FFFFFFFF","bambu_filament_id":null}),201);
@@ -115,7 +141,7 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
     assert!(
         saved["conditions"]
             .as_object()
-            .unwrap()
+            .expect("plate conditions are an object")
             .iter()
             .all(
                 |(k, v)| if matches!(k.as_str(), "brim_enabled" | "support_enabled") {
@@ -125,7 +151,8 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
                 } else {
                     v.is_null()
                 }
-            )
+            ),
+        "new plate conditions are unset except defaults"
     );
     saved = edit(&saved);
     saved["conditions"] = json!({"filament_id":material["id"]});
@@ -150,9 +177,20 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
     );
     let view = command(&rig, &ids[1], add, 200);
     let job = view["waiting"][0].clone();
-    assert_eq!(array(&view["waiting"]).len(), 1);
-    assert_eq!(array(&queue(&rig, &ids[0])["waiting"]).len(), 1);
-    assert_eq!(view["waiting"][0]["required_machine_profile_key"], MACHINE);
+    assert_eq!(
+        array(&view["waiting"]).len(),
+        1,
+        "second printer has one waiting job"
+    );
+    assert_eq!(
+        array(&queue(&rig, &ids[0])["waiting"]).len(),
+        1,
+        "first printer keeps its own job"
+    );
+    assert_eq!(
+        view["waiting"][0]["required_machine_profile_key"], MACHINE,
+        "job requires the printer machine profile"
+    );
     rig.request("DELETE", &format!("/api/printers/{}", ids[1]), None, 409);
     changed["name"] = json!("Second edited");
     rig.put(&format!("/api/printers/{}", ids[1]), &changed, 200);
@@ -171,16 +209,21 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
     );
     until(|| peers.iter().all(|(p, _)| p.prints().len() == 1), 90);
     for (pid, (_, ftp)) in ids.iter().zip(&peers) {
-        assert_eq!(ftp.uploads().len(), 1);
+        assert_eq!(ftp.uploads().len(), 1, "each printer receives one upload");
         let current = queue(&rig, pid)["current"].clone();
         assert_eq!(
             ftp.contents()[0],
             fs::read(
                 rig.store
-                    .join(current["artifact_path"].as_str().unwrap())
+                    .join(
+                        current["artifact_path"]
+                            .as_str()
+                            .expect("current job has an artifact path")
+                    )
                     .join("print.gcode.3mf")
             )
-            .unwrap()
+            .expect("stored print artifact is readable"),
+            "uploaded print matches the stored artifact"
         );
         rig.request("DELETE", &format!("/api/printers/{pid}"), None, 409);
     }
@@ -192,21 +235,39 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
     rig.launch();
     let listed = rig.get("/api/printers");
     let got: std::collections::BTreeSet<_> = array(&listed).iter().map(id).collect();
-    assert_eq!(got, ids.iter().map(String::as_str).collect());
     assert_eq!(
-        array(&listed).iter().find(|p| p["id"] == ids[1]).unwrap()["name"],
-        "Second edited"
+        got,
+        ids.iter().map(String::as_str).collect(),
+        "printers survive restart"
+    );
+    assert_eq!(
+        array(&listed)
+            .iter()
+            .find(|p| p["id"] == ids[1])
+            .expect("edited printer is listed")["name"],
+        "Second edited",
+        "printer name edit survives restart"
     );
     thread::sleep(Duration::from_millis(500));
-    assert!(peers.iter().all(|(p, _)| p.prints().len() == 1));
+    assert!(
+        peers.iter().all(|(p, _)| p.prints().len() == 1),
+        "restart does not start new prints"
+    );
     for (pid, (peer, _)) in ids.iter().zip(&peers) {
         rig.request("DELETE", &format!("/api/printers/{pid}"), None, 409);
         until(|| peer.requests().len() >= 2, 12);
         peer.send(&full);
         until(|| status(&rig, pid)["ready_to_print"] == true, 12);
         let job = queue(&rig, pid)["current"].clone();
-        assert_eq!(job["state"], "needs_attention");
-        assert_eq!(queue(&rig, pid)["allowed"]["discard"], false);
+        assert_eq!(
+            job["state"], "needs_attention",
+            "interrupted job needs attention"
+        );
+        assert_eq!(
+            queue(&rig, pid)["allowed"]["discard"],
+            false,
+            "unfinished job cannot be discarded"
+        );
         let printed = peer.prints()[0].clone();
         let mut finished = full.clone();
         finished["print"]["gcode_state"] = json!("FINISH");
@@ -224,14 +285,19 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
     }
     rig.stop(false);
     rig.launch();
-    assert_eq!(rig.get("/api/printers"), json!([]));
+    assert_eq!(
+        rig.get("/api/printers"),
+        json!([]),
+        "all printers were deleted"
+    );
     assert_eq!(
         fs::metadata(rig.store.join("orca.sqlite3"))
-            .unwrap()
+            .expect("database file exists")
             .permissions()
             .mode()
             & 0o077,
-        0
+        0,
+        "database file is private"
     );
     rig.stop(false);
 }
@@ -245,7 +311,8 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
     let mut rig = Rig::with_options("filament-ams", "v1", appdir);
     rig.env
         .retain(|k, _| !k.starts_with("P1_") && k != "SCAD_LIVE_URL");
-    let pem = fs::read_to_string(rig.root.path().join("trusted.pem")).unwrap();
+    let pem = fs::read_to_string(rig.root.path().join("trusted.pem"))
+        .expect("fixture TLS certificate is readable");
     let peers: Vec<_> = (0..2)
         .map(|i| Peer::broker(rig.root.path(), "trusted", &format!("MATERIAL{i}")))
         .collect();
@@ -262,9 +329,15 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
     }
     let full = json!({"print":{"command":"push_status","msg":0,"gcode_state":"IDLE","print_error":0,"ams":{"tray_exist_bits":"f","ams_exist_bits":"1","insert_flag":true,"power_on_flag":true,"ams":[{"id":"0","tray":[{"id":"0","tray_type":"PETG","tray_color":"FFFFFFFF","nozzle_temp_min":240,"nozzle_temp_max":260,"remain":-1},{"id":"1","tray_type":"PLA","tray_info_idx":"GFA01","tray_sub_brands":"PLA Matte","tray_color":"000000FF","tag_uid":"SYNTHETICBLACK","remain":42},{"id":"2","tray_type":"PLA","tray_info_idx":"GFA01","tray_sub_brands":"PLA Matte","tray_color":"FFFFFFFF","tag_uid":"SYNTHETICWHITE","remain":-1},{"id":"3","tray_type":"PETG","tray_color":"00AAFFFF","nozzle_temp_min":220,"nozzle_temp_max":260,"remain":50}]}]}}});
     rig.launch();
-    assert_eq!(rig.get("/api/filaments"), json!([]));
+    assert_eq!(
+        rig.get("/api/filaments"),
+        json!([]),
+        "no filaments exist initially"
+    );
     let profiles = rig.get("/api/slicer/profiles");
-    let machine = profiles["printer"].as_str().unwrap();
+    let machine = profiles["printer"]
+        .as_str()
+        .expect("default printer profile is a string");
     let mut ids = Vec::new();
     for (i, peer) in peers.iter().enumerate() {
         let saved=rig.post("/api/printers",&json!({"name":format!("材料確認 {i}"),"host":"127.0.0.1","serial":format!("MATERIAL{i}"),"access_code":SECRET,"tls_certificate":pem,"machine_profile_key":machine,"default_process_profile_key":profiles["defaults"]["process"],"bed_type":profiles["defaults"]["bed"],"nozzle_material":"stainless_steel","mqtt_port":peer.port,"ftps_port":1}),201);
@@ -297,22 +370,30 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
     ] {
         materials.push(rig.post("/api/filaments",&json!({"name":name,"vendor":vendor,"material":kind,"color":color,"bambu_filament_id":bid}),201));
     }
-    let [gf, black, white, petg] = <&[Value; 4]>::try_from(materials.as_slice()).unwrap();
+    let [gf, black, white, petg] =
+        <&[Value; 4]>::try_from(materials.as_slice()).expect("four materials were created");
     let mut settings = Vec::new();
     for (i, material) in materials.iter().enumerate() {
         let mut url = reqwest::Url::parse(&format!(
             "http://fixture/api/filaments/{}/profiles",
             id(material)
         ))
-        .unwrap();
+        .expect("fixture URL is valid");
         url.query_pairs_mut().append_pair("machine", machine);
-        let choices = rig.get(&format!("{}?{}", url.path(), url.query().unwrap()));
+        let choices = rig.get(&format!(
+            "{}?{}",
+            url.path(),
+            url.query().expect("URL has the machine query")
+        ));
         let key = if matches!(i, 1 | 2) {
             "Bambu PLA Matte @BBL X1C"
         } else {
             "Generic PETG"
         };
-        let choice = array(&choices).iter().find(|p| p["key"] == key).unwrap();
+        let choice = array(&choices)
+            .iter()
+            .find(|p| p["key"] == key)
+            .expect("profile choice is offered");
         let overrides = if matches!(i, 1 | 2) {
             json!({})
         } else {
@@ -322,7 +403,9 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
     }
     let data = |v: &Value| {
         let mut data = edit(v);
-        data.as_object_mut().unwrap().remove("filament_id");
+        data.as_object_mut()
+            .expect("filament setting is an object")
+            .remove("filament_id");
         data
     };
     let path = format!("/api/filaments/{}/settings", id(gf));
@@ -366,40 +449,69 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
             black["id"].clone(),
             white["id"].clone(),
             Value::Null
-        ]
+        ],
+        "AMS slots match tagged materials only"
     );
-    assert!(slots[0]["reported"]["remaining_percent"].is_null());
-    assert_eq!(slots[1]["reported"]["brand"], "PLA Matte");
-    assert_eq!(slots[1]["detect_on_insert"], true);
-    assert_eq!(slots[1]["detect_on_power_up"], true);
-    assert_eq!(slots[2]["setting"]["overrides_json"], json!({}));
+    assert!(
+        slots[0]["reported"]["remaining_percent"].is_null(),
+        "unknown remaining is null"
+    );
+    assert_eq!(slots[1]["reported"]["brand"], "PLA Matte", "reported brand");
+    assert_eq!(slots[1]["detect_on_insert"], true, "detect on insert");
+    assert_eq!(slots[1]["detect_on_power_up"], true, "detect on power up");
+    assert_eq!(
+        slots[2]["setting"]["overrides_json"],
+        json!({}),
+        "official material has no overrides"
+    );
     assert!(
         !slots[2]["setting"]["resolved"]["nozzle_temperature"]
             .as_str()
-            .unwrap()
-            .is_empty()
+            .expect("resolved nozzle temperature is a string")
+            .is_empty(),
+        "official material resolves a nozzle temperature"
     );
     mapping(&rig, &ids[0], &slots[0], gf["id"].clone(), 204);
     mapping(&rig, &ids[0], &slots[3], petg["id"].clone(), 204);
     let slots = inventory(&rig, &ids[0])["slots"].clone();
-    assert_eq!(slots[0]["filament"]["material"], "PETG-GF");
-    assert_eq!(slots[0]["reported"]["material"], "PETG");
     assert_eq!(
-        slots[0]["setting"]["resolved"]["nozzle_temperature_initial_layer"],
-        "250"
+        slots[0]["filament"]["material"], "PETG-GF",
+        "mapped material"
     );
-    assert_eq!(slots[0]["setting"]["resolved"]["nozzle_temperature"], "240");
-    assert_eq!(slots[3]["reported"]["temperature_max"], 260);
-    assert_eq!(slots[3]["setting"]["resolved"]["nozzle_temperature"], "220");
-    assert!(inventory(&rig, &ids[1])["slots"][0]["filament_id"].is_null());
+    assert_eq!(
+        slots[0]["reported"]["material"], "PETG",
+        "reported material"
+    );
+    assert_eq!(
+        slots[0]["setting"]["resolved"]["nozzle_temperature_initial_layer"], "250",
+        "initial layer override"
+    );
+    assert_eq!(
+        slots[0]["setting"]["resolved"]["nozzle_temperature"], "240",
+        "nozzle temperature override"
+    );
+    assert_eq!(
+        slots[3]["reported"]["temperature_max"], 260,
+        "reported max temperature"
+    );
+    assert_eq!(
+        slots[3]["setting"]["resolved"]["nozzle_temperature"], "220",
+        "PETG nozzle temperature override"
+    );
+    assert!(
+        inventory(&rig, &ids[1])["slots"][0]["filament_id"].is_null(),
+        "other printer slot stays unmapped"
+    );
     rig.request("DELETE", &format!("/api/filaments/{}", id(gf)), None, 409);
     if browser {
         let actions = peers[0].actions.clone();
         let full = full.clone();
         let control = HttpPeer::new(move |_, _, body| {
-            let value: Value = serde_json::from_slice(body).unwrap();
+            let value: Value = serde_json::from_slice(body).expect("control request body is JSON");
             if value["disconnect"] == true {
-                actions.send(Action::Disconnect).unwrap();
+                actions
+                    .send(Action::Disconnect)
+                    .expect("fixture peer accepts the disconnect");
             } else {
                 let value = if value["full"] == true {
                     full.clone()
@@ -408,11 +520,11 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
                 };
                 actions
                     .send(Action::Report(
-                        serde_json::to_vec(&value).unwrap(),
+                        serde_json::to_vec(&value).expect("report serializes to JSON"),
                         false,
                         "device/MATERIAL0/report".into(),
                     ))
-                    .unwrap();
+                    .expect("fixture peer accepts the report");
             }
             (204, vec![])
         });
@@ -427,7 +539,7 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
                     [&ids[0]],
                     |r| r.get::<_, Option<String>>(0),
                 )
-                .unwrap()
+                .expect("AMS slot query succeeds")
                 .is_none()
         },
         12,
@@ -437,7 +549,10 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
         || inventory(&rig, &ids[0])["slots"][0]["reported"]["color"] == "FFFFFFFF",
         12,
     );
-    assert!(inventory(&rig, &ids[0])["slots"][0]["filament_id"].is_null());
+    assert!(
+        inventory(&rig, &ids[0])["slots"][0]["filament_id"].is_null(),
+        "color change clears the mapping"
+    );
     mapping(&rig, &ids[0], &slots[0], gf["id"].clone(), 409);
     mapping(
         &rig,
@@ -467,22 +582,28 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
     );
     assert_eq!(
         inventory(&rig, &ids[1])["slots"][1]["filament_id"],
-        black["id"]
+        black["id"],
+        "other printer keeps its mapping"
     );
     rig.stop(false);
     rig.launch();
     let current = inventory(&rig, &ids[0]);
-    assert_eq!(current["current"], false);
-    assert_eq!(array(&current["slots"]).len(), 4);
+    assert_eq!(
+        current["current"], false,
+        "inventory is stale after restart"
+    );
+    assert_eq!(array(&current["slots"]).len(), 4, "slots survive restart");
     assert!(
         array(&current["slots"])
             .iter()
-            .all(|s| s["current"] == false)
+            .all(|s| s["current"] == false),
+        "all slots are stale after restart"
     );
     mapping(&rig, &ids[0], &current["slots"][0], gf["id"].clone(), 409);
     assert_eq!(
         rig.get(&format!("/api/filaments/{}", id(gf)))["settings"][0]["resolved"]["nozzle_temperature"],
-        "240"
+        "240",
+        "material settings survive restart"
     );
     for peer in &peers {
         until(|| peer.requests().len() >= 2, 12);
@@ -491,18 +612,24 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
     until(|| inventory(&rig, &ids[0])["current"] == true, 12);
     assert_eq!(
         inventory(&rig, &ids[0])["slots"][1]["filament_id"],
-        black["id"]
+        black["id"],
+        "tagged material is remapped after sync"
     );
     assert_eq!(
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        24
+            .expect("schema version is readable"),
+        24,
+        "database schema version"
     );
     assert!(
-        peers
-            .iter()
-            .all(|p| p.prints().is_empty() && p.records.lock().unwrap().options.is_empty())
+        peers.iter().all(|p| p.prints().is_empty()
+            && p.records
+                .lock()
+                .expect("peer records lock is not poisoned")
+                .options
+                .is_empty()),
+        "filament scenario does not print or set options"
     );
     rig.stop(false);
 }

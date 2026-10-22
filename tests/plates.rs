@@ -15,11 +15,16 @@ fn upload(method: &str, path: &str, name: &str, data: &str) -> Request<Body> {
         .uri(path)
         .header("content-type", "multipart/form-data; boundary=orca")
         .body(Body::from(body))
-        .unwrap()
+        .expect("multipart upload request is valid")
 }
 
 async fn json(response: axum::response::Response) -> Value {
-    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body is readable"),
+    )
+    .expect("response body is JSON")
 }
 
 #[tokio::test]
@@ -109,12 +114,14 @@ async fn call(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, Value
                 .method(method)
                 .uri(uri)
                 .body(Body::empty())
-                .unwrap(),
+                .expect("request is valid"),
         )
         .await
-        .unwrap();
+        .expect("router call is infallible");
     let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body is readable");
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 

@@ -9,7 +9,8 @@ use std::io::{Cursor, Write};
 use tower::ServiceExt;
 
 fn three_mf(painted: bool) -> Vec<u8> {
-    let mesh = stl_io::read_stl(&mut Cursor::new(include_bytes!("fixtures/cube.stl"))).unwrap();
+    let mesh = stl_io::read_stl(&mut Cursor::new(include_bytes!("fixtures/cube.stl")))
+        .expect("cube fixture is a valid STL");
     let vertices = mesh
         .vertices
         .iter()
@@ -47,10 +48,13 @@ fn three_mf(painted: bool) -> Vec<u8> {
         ("Metadata/plate_1.gcode", "UNTRUSTED GCODE - NEVER RUN"),
     ] {
         zip.start_file(name, zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(contents.as_bytes()).unwrap();
+            .expect("zip entry starts in memory");
+        zip.write_all(contents.as_bytes())
+            .expect("zip entry writes to memory");
     }
-    zip.finish().unwrap().into_inner()
+    zip.finish()
+        .expect("zip archive finishes in memory")
+        .into_inner()
 }
 fn upload(path: &str, files: &[(&str, &[u8])], values: &[(&str, &str)]) -> Request<Body> {
     let mut body = Vec::new();
@@ -59,10 +63,10 @@ fn upload(path: &str, files: &[(&str, &[u8])], values: &[(&str, &str)]) -> Reque
             body,
             "--orca\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
         )
-        .unwrap();
+        .expect("multipart field writes to memory");
     }
     for (name, bytes) in files {
-        write!(body,"--orca\r\nContent-Disposition: form-data; name=\"models\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").unwrap();
+        write!(body,"--orca\r\nContent-Disposition: form-data; name=\"models\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").expect("multipart file header writes to memory");
         body.extend_from_slice(bytes);
         body.extend_from_slice(b"\r\n");
     }
@@ -70,10 +74,15 @@ fn upload(path: &str, files: &[(&str, &[u8])], values: &[(&str, &str)]) -> Reque
     Request::post(path)
         .header("content-type", "multipart/form-data; boundary=orca")
         .body(Body::from(body))
-        .unwrap()
+        .expect("multipart upload request is valid")
 }
 async fn json(response: axum::response::Response) -> Value {
-    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body is readable"),
+    )
+    .expect("response body is JSON")
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ fn operator(rig: &Rig) -> Vec<Value> {
     rig.broker
         .records
         .lock()
-        .unwrap()
+        .expect("broker records mutex is not poisoned")
         .controls
         .iter()
         .filter(|c| c.get("info").is_none())
@@ -24,7 +24,12 @@ fn status(rig: &Rig) -> Value {
 /// A report naming the current attempt the way the production P1S did on 2026-10-01:
 /// the file name as `subtask_name` and no `gcode_file`.
 fn report_as_file(rig: &Rig, state: &str, error: u64) {
-    let command = rig.broker.prints().last().unwrap().clone();
+    let command = rig
+        .broker
+        .prints()
+        .last()
+        .expect("a print was started")
+        .clone();
     let mut full = rig.full.clone();
     full["print"]["gcode_state"] = json!(state);
     full["print"]["print_error"] = json!(error);

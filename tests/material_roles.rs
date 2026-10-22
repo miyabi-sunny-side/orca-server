@@ -10,14 +10,17 @@ use std::{fs, path::PathBuf};
 fn variant(single: bool, scaled: bool) -> Vec<u8> {
     use std::io::{Cursor, Read, Write};
     let original = fixture("material-roles.3mf");
-    let mut input = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+    let mut input =
+        zip::ZipArchive::new(Cursor::new(original)).expect("fixture 3MF is a zip archive");
     let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for i in 0..input.len() {
-        let mut entry = input.by_index(i).unwrap();
+        let mut entry = input.by_index(i).expect("zip entry index is in range");
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).unwrap();
+        entry
+            .read_to_end(&mut bytes)
+            .expect("zip entry is readable");
         if entry.name() == "3D/3dmodel.model" {
-            let mut text = String::from_utf8(bytes).unwrap();
+            let mut text = String::from_utf8(bytes).expect("3D model XML is UTF-8");
             if single {
                 text = text.replace(r#"<component objectid="4"/>"#, "");
             }
@@ -31,10 +34,15 @@ fn variant(single: bool, scaled: bool) -> Vec<u8> {
         }
         output
             .start_file(entry.name(), zip::write::SimpleFileOptions::default())
-            .unwrap();
-        output.write_all(&bytes).unwrap();
+            .expect("zip entry starts in memory");
+        output
+            .write_all(&bytes)
+            .expect("zip entry writes to memory");
     }
-    output.finish().unwrap().into_inner()
+    output
+        .finish()
+        .expect("zip archive finishes in memory")
+        .into_inner()
 }
 
 #[test]

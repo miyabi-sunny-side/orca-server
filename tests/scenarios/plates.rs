@@ -36,7 +36,7 @@ fn nullable(conditions: &Value) -> Value {
     Value::Object(
         conditions
             .as_object()
-            .unwrap()
+            .expect("plate conditions are an object")
             .keys()
             .filter(|k| !matches!(k.as_str(), "brim_enabled" | "support_enabled"))
             .map(|k| (k.clone(), Value::Null))
@@ -46,7 +46,7 @@ fn nullable(conditions: &Value) -> Value {
 fn new_peer(rig: &Rig, serial: &str, machine: &str) -> (Peer, Value) {
     let peer = Peer::broker(rig.root.path(), "trusted", serial);
     let settings = printer_settings(&rig.get("/api/printers/p1"));
-    let device=rig.post("/api/printers",&merge(&settings,&json!({"name":serial,"serial":serial,"mqtt_port":peer.port,"machine_profile_key":machine,"access_code":SECRET,"tls_certificate":fs::read_to_string(rig.root.path().join("trusted.pem")).unwrap()})),201);
+    let device=rig.post("/api/printers",&merge(&settings,&json!({"name":serial,"serial":serial,"mqtt_port":peer.port,"machine_profile_key":machine,"access_code":SECRET,"tls_certificate":fs::read_to_string(rig.root.path().join("trusted.pem")).expect("fixture TLS certificate is readable")})),201);
     until(|| !peer.requests().is_empty(), 12);
     peer.send(&rig.full);
     until(
@@ -63,7 +63,7 @@ fn assign(rig: &Rig, pid: &str, index: u64, material: Value) {
     let slot = array(&inventory["slots"])
         .iter()
         .find(|s| s["slot_index"] == index)
-        .unwrap();
+        .expect("AMS has the requested slot");
     let mut body = json!({"revision":slot["revision"]});
     body["filament_id"] = material;
     rig.put(&format!("/api/printers/{pid}/ams/{}", id(slot)), &body, 204);
@@ -78,7 +78,7 @@ pub fn plate_duplication(browser: bool) {
     ] {
         rig.files
             .lock()
-            .unwrap()
+            .expect("fixture file map lock is not poisoned")
             .insert(name.into(), fixture("cube.stl"));
     }
     rig.launch();
@@ -91,8 +91,14 @@ pub fn plate_duplication(browser: bool) {
     let source = rig.post("/api/plates/import", &json!({"name":"天馬ルームケース: base前","models":[{"name":"gridfinity/base-front.stl","source":"gridfinity/base-front.stl","quantity":10}],"conditions":conditions}),201);
     let path = format!("/api/plates/{}/duplicate", id(&source));
     let copy = rig.post(&path, &json!({"name":"API copy"}), 201);
-    assert_eq!(copy["conditions"], source["conditions"]);
-    assert_ne!(copy["models"][0]["id"], source["models"][0]["id"]);
+    assert_eq!(
+        copy["conditions"], source["conditions"],
+        "duplicate keeps the source conditions"
+    );
+    assert_ne!(
+        copy["models"][0]["id"], source["models"][0]["id"],
+        "duplicate gets new model ids"
+    );
     for body in [json!({"name":""}), json!({"name":"x","models":[]})] {
         rig.post(
             &path,
@@ -117,12 +123,26 @@ pub fn plate_duplication(browser: bool) {
             None,
         );
     }
-    assert_eq!(rig.get(&format!("/api/plates/{}", id(&source))), source);
-    assert!(array(&rig.queue()["waiting"]).is_empty());
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert_eq!(
+        rig.get(&format!("/api/plates/{}", id(&source))),
+        source,
+        "source plate is unchanged by duplication"
+    );
+    assert!(
+        array(&rig.queue()["waiting"]).is_empty(),
+        "duplication does not queue jobs"
+    );
+    assert!(
+        rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),
+        "duplication does not print or upload"
+    );
     rig.stop(false);
     rig.launch();
-    assert_eq!(rig.get(&format!("/api/plates/{}", id(&source))), source);
+    assert_eq!(
+        rig.get(&format!("/api/plates/{}", id(&source))),
+        source,
+        "source plate survives restart unchanged"
+    );
 }
 
 pub fn plate_archive(browser: bool) {
@@ -147,21 +167,42 @@ pub fn plate_archive(browser: bool) {
     for _ in 0..2 {
         rig.request("PUT", &format!("{path}/archive"), None, 204);
     }
-    assert!(!listed(&rig, "").iter().any(|p| p["id"] == plate["id"]));
-    assert_eq!(listed(&rig, "?archived=true"), std::slice::from_ref(&plate));
-    assert_eq!(rig.get(&path), plate);
-    assert_eq!(rig.slice(&slice), snapshot);
+    assert!(
+        !listed(&rig, "").iter().any(|p| p["id"] == plate["id"]),
+        "archived plate is hidden from the default list"
+    );
+    assert_eq!(
+        listed(&rig, "?archived=true"),
+        std::slice::from_ref(&plate),
+        "archived list contains only the archived plate"
+    );
+    assert_eq!(rig.get(&path), plate, "archiving does not change the plate");
+    assert_eq!(
+        rig.slice(&slice),
+        snapshot,
+        "archiving keeps the slice snapshot"
+    );
     // Archived plates can still be queued; the existing admission path is unchanged.
     let job = rig.add(3);
-    assert_eq!(job["plate_id"], plate["id"]);
+    assert_eq!(
+        job["plate_id"], plate["id"],
+        "archived plate can still be queued"
+    );
     for _ in 0..2 {
         rig.request("DELETE", &format!("{path}/archive"), None, 204);
     }
-    assert!(listed(&rig, "?archived=true").is_empty());
+    assert!(
+        listed(&rig, "?archived=true").is_empty(),
+        "unarchived plate leaves the archived list"
+    );
     rig.request("PUT", &format!("{path}/archive"), None, 204);
     rig.stop(false);
     rig.launch();
-    assert_eq!(listed(&rig, "?archived=true"), std::slice::from_ref(&plate));
+    assert_eq!(
+        listed(&rig, "?archived=true"),
+        std::slice::from_ref(&plate),
+        "archive state survives restart"
+    );
     rig.request("DELETE", &format!("{path}/archive"), None, 204);
     if browser {
         rig.browser(
@@ -170,11 +211,30 @@ pub fn plate_archive(browser: bool) {
             None,
         );
     }
-    assert_eq!(rig.get(&path), plate);
-    assert_eq!(rig.slice(&slice), snapshot);
-    assert_eq!(rig.traces().len(), calls);
-    assert_eq!(array(&rig.queue()["waiting"]).len(), 1);
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert_eq!(
+        rig.get(&path),
+        plate,
+        "plate is unchanged after archive round trips"
+    );
+    assert_eq!(
+        rig.slice(&slice),
+        snapshot,
+        "slice snapshot is unchanged after archive round trips"
+    );
+    assert_eq!(
+        rig.traces().len(),
+        calls,
+        "archive round trips do not re-slice"
+    );
+    assert_eq!(
+        array(&rig.queue()["waiting"]).len(),
+        1,
+        "only the queued job is waiting"
+    );
+    assert!(
+        rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),
+        "archive scenario does not print or upload"
+    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -192,9 +252,17 @@ pub fn plate_admission(browser: bool) {
         merge(&conditions, &json!({"filament_id":null})),
     ] {
         let plate = save(&rig, &base, missing);
-        assert_eq!(admission(&rig, &plate, "p1")["admission"]["allowed"], false);
+        assert_eq!(
+            admission(&rig, &plate, "p1")["admission"]["allowed"],
+            false,
+            "plate without material is not admitted"
+        );
         add(&rig, &plate, "p1", 409);
-        assert_eq!(rig.queue()["waiting"], json!([]));
+        assert_eq!(
+            rig.queue()["waiting"],
+            json!([]),
+            "rejected add leaves the queue empty"
+        );
     }
     base = save(&rig, &base, conditions.clone());
     for (key, value, status) in [
@@ -206,30 +274,43 @@ pub fn plate_admission(browser: bool) {
         let mut data = edit(&base);
         data["conditions"][key] = json!(value);
         rig.put(&format!("/api/plates/{}", id(&base)), &data, status);
-        assert_eq!(rig.get(&format!("/api/plates/{}", id(&base))), base);
+        assert_eq!(
+            rig.get(&format!("/api/plates/{}", id(&base))),
+            base,
+            "rejected plate update leaves the plate unchanged"
+        );
     }
     rig.post(
-        &format!("/api/filaments/{}/settings", fid.as_str().unwrap()),
+        &format!(
+            "/api/filaments/{}/settings",
+            fid.as_str().expect("filament id is a string")
+        ),
         &json!({"machine_profile_key":mini,"base_profile_key":FILAMENT,"overrides_json":{}}),
         201,
     );
     let peers: Vec<_> = (0..3)
         .map(|n| new_peer(&rig, &format!("MINI{n}"), mini))
         .collect();
-    assert_eq!(array(&rig.get("/api/printers")).len(), 4);
+    assert_eq!(
+        array(&rig.get("/api/printers")).len(),
+        4,
+        "three mini printers were registered besides p1"
+    );
     add(&rig, &base, id(&peers[0].1), 409);
     let mini_plate=rig.post("/api/plates/import",&json!({"name":"mini plate","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":2}],"conditions":conditions}),201);
     for (_, device) in &peers {
         assert_eq!(
             admission(&rig, &mini_plate, id(device))["admission"]["allowed"],
-            false
+            false,
+            "mini plate without loaded material is not admitted"
         );
         add(&rig, &mini_plate, id(device), 409);
     }
     assign(&rig, id(&peers[2].1), 3, fid.clone());
     assert_eq!(
         admission(&rig, &mini_plate, id(&peers[2].1))["admission"]["allowed"],
-        true
+        true,
+        "mini printer with the material loaded admits the plate"
     );
     add(&rig, &mini_plate, id(&peers[2].1), 200);
     for (_, device) in &peers[..2] {
@@ -240,7 +321,11 @@ pub fn plate_admission(browser: bool) {
         report["print"]["ams"]["tray_exist_bits"] = json!(bits);
         rig.broker.send(&report);
         until(|| rig.slot(3)["reported"]["present"] != true, 12);
-        assert_eq!(admission(&rig, &base, "p1")["admission"]["allowed"], false);
+        assert_eq!(
+            admission(&rig, &base, "p1")["admission"]["allowed"],
+            false,
+            "plate is not admitted without the AMS tray present"
+        );
         add(&rig, &base, "p1", 409);
     }
     rig.idle();
@@ -250,9 +335,16 @@ pub fn plate_admission(browser: bool) {
     busy["print"]["gcode_state"] = json!("RUNNING");
     rig.broker.send(&busy);
     until(|| rig.queue()["printer"]["ready_to_print"] == false, 12);
-    assert_eq!(admission(&rig, &base, "p1")["admission"]["allowed"], true);
+    assert_eq!(
+        admission(&rig, &base, "p1")["admission"]["allowed"],
+        true,
+        "busy printer still admits the plate"
+    );
     add(&rig, &base, "p1", 200);
-    assert!(rig.broker.prints().is_empty() && peers.iter().all(|(p, _)| p.prints().is_empty()));
+    assert!(
+        rig.broker.prints().is_empty() && peers.iter().all(|(p, _)| p.prints().is_empty()),
+        "admission alone does not start printing"
+    );
     let q = admission(&rig, &base, "p1");
     let request = rig.command(
         json!({"type":"add","plate_id":base["id"],"plate_version":base["version"]}),
@@ -271,7 +363,11 @@ pub fn plate_admission(browser: bool) {
     let mut printer = printer_settings(&rig.get("/api/printers/p1"));
     printer["bed_type"] = json!("High Temp Plate");
     rig.put("/api/printers/p1", &printer, 200);
-    assert_eq!(rig.queue()["waiting"][0]["bed_type"], "High Temp Plate");
+    assert_eq!(
+        rig.queue()["waiting"][0]["bed_type"],
+        "High Temp Plate",
+        "waiting job follows the printer bed"
+    );
     rig.idle();
     for (_, device) in &peers[..2] {
         assign(&rig, id(device), 3, fid.clone());
@@ -281,10 +377,21 @@ pub fn plate_admission(browser: bool) {
     }
     rig.stop(false);
     rig.launch();
-    assert_eq!(rig.get(&format!("/api/plates/{}", id(&base))), base);
-    assert_eq!(admission(&rig, &base, "p1")["admission"]["allowed"], false);
+    assert_eq!(
+        rig.get(&format!("/api/plates/{}", id(&base))),
+        base,
+        "plate survives restart unchanged"
+    );
+    assert_eq!(
+        admission(&rig, &base, "p1")["admission"]["allowed"],
+        false,
+        "plate is not admitted right after restart"
+    );
     add(&rig, &base, "p1", 409);
-    assert!(rig.broker.prints().is_empty() && peers.iter().all(|(p, _)| p.prints().is_empty()));
+    assert!(
+        rig.broker.prints().is_empty() && peers.iter().all(|(p, _)| p.prints().is_empty()),
+        "plate admission scenario does not print"
+    );
     rig.stop(false);
 }
 
@@ -303,21 +410,34 @@ pub fn creation_defaults(browser: bool) {
     rig.seed();
     let defaults = || rig.get("/api/default-settings");
     let first = defaults();
-    assert_eq!(first["default_printer_id"], "p1");
+    assert_eq!(
+        first["default_printer_id"], "p1",
+        "initial default printer is p1"
+    );
     assert_eq!(
         first["conditions"],
         json!({"filament_id":rig.materials[0]["id"],"sparse_infill_pattern":"adaptivecubic","sparse_infill_density":15.0,"wall_loops":2,"brim_enabled":false,"support_enabled":false,"support_interface_filament_id":null,
-            "start_options":{"bed_leveling":true,"flow_calibration":true,"timelapse":true,"vibration_calibration":false}})
+            "start_options":{"bed_leveling":true,"flow_calibration":true,"timelapse":true,"vibration_calibration":false}}),
+        "initial default conditions"
     );
-    assert!(first["reason"].is_null());
+    assert!(
+        first["reason"].is_null(),
+        "initial defaults have no blocking reason"
+    );
     let mut settings = printer_settings(&rig.get("/api/printers/p1"));
     settings["bed_type"] = json!("Cool Plate");
     let requests = rig.broker.requests().len();
     rig.put("/api/printers/p1", &settings, 200);
     let initial = create(&rig, Some(nullable(&first["conditions"])));
-    assert_eq!(initial["conditions"], first["conditions"]);
+    assert_eq!(
+        initial["conditions"], first["conditions"],
+        "nullable conditions are filled from defaults"
+    );
     let uploaded = rig.upload("Uploaded defaults", &[("cube.stl", fixture("cube.stl"))]);
-    assert_eq!(uploaded["conditions"], initial["conditions"]);
+    assert_eq!(
+        uploaded["conditions"], initial["conditions"],
+        "uploaded plate gets the same default conditions"
+    );
     assert_eq!(
         rig.response(
             "PUT",
@@ -326,7 +446,8 @@ pub fn creation_defaults(browser: bool) {
             Some("https://outside.invalid")
         )
         .0,
-        403
+        403,
+        "cross-origin default settings update is forbidden"
     );
     let manual = create(&rig, Some(json!({"filament_id":rig.materials[1]["id"]})));
     assert_eq!(
@@ -334,36 +455,57 @@ pub fn creation_defaults(browser: bool) {
         merge(
             &initial["conditions"],
             &json!({"filament_id":rig.materials[1]["id"]})
-        )
+        ),
+        "manual material overrides only the filament"
     );
     let mut old = save(&rig, &initial, nullable(&first["conditions"]));
-    assert!(old["conditions"].as_object().unwrap().iter().all(|(k, v)| {
-        if matches!(k.as_str(), "brim_enabled" | "support_enabled") {
-            v == false
-        } else if k == "start_options" {
-            v["timelapse"] == true
-        } else {
-            v.is_null()
-        }
-    }));
-    assert_eq!(rig.broker.requests().len(), requests);
-    assert!(rig.broker.prints().is_empty());
+    assert!(
+        old["conditions"]
+            .as_object()
+            .expect("plate conditions are an object")
+            .iter()
+            .all(|(k, v)| {
+                if matches!(k.as_str(), "brim_enabled" | "support_enabled") {
+                    v == false
+                } else if k == "start_options" {
+                    v["timelapse"] == true
+                } else {
+                    v.is_null()
+                }
+            }),
+        "cleared conditions stay unset except defaults"
+    );
+    assert_eq!(
+        rig.broker.requests().len(),
+        requests,
+        "default resolution sends no printer requests"
+    );
+    assert!(
+        rig.broker.prints().is_empty(),
+        "default resolution does not print"
+    );
     let unsupported=rig.post("/api/filaments",&json!({"name":"No machine setting","vendor":"Fixture","material":"PLA","color":"FFFFFFFF","bambu_filament_id":null}),201);
     assign(&rig, "p1", 0, unsupported["id"].clone());
     assert_eq!(
         defaults()["conditions"]["filament_id"],
-        rig.materials[1]["id"]
+        rig.materials[1]["id"],
+        "unsupported material falls back to the next material"
     );
     assign(&rig, "p1", 0, Value::Null);
     assert_eq!(
         defaults()["conditions"]["filament_id"],
-        rig.materials[1]["id"]
+        rig.materials[1]["id"],
+        "empty slot falls back to the next material"
     );
     let mut report = rig.full.clone();
     report["print"]["ams"]["tray_exist_bits"] = json!("1");
     rig.broker.send(&report);
     until(|| defaults()["conditions"]["filament_id"].is_null(), 12);
-    assert_eq!(defaults()["reason"], "material");
+    assert_eq!(
+        defaults()["reason"],
+        "material",
+        "defaults report the missing material"
+    );
     rig.idle();
     until(|| rig.slot(3)["reported"]["present"] == true, 12);
     assign(&rig, "p1", 0, rig.materials[0]["id"].clone());
@@ -387,12 +529,36 @@ pub fn creation_defaults(browser: bool) {
     settings["bed_type"] = json!("High Temp Plate");
     settings["default_process_profile_key"] = json!(quality);
     rig.put("/api/printers/p1", &settings, 200);
-    assert_eq!(rig.queue()["current"], before);
-    assert_eq!(rig.traces(), traces);
-    assert_eq!(rig.broker.requests().len(), requests);
-    assert_eq!(rig.ftp.uploads().len(), uploads);
-    assert_eq!(rig.broker.prints().len(), 1);
-    assert_eq!(rig.get(&format!("/api/plates/{}", id(&manual))), rig.plate);
+    assert_eq!(
+        rig.queue()["current"],
+        before,
+        "printer settings change does not alter the current job"
+    );
+    assert_eq!(
+        rig.traces(),
+        traces,
+        "printer settings change does not re-slice"
+    );
+    assert_eq!(
+        rig.broker.requests().len(),
+        requests,
+        "printer settings change sends no printer requests"
+    );
+    assert_eq!(
+        rig.ftp.uploads().len(),
+        uploads,
+        "printer settings change uploads nothing"
+    );
+    assert_eq!(
+        rig.broker.prints().len(),
+        1,
+        "printer settings change starts no new print"
+    );
+    assert_eq!(
+        rig.get(&format!("/api/plates/{}", id(&manual))),
+        rig.plate,
+        "printer settings change does not alter the plate"
+    );
     settings["machine_profile_key"] = json!("Bambu Lab P1S 0.2 nozzle");
     rig.put("/api/printers/p1", &settings, 409);
     let peers: Vec<_> = (0..2)
@@ -400,7 +566,11 @@ pub fn creation_defaults(browser: bool) {
         .collect();
     let chosen = id(&peers[0].1);
     let other = id(&peers[1].1);
-    assert_eq!(rig.get("/api/default-settings")["default_printer_id"], "p1");
+    assert_eq!(
+        rig.get("/api/default-settings")["default_printer_id"],
+        "p1",
+        "adding printers keeps p1 as default"
+    );
     if browser {
         rig.browser(
             "E2E_DEFAULTS_CONTEXT",
@@ -413,7 +583,10 @@ pub fn creation_defaults(browser: bool) {
         &json!({"default_printer_id":chosen}),
         204,
     );
-    assert!(rig.get("/api/default-settings")["conditions"]["filament_id"].is_null());
+    assert!(
+        rig.get("/api/default-settings")["conditions"]["filament_id"].is_null(),
+        "new default printer has no loaded material"
+    );
     rig.put(
         "/api/default-settings",
         &json!({"default_printer_id":"missing"}),
@@ -421,34 +594,56 @@ pub fn creation_defaults(browser: bool) {
     );
     assert_eq!(
         rig.get("/api/default-settings")["default_printer_id"],
-        chosen
+        chosen,
+        "invalid default printer keeps the previous choice"
     );
     rig.stop(false);
     rig.launch();
     let defaults = rig.get("/api/default-settings");
-    assert_eq!(defaults["default_printer_id"], chosen);
-    assert!(defaults["conditions"]["filament_id"].is_null());
-    assert_eq!(rig.get(&format!("/api/plates/{}", id(&old))), old);
+    assert_eq!(
+        defaults["default_printer_id"], chosen,
+        "default printer survives restart"
+    );
+    assert!(
+        defaults["conditions"]["filament_id"].is_null(),
+        "default material stays unset after restart"
+    );
+    assert_eq!(
+        rig.get(&format!("/api/plates/{}", id(&old))),
+        old,
+        "plate survives restart unchanged"
+    );
     rig.request("DELETE", &format!("/api/printers/{chosen}"), None, 204);
     let defaults = rig.get("/api/default-settings");
-    assert!(defaults["default_printer_id"].is_null());
-    assert_eq!(defaults["reason"], "printer_selection");
+    assert!(
+        defaults["default_printer_id"].is_null(),
+        "deleting the default printer clears it"
+    );
+    assert_eq!(
+        defaults["reason"], "printer_selection",
+        "defaults report the missing printer selection"
+    );
     rig.request("DELETE", &format!("/api/printers/{other}"), None, 204);
-    assert_eq!(rig.get("/api/default-settings")["default_printer_id"], "p1");
+    assert_eq!(
+        rig.get("/api/default-settings")["default_printer_id"],
+        "p1",
+        "default falls back to p1 when no choice remains"
+    );
     assert_eq!(
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        24
+            .expect("schema version is readable"),
+        24,
+        "database schema version"
     );
     let db = rig.db();
     let columns: Vec<String> = db
         .prepare("PRAGMA table_info(default_settings)")
-        .unwrap()
+        .expect("table_info query prepares")
         .query_map([], |r| r.get(1))
-        .unwrap()
+        .expect("table_info query runs")
         .collect::<Result<_, _>>()
-        .unwrap();
+        .expect("query rows are readable");
     assert_eq!(
         columns,
         [
@@ -457,18 +652,22 @@ pub fn creation_defaults(browser: bool) {
             "sparse_infill_pattern",
             "sparse_infill_density",
             "wall_loops"
-        ]
+        ],
+        "default_settings columns"
     );
     let rows: Vec<String> = db
         .prepare("SELECT default_printer_id FROM default_settings")
-        .unwrap()
+        .expect("default_settings query prepares")
         .query_map([], |r| r.get(0))
-        .unwrap()
+        .expect("default_settings query runs")
         .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(rows, ["p1"]);
-    assert_eq!(rig.broker.prints().len(), 1);
-    assert!(peers.iter().all(|(p, _)| p.prints().is_empty()));
+        .expect("query rows are readable");
+    assert_eq!(rows, ["p1"], "stored default printer");
+    assert_eq!(rig.broker.prints().len(), 1, "only the manual job printed");
+    assert!(
+        peers.iter().all(|(p, _)| p.prints().is_empty()),
+        "new printers did not print"
+    );
     rig.stop(false);
 }
 #[allow(dead_code)] // API-only target uses this recovery scenario.
@@ -481,21 +680,33 @@ pub fn recover_default_process() {
             "UPDATE printers SET default_process_profile_key='removed profile' WHERE id='p1'",
             [],
         )
-        .unwrap();
+        .expect("database update succeeds");
     // This invalid registration cannot start MQTT until its default process is corrected.
-    let port = rig.env.remove("P1_MQTT_PORT").unwrap();
+    let port = rig
+        .env
+        .remove("P1_MQTT_PORT")
+        .expect("rig sets the P1 MQTT port");
     rig.launch();
     rig.env.insert("P1_MQTT_PORT".into(), port);
     let broken = rig.get("/api/printers/p1");
-    assert!(!broken["configuration_error"].is_null());
+    assert!(
+        !broken["configuration_error"].is_null(),
+        "broken default process is reported"
+    );
     let mut settings = printer_settings(&broken);
     settings["default_process_profile_key"] = json!(PROCESS);
     let requests = rig.broker.requests().len();
     let fixed = rig.put("/api/printers/p1", &settings, 200);
-    assert!(fixed["configuration_error"].is_null());
+    assert!(
+        fixed["configuration_error"].is_null(),
+        "fixed default process clears the error"
+    );
     until(|| rig.broker.requests().len() > requests, 12);
     rig.idle();
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert!(
+        rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),
+        "recovery does not print or upload"
+    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -527,33 +738,55 @@ pub fn filament_picker(browser: bool) {
     assign(&rig, id(&peers[0].1), 0, other["id"].clone());
     assign(&rig, id(&peers[0].1), 3, rig.materials[0]["id"].clone());
     assign(&rig, id(&peers[1].1), 0, mini_material["id"].clone());
-    let mut url = reqwest::Url::parse("http://fixture/api/plate-filaments").unwrap();
+    let mut url =
+        reqwest::Url::parse("http://fixture/api/plate-filaments").expect("fixture URL is valid");
     url.query_pairs_mut().append_pair("machine", MACHINE);
-    let path = format!("{}?{}", url.path(), url.query().unwrap());
+    let path = format!(
+        "{}?{}",
+        url.path(),
+        url.query().expect("URL has the machine query")
+    );
     let candidates = rig.get(&path);
     let ids: Vec<_> = array(&candidates["filaments"])
         .iter()
         .map(|f| id(f).to_owned())
         .collect();
-    assert_eq!(ids.len(), 3);
-    assert!(ids.contains(&id(&other).to_owned()));
-    assert!(!ids.contains(&id(&mini_material).to_owned()));
+    assert_eq!(ids.len(), 3, "three filaments match the machine");
+    assert!(
+        ids.contains(&id(&other).to_owned()),
+        "filament loaded on another P1S is a candidate"
+    );
+    assert!(
+        !ids.contains(&id(&mini_material).to_owned()),
+        "mini-only filament is not a candidate"
+    );
     assert_eq!(
         array(&rig.get("/api/plate-filaments")["filaments"]).len(),
-        4
+        4,
+        "all loaded filaments without machine filter"
     );
     assert_eq!(
         array(&rig.get("/api/plate-filaments?include_unloaded=true")["filaments"]).len(),
-        5
+        5,
+        "unloaded filaments are included on request"
     );
-    assert_eq!(array(&rig.get("/api/filaments")).len(), 5);
+    assert_eq!(
+        array(&rig.get("/api/filaments")).len(),
+        5,
+        "all filaments are listed"
+    );
     let spec = merge(&rig.specification(0), &json!({"filament_id":other["id"]}));
     let plate = rig.configure(Some(spec), None);
-    assert_eq!(admission(&rig, &plate, "p1")["admission"]["allowed"], false);
+    assert_eq!(
+        admission(&rig, &plate, "p1")["admission"]["allowed"],
+        false,
+        "p1 without the material does not admit the plate"
+    );
     add(&rig, &plate, "p1", 409);
     assert_eq!(
         admission(&rig, &plate, id(&peers[0].1))["admission"]["allowed"],
-        true
+        true,
+        "printer with the material admits the plate"
     );
     rig.configure(Some(rig.specification(0)), None);
     if browser {
@@ -564,15 +797,18 @@ pub fn filament_picker(browser: bool) {
         let db_path = rig.store.join("orca.sqlite3");
         // The fixture alone can change observations or seed a broken historical reference.
         let control = HttpPeer::new(move |_, _, body| {
-            let v: Value = serde_json::from_slice(body).unwrap();
+            let v: Value = serde_json::from_slice(body).expect("control request body is JSON");
             if v["missing"] == true {
-                let db = rusqlite::Connection::open(&db_path).unwrap();
-                db.pragma_update(None, "foreign_keys", false).unwrap();
+                let db = rusqlite::Connection::open(&db_path).expect("database opens");
+                db.pragma_update(None, "foreign_keys", false)
+                    .expect("foreign keys can be disabled");
                 db.execute(
                     "UPDATE plates SET filament_id='missing-material' WHERE id=?1",
-                    [v["plate_id"].as_str().unwrap()],
+                    [v["plate_id"]
+                        .as_str()
+                        .expect("control request has a plate_id string")],
                 )
-                .unwrap();
+                .expect("plate filament update succeeds");
             } else {
                 for (sender, serial) in [
                     (&actions, crate::common::peers::SERIAL),
@@ -582,7 +818,7 @@ pub fn filament_picker(browser: bool) {
                     if v["offline"] == true {
                         sender
                             .send(crate::common::peers::Action::Disconnect)
-                            .unwrap();
+                            .expect("fixture peer accepts the disconnect");
                     } else {
                         let mut report = full.clone();
                         if v["empty"] == true {
@@ -590,11 +826,11 @@ pub fn filament_picker(browser: bool) {
                         }
                         sender
                             .send(crate::common::peers::Action::Report(
-                                serde_json::to_vec(&report).unwrap(),
+                                serde_json::to_vec(&report).expect("report serializes to JSON"),
                                 false,
                                 format!("device/{serial}/report"),
                             ))
-                            .unwrap();
+                            .expect("fixture peer accepts the report");
                     }
                 }
             }
@@ -607,7 +843,7 @@ pub fn filament_picker(browser: bool) {
         || {
             rig.get(&path)["printers"]
                 .as_array()
-                .unwrap()
+                .expect("filament candidates list printers")
                 .iter()
                 .any(|p| p["id"] == peers[0].1["id"] && p["state"] == "unconfirmed")
         },
@@ -616,7 +852,11 @@ pub fn filament_picker(browser: bool) {
     assert!(
         !array(&rig.get(&path)["filaments"])
             .iter()
-            .any(|f| f["id"] == other["id"])
+            .any(|f| f["id"] == other["id"]),
+        "filament on an unconfirmed printer is not a candidate"
     );
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert!(
+        rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),
+        "filament picker does not print or upload"
+    );
 }

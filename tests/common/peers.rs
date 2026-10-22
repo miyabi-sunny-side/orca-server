@@ -31,7 +31,7 @@ pub fn certificate(root: &Path, name: &str, version: &str) {
         let help = Command::new("openssl")
             .args(["req", "-help"])
             .output()
-            .unwrap();
+            .expect("openssl runs");
         if String::from_utf8_lossy(&help.stderr).contains("-x509v1") {
             command.arg("-x509v1");
         }
@@ -57,7 +57,7 @@ pub fn certificate(root: &Path, name: &str, version: &str) {
         .arg("-out")
         .arg(root.join(format!("{name}.pem")))
         .output()
-        .unwrap();
+        .expect("openssl runs");
     assert!(
         output.status.success(),
         "openssl: {}",
@@ -68,28 +68,33 @@ pub fn certificate(root: &Path, name: &str, version: &str) {
         .arg(root.join(format!("{name}.pem")))
         .args(["-noout", "-text"])
         .output()
-        .unwrap();
-    assert!(info.status.success());
+        .expect("openssl runs");
     assert!(
-        String::from_utf8_lossy(&info.stdout).contains(&format!("Version: {} (", &version[1..]))
+        info.status.success(),
+        "openssl x509: {}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&info.stdout).contains(&format!("Version: {} (", &version[1..])),
+        "certificate is X.509 {version}"
     );
 }
 pub fn config(cert: &Path, key: &Path) -> Arc<ServerConfig> {
     let provider = rustls::crypto::ring::default_provider();
     let certs = CertificateDer::pem_file_iter(cert)
-        .unwrap()
+        .expect("certificate PEM is readable")
         .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .expect("certificate PEM is valid");
     let key = provider
         .key_provider
-        .load_private_key(PrivateKeyDer::from_pem_file(key).unwrap())
-        .unwrap();
+        .load_private_key(PrivateKeyDer::from_pem_file(key).expect("private key PEM is readable"))
+        .expect("private key is supported");
     // Synthetic v1 peers need the same signed handshake as a printer, without WebPKI's v3-only certificate parser.
     let resolver = SingleCertAndKey::from(CertifiedKey::new(certs, key));
     Arc::new(
         ServerConfig::builder_with_provider(Arc::new(provider))
             .with_protocol_versions(&[&rustls::version::TLS12])
-            .unwrap()
+            .expect("TLS 1.2 is supported")
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(resolver)),
     )
@@ -97,7 +102,10 @@ pub fn config(cert: &Path, key: &Path) -> Arc<ServerConfig> {
 pub fn tls(raw: TcpStream, config: &Arc<ServerConfig>) -> io::Result<Tls> {
     raw.set_read_timeout(Some(Duration::from_secs(2)))?;
     raw.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let mut stream = StreamOwned::new(ServerConnection::new(config.clone()).unwrap(), raw);
+    let mut stream = StreamOwned::new(
+        ServerConnection::new(config.clone()).expect("TLS server connection builds"),
+        raw,
+    );
     while stream.conn.is_handshaking() {
         stream.conn.complete_io(&mut stream.sock)?;
     }
@@ -162,11 +170,16 @@ impl Peer {
             &root.join(format!("{name}.pem")),
             &root.join(format!("{name}.key")),
         );
-        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
-        socket.set_nonblocking(true).unwrap();
+        let socket = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        socket
+            .set_nonblocking(true)
+            .expect("listener becomes nonblocking");
         let (actions, rx) = mpsc::channel();
         let mut peer = Self {
-            port: socket.local_addr().unwrap().port(),
+            port: socket
+                .local_addr()
+                .expect("listener has a local address")
+                .port(),
             records: Arc::default(),
             actions,
             tls_failures: Arc::default(),
@@ -220,14 +233,22 @@ impl Peer {
                         if let Err(e) = outcome
                             && !normal_end(&e)
                         {
-                            records.lock().unwrap().errors.push(e.to_string());
+                            records
+                                .lock()
+                                .expect("peer records mutex is not poisoned")
+                                .errors
+                                .push(e.to_string());
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
                     Err(e) => {
-                        records.lock().unwrap().errors.push(e.to_string());
+                        records
+                            .lock()
+                            .expect("peer records mutex is not poisoned")
+                            .errors
+                            .push(e.to_string());
                         break;
                     }
                 }
@@ -236,7 +257,11 @@ impl Peer {
         peer
     }
     pub fn send(&self, value: &Value) {
-        self.report(serde_json::to_vec(value).unwrap(), false, None);
+        self.report(
+            serde_json::to_vec(value).expect("report is serializable"),
+            false,
+            None,
+        );
     }
     pub fn report(&self, bytes: Vec<u8>, retained: bool, topic: Option<&str>) {
         self.actions
@@ -245,22 +270,40 @@ impl Peer {
                 retained,
                 topic.map_or_else(|| format!("device/{}/report", self.serial), str::to_owned),
             ))
-            .unwrap();
+            .expect("peer action channel is open");
     }
     pub fn action(&self, action: Action) {
-        self.actions.send(action).unwrap();
+        self.actions
+            .send(action)
+            .expect("peer action channel is open");
     }
     pub fn requests(&self) -> Vec<Value> {
-        self.records.lock().unwrap().requests.clone()
+        self.records
+            .lock()
+            .expect("peer records mutex is not poisoned")
+            .requests
+            .clone()
     }
     pub fn prints(&self) -> Vec<Value> {
-        self.records.lock().unwrap().prints.clone()
+        self.records
+            .lock()
+            .expect("peer records mutex is not poisoned")
+            .prints
+            .clone()
     }
     pub fn uploads(&self) -> Vec<String> {
-        self.records.lock().unwrap().uploads.clone()
+        self.records
+            .lock()
+            .expect("peer records mutex is not poisoned")
+            .uploads
+            .clone()
     }
     pub fn contents(&self) -> Vec<Vec<u8>> {
-        self.records.lock().unwrap().contents.clone()
+        self.records
+            .lock()
+            .expect("peer records mutex is not poisoned")
+            .contents
+            .clone()
     }
     pub fn release(&self) {
         self.gate.store(true, Ordering::SeqCst);
@@ -270,7 +313,10 @@ impl Peer {
         self.received.store(false, Ordering::SeqCst);
     }
     pub fn check(&self) {
-        let seen = self.records.lock().unwrap();
+        let seen = self
+            .records
+            .lock()
+            .expect("peer records mutex is not poisoned");
         assert!(seen.errors.is_empty(), "{:?}", seen.errors);
     }
 }
@@ -324,7 +370,8 @@ fn mqtt_session(
             Ok(Action::Disconnect) => return Ok(()),
             Ok(Action::InvalidLogin) => peer.write_all(&packet(0x10, &login))?,
             Ok(Action::Report(value, retained, topic)) => {
-                let mut body = u16::try_from(topic.len()).unwrap().to_be_bytes().to_vec();
+                let length = u16::try_from(topic.len()).expect("MQTT topic fits in u16");
+                let mut body = length.to_be_bytes().to_vec();
                 body.extend(topic.as_bytes());
                 body.extend(value);
                 peer.write_all(&packet(if retained { 0x31 } else { 0x30 }, &body))?;
@@ -355,7 +402,7 @@ fn mqtt_session(
         }
         let value: Value =
             serde_json::from_slice(&body[2 + length..]).map_err(|_| invalid("request JSON"))?;
-        let mut seen = records.lock().unwrap();
+        let mut seen = records.lock().expect("peer records mutex is not poisoned");
         if value.get("pushing").is_some() {
             if value["pushing"]["command"] != "pushall"
                 || value["pushing"]["version"] != 1
@@ -364,7 +411,7 @@ fn mqtt_session(
                 return Err(invalid("invalid pushall"));
             }
             seen.requests.push(value);
-            if let Some(reply) = pushall_reply.lock().unwrap().clone() {
+            if let Some(reply) = pushall_reply.lock().expect("mutex is not poisoned").clone() {
                 publish(peer, &report, &reply)?;
             }
         } else if value["print"]["command"] == "print_option"
@@ -382,9 +429,10 @@ fn mqtt_session(
             seen.options.push(value);
         } else if let Some((section, command)) = control(&value) {
             seen.controls.push(value.clone());
-            if let Some(result) = control_reply.lock().unwrap().clone() {
+            if let Some(result) = control_reply.lock().expect("mutex is not poisoned").clone() {
                 let answer = answer(&value, section, &command, &result, serial);
-                publish(peer, &report, &serde_json::to_vec(&answer).unwrap())?;
+                let answer = serde_json::to_vec(&answer).expect("control answer is serializable");
+                publish(peer, &report, &answer)?;
             }
         } else {
             if value["print"]["command"] != "project_file" {
@@ -398,13 +446,16 @@ fn mqtt_session(
 /// A LAN camera that checks each login and answers it with `reply`, as the P1S does on port 6000.
 /// Returns the port and the received logins.
 pub fn camera(root: &Path, reply: Vec<u8>) -> (u16, mpsc::Receiver<Vec<u8>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+    let port = listener
+        .local_addr()
+        .expect("listener has a local address")
+        .port();
     let config = config(&root.join("trusted.pem"), &root.join("trusted.key"));
     let (logins, received) = mpsc::channel();
     thread::spawn(move || {
         for raw in listener.incoming() {
-            let Ok(mut stream) = tls(raw.unwrap(), &config) else {
+            let Ok(mut stream) = tls(raw.expect("camera connection is accepted"), &config) else {
                 continue;
             };
             let mut login = vec![0u8; 80];
@@ -419,7 +470,10 @@ pub fn camera(root: &Path, reply: Vec<u8>) -> (u16, mpsc::Receiver<Vec<u8>>) {
 }
 /// One camera frame: the 16-byte header announcing the image size, then the image.
 pub fn frame(image: &[u8]) -> Vec<u8> {
-    let mut frame = u32::try_from(image.len()).unwrap().to_le_bytes().to_vec();
+    let mut frame = u32::try_from(image.len())
+        .expect("camera image fits in u32")
+        .to_le_bytes()
+        .to_vec();
     frame.extend([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
     frame.extend(image);
     frame
@@ -454,7 +508,10 @@ fn accept_data(
 /// A directory listing (POSIX `ls -l` lines) or a file's bytes from the stored files.
 fn storage(records: &Mutex<Records>, command: &str, arg: &str) -> Option<Vec<u8>> {
     use std::fmt::Write as _;
-    let files = &records.lock().unwrap().files;
+    let files = &records
+        .lock()
+        .expect("peer records mutex is not poisoned")
+        .files;
     if command == "RETR" {
         return files.get(arg).cloned();
     }
@@ -498,7 +555,10 @@ fn answer(value: &Value, section: &str, command: &str, result: &str, serial: &st
     }
 }
 fn publish(peer: &mut Tls, topic: &str, payload: &[u8]) -> io::Result<()> {
-    let mut body = u16::try_from(topic.len()).unwrap().to_be_bytes().to_vec();
+    let mut body = u16::try_from(topic.len())
+        .expect("MQTT topic fits in u16")
+        .to_be_bytes()
+        .to_vec();
     body.extend(topic.as_bytes());
     body.extend(payload);
     peer.write_all(&packet(0x30, &body))
@@ -587,7 +647,7 @@ fn ftp_session(
                 let mut content = Vec::new();
                 data.read_to_end(&mut content)?;
                 {
-                    let mut seen = records.lock().unwrap();
+                    let mut seen = records.lock().expect("peer records mutex is not poisoned");
                     seen.files.insert(format!("/{arg}"), content.clone());
                     seen.contents.push(content);
                     seen.uploads.push(arg.to_owned());
@@ -626,7 +686,8 @@ fn ftp_session(
                 b"226 transfer complete\r\n"
             }
             "DELE" => {
-                if records.lock().unwrap().files.remove(arg).is_some() {
+                let mut seen = records.lock().expect("peer records mutex is not poisoned");
+                if seen.files.remove(arg).is_some() {
                     b"250 deleted\r\n"
                 } else {
                     b"550 not found\r\n"

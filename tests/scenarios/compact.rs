@@ -37,7 +37,10 @@ pub fn compact_queue(browser: bool) {
         204,
     );
     let mut conditions = rig.specification(0);
-    conditions.as_object_mut().unwrap().remove("ams_slot_id");
+    conditions
+        .as_object_mut()
+        .expect("plate conditions are an object")
+        .remove("ams_slot_id");
     let mut printer = printer_settings(&rig.get("/api/printers/p1"));
     printer["bed_type"] = json!("Cool Plate");
     rig.put("/api/printers/p1", &printer, 200);
@@ -45,11 +48,11 @@ pub fn compact_queue(browser: bool) {
     let action = json!({"type":"add","plate_id":plate["id"],"plate_version":plate["version"]});
     let one = array(&rig.send(action.clone(), 200)["waiting"])
         .last()
-        .unwrap()
+        .expect("added job is waiting")
         .clone();
     let two = array(&rig.send(action.clone(), 200)["waiting"])
         .last()
-        .unwrap()
+        .expect("added job is waiting")
         .clone();
     ready(&rig);
     let originals = rig.rows("SELECT * FROM plate_items ORDER BY id", &[]);
@@ -59,24 +62,27 @@ pub fn compact_queue(browser: bool) {
         .collect();
     rig.stop(false);
     legacy_schema::queue_v16(&rig.db());
-    rig.db().execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN archived; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;").unwrap();
+    rig.db().execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN archived; ALTER TABLE plates DROP COLUMN deleted; PRAGMA user_version=10;").expect("legacy v10 schema downgrade applies");
     rig.launch();
     rig.idle();
     ready(&rig);
     assert_eq!(
         rig.rows("PRAGMA user_version", &[]),
-        vec![vec![rusqlite::types::Value::Integer(24)]]
+        vec![vec![rusqlite::types::Value::Integer(24)]],
+        "legacy database migrates to the current schema version"
     );
     assert_eq!(
         rig.rows("SELECT * FROM plate_items ORDER BY id", &[]),
-        originals
+        originals,
+        "migration keeps plate items unchanged"
     );
     assert_eq!(
         array(&rig.queue()["waiting"])
             .iter()
             .map(|j| j["id"].clone())
             .collect::<Vec<_>>(),
-        ids
+        ids,
+        "migration keeps the waiting queue order"
     );
     rig.next(&active, 200);
     until(|| rig.broker.prints().len() == 1, 12);
@@ -99,8 +105,14 @@ pub fn compact_queue(browser: bool) {
     );
     let admission =
         rig.get(&format!("/api/queue?printer_id=p1&plate_id={}", id(&plate)))["admission"].clone();
-    assert_eq!(admission["allowed"], false);
-    assert_eq!(admission["reason"], reason);
+    assert_eq!(
+        admission["allowed"], false,
+        "zero bed temperature blocks admission"
+    );
+    assert_eq!(
+        admission["reason"], reason,
+        "admission reports the missing bed temperature"
+    );
     if browser {
         let control = rig.control();
         rig.browser(
@@ -117,9 +129,14 @@ pub fn compact_queue(browser: bool) {
     ready(&rig);
     assert_eq!(
         rig.get(&format!("/api/filaments/{}", id(&material)))["settings"][0]["overrides_json"],
-        json!({"nozzle_temperature_initial_layer":250,"nozzle_temperature":240,"bed_temperature_initial_layer":65,"bed_temperature":65})
+        json!({"nozzle_temperature_initial_layer":250,"nozzle_temperature":240,"bed_temperature_initial_layer":65,"bed_temperature":65}),
+        "material settings are restored to the valid temperatures"
     );
-    assert_eq!((rig.broker.prints().len(), rig.ftp.uploads().len()), before);
+    assert_eq!(
+        (rig.broker.prints().len(), rig.ftp.uploads().len()),
+        before,
+        "settings edits do not print or upload"
+    );
     rig.request(
         "DELETE",
         &format!("/api/plates/{}", id(&active_plate)),
@@ -133,21 +150,32 @@ pub fn compact_queue(browser: bool) {
         assert!(
             !array(&rig.get(&format!("/api/plates?q={}", id(p))))
                 .iter()
-                .any(|x| x["id"] == p["id"])
+                .any(|x| x["id"] == p["id"]),
+            "deleted plate {} is not listed",
+            id(p)
         );
     }
     rig.send(action, 409);
     assert_eq!(
         rig.rows("SELECT * FROM plate_items ORDER BY id", &[]),
-        originals
+        originals,
+        "plate deletion keeps queued plate items"
     );
-    assert_eq!(rig.rows(sql, &[id(&active)]), frozen);
+    assert_eq!(
+        rig.rows(sql, &[id(&active)]),
+        frozen,
+        "active print execution stays frozen"
+    );
     let q = rig.queue();
-    assert_eq!(q["current"]["plate_deleted"], true);
+    assert_eq!(
+        q["current"]["plate_deleted"], true,
+        "current job is marked as plate deleted"
+    );
     assert!(
         array(&q["waiting"])
             .iter()
-            .all(|j| j["plate_deleted"] == true)
+            .all(|j| j["plate_deleted"] == true),
+        "every waiting job is marked as plate deleted"
     );
     let stale = rig.command(
         json!({"type":"move","job_id":one["id"],"index":1}),
@@ -155,21 +183,45 @@ pub fn compact_queue(browser: bool) {
     );
     rig.send(json!({"type":"move","job_id":two["id"],"index":0}), 200);
     rig.post("/api/queue?printer_id=p1", &stale, 409);
-    assert_eq!(rig.queue()["waiting"][0]["id"], two["id"]);
-    assert_eq!((rig.broker.prints().len(), rig.ftp.uploads().len()), before);
+    assert_eq!(
+        rig.queue()["waiting"][0]["id"],
+        two["id"],
+        "stale move is rejected after the newer move"
+    );
+    assert_eq!(
+        (rig.broker.prints().len(), rig.ftp.uploads().len()),
+        before,
+        "queue edits do not print or upload"
+    );
     rig.report("FINISH");
     rig.phase("awaiting_removal");
     rig.next(&two, 200);
     until(|| rig.broker.prints().len() == 2, 12);
-    assert_eq!(rig.broker.prints()[1]["ams_mapping"], json!([0]));
+    assert_eq!(
+        rig.broker.prints()[1]["ams_mapping"],
+        json!([0]),
+        "second print maps AMS slot 0"
+    );
     rig.report("RUNNING");
     rig.phase("printing");
     rig.stop(false);
     rig.launch();
     rig.idle();
-    assert_eq!(rig.get("/api/plates"), json!([]));
-    assert_eq!(array(&rig.queue()["waiting"]).len(), 1);
-    assert_eq!(rig.queue()["current"]["plate_deleted"], true);
-    assert_eq!(rig.broker.prints().len(), 2);
-    assert_eq!(rig.ftp.uploads().len(), 2);
+    assert_eq!(
+        rig.get("/api/plates"),
+        json!([]),
+        "deleted plates stay hidden after restart"
+    );
+    assert_eq!(
+        array(&rig.queue()["waiting"]).len(),
+        1,
+        "one waiting job remains after restart"
+    );
+    assert_eq!(
+        rig.queue()["current"]["plate_deleted"],
+        true,
+        "current job stays plate deleted after restart"
+    );
+    assert_eq!(rig.broker.prints().len(), 2, "restart sends no extra print");
+    assert_eq!(rig.ftp.uploads().len(), 2, "restart uploads nothing extra");
 }

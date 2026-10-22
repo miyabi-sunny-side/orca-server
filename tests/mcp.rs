@@ -17,32 +17,51 @@ impl Drop for Server {
     }
 }
 async fn serve(app: Router) -> Server {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback port is bindable");
+    let base = format!(
+        "http://{}",
+        listener.local_addr().expect("listener has a local address")
+    );
     let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, app)
+            .await
+            .expect("test server runs until aborted");
     });
     Server { base, task }
 }
 async fn call(client: &Client, name: &str, args: Value, error: bool) -> Value {
     let result = client
         .call_tool(
-            CallToolRequestParams::new(name.to_owned())
-                .with_arguments(args.as_object().unwrap().clone()),
+            CallToolRequestParams::new(name.to_owned()).with_arguments(
+                args.as_object()
+                    .expect("tool arguments are a JSON object")
+                    .clone(),
+            ),
         )
         .await
-        .unwrap();
+        .expect("MCP tool call completes");
     assert_eq!(
         result.is_error.unwrap_or(false),
         error,
         "{name}: {result:?}"
     );
-    result.structured_content.unwrap()
+    result
+        .structured_content
+        .expect("tool result has structured content")
 }
 async fn read(base: &str, path: &str) -> Value {
-    let response = reqwest::get(format!("{base}{path}")).await.unwrap();
-    assert!(response.status().is_success());
-    serde_json::from_str(&response.text().await.unwrap()).unwrap()
+    let response = reqwest::get(format!("{base}{path}"))
+        .await
+        .expect("GET request reaches the server");
+    assert!(
+        response.status().is_success(),
+        "GET {path} returned {}",
+        response.status()
+    );
+    serde_json::from_str(&response.text().await.expect("response body is readable"))
+        .expect("response body is JSON")
 }
 
 #[tokio::test]
@@ -493,32 +512,35 @@ fn check_creation_defaults(custom: bool) {
         rig.put("/api/default-settings",&json!({"default_printer_id":"p1","sparse_infill_pattern":"gyroid","sparse_infill_density":22.5,"wall_loops":4}),204);
     }
     let base = rig.base.clone();
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
+    tokio::runtime::Runtime::new().expect("tokio runtime starts").block_on(async {
 
-    assert!(base.starts_with("http://127.0.0.1:"));
+    assert!(base.starts_with("http://127.0.0.1:"), "server listens on loopback: {base}");
     let client = ()
         .serve(StreamableHttpClientTransport::from_uri(format!(
             "{base}/mcp"
         )))
         .await
-        .unwrap();
+        .expect("MCP client connects");
     let defaults = read(&base, "/api/default-settings").await["conditions"].clone();
-    assert!(defaults.as_object().unwrap().iter().all(|(key, value)| {
-        if key == "support_interface_filament_id" {
-            value.is_null()
-        } else {
-            !value.is_null()
-        }
-    }));
+    assert!(
+        defaults.as_object().expect("default conditions are a JSON object").iter().all(|(key, value)| {
+            if key == "support_interface_filament_id" {
+                value.is_null()
+            } else {
+                !value.is_null()
+            }
+        }),
+        "every default condition except support_interface_filament_id is set: {defaults}"
+    );
     let mut edit = json!({"name":"MCP defaults","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":1}]});
     for nulls in [false, true] {
         if nulls {
             edit["conditions"] = json!({"filament_id":null});
         }
         let plate = call(&client, "plate_save", json!({"plate":edit}), false).await["data"].clone();
-        assert_eq!(plate["conditions"], defaults);
-        let id = plate["id"].as_str().unwrap();
-        assert_eq!(read(&base, &format!("/api/plates/{id}")).await, plate);
+        assert_eq!(plate["conditions"], defaults, "a saved plate takes the default conditions");
+        let id = plate["id"].as_str().expect("saved plate has a string id");
+        assert_eq!(read(&base, &format!("/api/plates/{id}")).await, plate, "the API returns the plate MCP saved");
         let mut update = edit.clone();
         update["version"] = plate["version"].clone();
         update["models"] = plate["models"].clone();
@@ -533,7 +555,7 @@ fn check_creation_defaults(custom: bool) {
         assert!(
             cleared["conditions"]
                 .as_object()
-                .unwrap()
+                .expect("conditions are a JSON object")
                 .iter()
                 .all(
                     |(key, value)| if matches!(key.as_str(), "brim_enabled" | "support_enabled") {
@@ -543,21 +565,22 @@ fn check_creation_defaults(custom: bool) {
                     } else {
                         value.is_null()
                     }
-                )
+                ),
+            "the update keeps only the fixed condition defaults: {cleared}"
         );
     }
     edit["conditions"] =
         json!({"sparse_infill_pattern":"gyroid","sparse_infill_density":0,"wall_loops":4});
     let explicit = call(&client, "plate_save", json!({"plate":edit}), false).await["data"].clone();
-    assert_eq!(explicit["conditions"]["sparse_infill_pattern"], "gyroid");
-    assert_eq!(explicit["conditions"]["sparse_infill_density"], 0.0);
-    assert_eq!(explicit["conditions"]["wall_loops"], 4);
-    assert_eq!(explicit["conditions"]["brim_enabled"], false);
-    let id = explicit["id"].as_str().unwrap();
+    assert_eq!(explicit["conditions"]["sparse_infill_pattern"], "gyroid", "explicit infill pattern is kept");
+    assert_eq!(explicit["conditions"]["sparse_infill_density"], 0.0, "explicit zero infill density is kept");
+    assert_eq!(explicit["conditions"]["wall_loops"], 4, "explicit wall loops are kept");
+    assert_eq!(explicit["conditions"]["brim_enabled"], false, "brim defaults to disabled");
+    let id = explicit["id"].as_str().expect("saved plate has a string id");
     let mut current = explicit.clone();
     for enabled in [true, false] {
         let mut update = current.clone();
-        update.as_object_mut().unwrap().remove("id");
+        update.as_object_mut().expect("plate is a JSON object").remove("id");
         update["conditions"]["brim_enabled"] = json!(enabled);
         current = call(
             &client,
@@ -567,14 +590,17 @@ fn check_creation_defaults(custom: bool) {
         )
         .await["data"]
             .clone();
-        assert_eq!(current["conditions"]["brim_enabled"], enabled);
-        assert_eq!(read(&base, &format!("/api/plates/{id}")).await, current);
-        assert_eq!(current["models"], explicit["models"]);
-        assert_eq!(current["conditions"]["wall_loops"], 4);
+        assert_eq!(current["conditions"]["brim_enabled"], enabled, "brim toggle is saved");
+        assert_eq!(read(&base, &format!("/api/plates/{id}")).await, current, "the API returns the plate MCP updated");
+        assert_eq!(current["models"], explicit["models"], "toggling brim keeps the models");
+        assert_eq!(current["conditions"]["wall_loops"], 4, "toggling brim keeps wall loops");
     }
-    client.cancel().await.unwrap();
+    client.cancel().await.expect("MCP client shuts down");
     });
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert!(
+        rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),
+        "saving plates must not print or upload"
+    );
 }
 
 async fn wait_value(base: &str, path: &str, pointer: &str, expected: Value) {
@@ -593,9 +619,10 @@ async fn control(base: &str, value: Value) {
             .json(&value)
             .send()
             .await
-            .unwrap()
+            .expect("control request reaches the server")
             .status()
-            .is_success()
+            .is_success(),
+        "control request to {base} failed"
     );
 }
 fn continuation(q: &Value) -> Value {

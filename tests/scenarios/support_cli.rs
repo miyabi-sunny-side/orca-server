@@ -15,21 +15,40 @@ fn inspect(
     bed: (u32, u32),
 ) -> Value {
     let settings = zip_json(bytes, "Metadata/project_settings.config");
-    let text = String::from_utf8(zip_read(bytes, "Metadata/slice_info.config")).unwrap();
-    let xml = roxmltree::Document::parse(&text).unwrap();
-    let gcode = String::from_utf8(zip_read(bytes, "Metadata/plate_1.gcode")).unwrap();
-    assert_eq!(settings["enable_support"], if enabled { "1" } else { "0" });
-    assert_eq!(settings["enforce_support_layers"], "0");
+    let text = String::from_utf8(zip_read(bytes, "Metadata/slice_info.config"))
+        .expect("slice info is UTF-8");
+    let xml = roxmltree::Document::parse(&text).expect("slice info is XML");
+    let gcode =
+        String::from_utf8(zip_read(bytes, "Metadata/plate_1.gcode")).expect("G-code is UTF-8");
+    assert_eq!(
+        settings["enable_support"],
+        if enabled { "1" } else { "0" },
+        "support follows the plate condition"
+    );
+    assert_eq!(
+        settings["enforce_support_layers"], "0",
+        "support layers are not enforced"
+    );
     let expected = if distinct { 2 } else { 1 };
-    assert_eq!(array(&settings["filament_settings_id"]).len(), expected);
-    assert_eq!(array(&settings["filament_type"]).len(), expected);
+    assert_eq!(
+        array(&settings["filament_settings_id"]).len(),
+        expected,
+        "one filament setting per used material"
+    );
+    assert_eq!(
+        array(&settings["filament_type"]).len(),
+        expected,
+        "one filament type per used material"
+    );
     assert_eq!(
         settings["textured_plate_temp"],
-        json!(vec![bed.1.to_string(); expected])
+        json!(vec![bed.1.to_string(); expected]),
+        "bed temperature follows the main material"
     );
     assert_eq!(
         settings["textured_plate_temp_initial_layer"],
-        json!(vec![bed.0.to_string(); expected])
+        json!(vec![bed.0.to_string(); expected]),
+        "initial bed temperature follows the main material"
     );
     for (key, initial) in [
         ("nozzle_temperature", false),
@@ -48,49 +67,77 @@ fn inspect(
                 ]
             })
             .collect();
-        assert_eq!(settings[key], json!(values));
+        assert_eq!(settings[key], json!(values), "{key} follows each material");
     }
     if enabled {
         assert!(
-            ["normal(auto)", "tree(auto)"].contains(&settings["support_type"].as_str().unwrap())
+            ["normal(auto)", "tree(auto)"].contains(
+                &settings["support_type"]
+                    .as_str()
+                    .expect("support type is a string")
+            ),
+            "support type is automatic"
         );
-        assert_eq!(settings["support_filament"], "1");
-        assert_eq!(settings["support_interface_filament"], expected.to_string());
-        assert_eq!(settings["support_interface_not_for_body"], "1");
+        assert_eq!(
+            settings["support_filament"], "1",
+            "support body uses the first filament"
+        );
+        assert_eq!(
+            settings["support_interface_filament"],
+            expected.to_string(),
+            "support interface uses the interface filament"
+        );
+        assert_eq!(
+            settings["support_interface_not_for_body"], "1",
+            "interface filament is kept off the support body"
+        );
         for key in [
             "support_interface_top_layers",
             "support_top_z_distance",
             "support_interface_spacing",
         ] {
-            assert!(settings[key].as_str().unwrap().parse::<f64>().unwrap() > 0.);
+            assert!(
+                settings[key]
+                    .as_str()
+                    .expect("support setting is a string")
+                    .parse::<f64>()
+                    .expect("support setting is numeric")
+                    > 0.,
+                "{key} is positive"
+            );
         }
     }
     if distinct {
-        assert_eq!(settings["enable_prime_tower"], "1");
+        assert_eq!(
+            settings["enable_prime_tower"], "1",
+            "two materials use a prime tower"
+        );
         for key in [
             "flush_into_infill",
             "flush_into_objects",
             "flush_into_support",
         ] {
-            assert_eq!(settings[key], "0");
+            assert_eq!(settings[key], "0", "{key} is disabled");
         }
         for i in [1, 2] {
             assert!(
                 settings["flush_volumes_matrix"][i]
                     .as_str()
-                    .unwrap()
+                    .expect("flush volume is a string")
                     .parse::<f64>()
-                    .unwrap()
-                    > 0.
+                    .expect("flush volume is numeric")
+                    > 0.,
+                "flush volume {i} is positive"
             );
         }
         assert!(
             array(&settings["flush_multiplier"]).iter().all(|v| v
                 .as_str()
-                .unwrap()
+                .expect("flush multiplier is a string")
                 .parse::<f64>()
-                .unwrap()
-                > 0.)
+                .expect("flush multiplier is numeric")
+                > 0.),
+            "flush multipliers are positive"
         );
     }
     let mut tool = 0;
@@ -110,9 +157,13 @@ fn inspect(
             "; FLUSH_END" => flush = false,
             _ => {}
         }
-        let command = line.split(';').next().unwrap().trim();
+        let command = line
+            .split(';')
+            .next()
+            .expect("split yields at least one part")
+            .trim();
         if ["T0", "T1"].contains(&command) {
-            tool = command[1..].parse().unwrap();
+            tool = command[1..].parse().expect("tool index is numeric");
             switches.push(tool);
         }
         if motion(command)
@@ -141,7 +192,8 @@ fn inspect(
         !bed_commands.is_empty()
             && bed_commands
                 .iter()
-                .all(|v| [0., f64::from(bed.0), f64::from(bed.1)].contains(v))
+                .all(|v| [0., f64::from(bed.0), f64::from(bed.1)].contains(v)),
+        "bed commands use the material's bed temperatures: {bed_commands:?}"
     );
     let indices = |kind: &str| {
         extrusion
@@ -151,41 +203,65 @@ fn inspect(
     };
     let active = indices("Support interface");
     let body = indices("Support");
-    assert!(extrusion.keys().all(|(kind, i)| {
-        ![
-            "Inner wall",
-            "Outer wall",
-            "Sparse infill",
-            "Internal solid infill",
-            "Bottom surface",
-            "Top surface",
-        ]
-        .contains(&kind.as_str())
-            || *i == 0
-    }));
+    assert!(
+        extrusion.keys().all(|(kind, i)| {
+            ![
+                "Inner wall",
+                "Outer wall",
+                "Sparse infill",
+                "Internal solid infill",
+                "Bottom surface",
+                "Top surface",
+            ]
+            .contains(&kind.as_str())
+                || *i == 0
+        }),
+        "model features use only the first tool"
+    );
     if enabled && !unused {
-        assert_eq!(active, BTreeSet::from([u32::from(distinct)]));
-        assert_eq!(body, BTreeSet::from([0]));
+        assert_eq!(
+            active,
+            BTreeSet::from([u32::from(distinct)]),
+            "support interface uses the interface tool"
+        );
+        assert_eq!(
+            body,
+            BTreeSet::from([0]),
+            "support body uses the first tool"
+        );
     } else {
-        assert!(active.is_empty() && body.is_empty());
+        assert!(
+            active.is_empty() && body.is_empty(),
+            "no support is extruded"
+        );
     }
     if distinct && !unused {
-        assert!(switches.contains(&0) && switches.contains(&1) && purge > 0.);
+        assert!(
+            switches.contains(&0) && switches.contains(&1) && purge > 0.,
+            "both tools are used with a purge"
+        );
         assert!(
             extrusion
                 .iter()
-                .any(|((kind, _), amount)| kind == "Prime tower" && *amount > 0.)
+                .any(|((kind, _), amount)| kind == "Prime tower" && *amount > 0.),
+            "prime tower is extruded"
         );
         assert!(
             temperatures
                 .iter()
-                .all(|t| nozzle_commands.contains(&f64::from(t.1)))
+                .all(|t| nozzle_commands.contains(&f64::from(t.1))),
+            "each material's nozzle temperature is commanded"
         );
     }
     let used: Vec<u32> = xml
         .descendants()
         .filter(|n| n.has_tag_name("filament"))
-        .map(|n| n.attribute("id").unwrap().parse().unwrap())
+        .map(|n| {
+            n.attribute("id")
+                .expect("filament has an id")
+                .parse()
+                .expect("filament id is numeric")
+        })
         .collect();
     assert_eq!(
         used,
@@ -193,16 +269,20 @@ fn inspect(
             vec![1, 2]
         } else {
             vec![1]
-        }
+        },
+        "slice info lists the used filaments"
     );
     json!({"seconds":prediction(bytes),"types":settings["filament_type"],"colors":settings["filament_colour"],"support_body_indices":body,"interface_indices":active,"switches":switches,"purge_filament_mm":purge,"bed_commands":bed_commands,"nozzle_commands":nozzle_commands})
 }
 #[allow(clippy::too_many_lines)] // Keep this end-to-end observation sequence together.
 pub fn support(mut rig: Rig) {
-    rig.files.lock().unwrap().insert(
-        "parts/support-cantilever.stl".into(),
-        fixture("support-cantilever.stl"),
-    );
+    rig.files
+        .lock()
+        .expect("files lock is not poisoned")
+        .insert(
+            "parts/support-cantilever.stl".into(),
+            fixture("support-cantilever.stl"),
+        );
     rig.full["print"]["ams"]["tray_exist_bits"] = json!("b");
     rig.full["print"]["ams"]["ams"][0]["tray"][1] = merge(
         &rig.full["print"]["ams"]["ams"][0]["tray"][1],
@@ -210,7 +290,11 @@ pub fn support(mut rig: Rig) {
     );
     rig.launch();
     rig.seed();
-    assert_eq!(rig.get("/api/slicer/profiles")["version"], "2.4.2");
+    assert_eq!(
+        rig.get("/api/slicer/profiles")["version"],
+        "2.4.2",
+        "bundled slicer profiles are 2.4.2"
+    );
     let petg=rig.post("/api/filaments",&json!({"name":"PETG 白","vendor":"Fixture","material":"PETG","color":"FFFFFFFF","bambu_filament_id":null}),201);
     rig.materials.push(petg.clone());
     let temps = [(220, 215, 2), (230, 225, 2), (250, 255, 1)];
@@ -263,29 +347,40 @@ pub fn support(mut rig: Rig) {
         let count = rig.broker.prints().len();
         rig.next(&job, 200);
         until(|| rig.broker.prints().len() == count + 1, 120);
-        let bytes = rig.ftp.contents().last().unwrap().clone();
+        let bytes = rig
+            .ftp
+            .contents()
+            .last()
+            .expect("print was uploaded")
+            .clone();
         if let Some(cached) = cached {
-            assert_eq!(cached, bytes);
+            assert_eq!(cached, bytes, "upload is the cached slice");
         }
-        fs::write(rig.output.join(format!("{name}.gcode.3mf")), &bytes).unwrap();
+        fs::write(rig.output.join(format!("{name}.gcode.3mf")), &bytes)
+            .expect("output directory is writable");
         let selected = if distinct {
             vec![temps[main], temps[interface]]
         } else {
             vec![temps[main]]
         };
         let result = inspect(&bytes, on, distinct, unused, &selected, beds[main]);
-        assert_eq!(result["seconds"], seconds);
+        assert_eq!(
+            result["seconds"], seconds,
+            "upload prediction matches the estimate"
+        );
         let mut mapping = vec![[0, 3, 1][main]];
         if distinct {
             mapping.push([0, 3, 1][interface]);
         }
         assert_eq!(
-            rig.broker.prints().last().unwrap()["ams_mapping"],
-            json!(mapping)
+            rig.broker.prints().last().expect("print was requested")["ams_mapping"],
+            json!(mapping),
+            "AMS mapping follows the selected materials"
         );
         assert_eq!(
             rig.queue()["current"]["estimate"]["seconds"],
-            result["seconds"]
+            result["seconds"],
+            "current job keeps its estimate"
         );
         results.push(merge(&result, &json!({"case":name,"mapping":mapping})));
         rig.finish();
@@ -294,8 +389,9 @@ pub fn support(mut rig: Rig) {
     }
     assert_eq!(
         rig.get(&format!("/api/filaments/{}", id(&petg)))["settings"],
-        before
+        before,
+        "printing leaves PETG settings unchanged"
     );
-    assert_eq!(rig.broker.prints().len(), 6);
+    assert_eq!(rig.broker.prints().len(), 6, "every case printed");
     write_json(&rig.output.join("result.json"), &json!(results));
 }

@@ -32,27 +32,57 @@ pub fn strength_settings(browser: bool) {
     rig.launch();
     rig.seed();
     let defaults = rig.get("/api/default-settings");
-    assert_eq!(strength(&defaults), default);
-    assert_eq!(strength(&rig.plate), default);
+    assert_eq!(
+        strength(&defaults),
+        default,
+        "default settings start with the built-in strength"
+    );
+    assert_eq!(
+        strength(&rig.plate),
+        default,
+        "seeded plate uses the default strength"
+    );
     let patterns = array(&defaults["infill_patterns"]);
-    assert_eq!(patterns.len(), 26);
-    let unique: std::collections::BTreeSet<_> =
-        patterns.iter().map(|v| v.as_str().unwrap()).collect();
-    assert_eq!(unique.len(), 26);
+    assert_eq!(patterns.len(), 26, "all infill patterns are offered");
+    let unique: std::collections::BTreeSet<_> = patterns
+        .iter()
+        .map(|v| v.as_str().expect("infill pattern is a string"))
+        .collect();
+    assert_eq!(unique.len(), 26, "infill patterns are unique");
     for pattern in patterns {
-        let mut url = reqwest::Url::parse("http://fixture/api/slicer/process").unwrap();
+        let mut url =
+            reqwest::Url::parse("http://fixture/api/slicer/process").expect("fixture URL is valid");
         url.query_pairs_mut().extend_pairs([
             ("machine", MACHINE),
             ("process", PROCESS),
-            ("sparse_infill_pattern", pattern.as_str().unwrap()),
+            (
+                "sparse_infill_pattern",
+                pattern.as_str().expect("infill pattern is a string"),
+            ),
             ("sparse_infill_density", "100"),
             ("wall_loops", "3"),
         ]);
-        let preview = rig.get(&format!("{}?{}", url.path(), url.query().unwrap()));
-        assert_eq!(preview["sparse_infill_pattern"], *pattern);
-        assert_eq!(preview["sparse_infill_density"], "100%");
-        assert_eq!(preview["top_shell_layers"], "8");
-        assert_eq!(preview["bottom_shell_layers"], "5");
+        let preview = rig.get(&format!(
+            "{}?{}",
+            url.path(),
+            url.query().expect("URL has query pairs")
+        ));
+        assert_eq!(
+            preview["sparse_infill_pattern"], *pattern,
+            "preview echoes the infill pattern"
+        );
+        assert_eq!(
+            preview["sparse_infill_density"], "100%",
+            "preview for {pattern} applies the density"
+        );
+        assert_eq!(
+            preview["top_shell_layers"], "8",
+            "preview for {pattern} raises top shells for full density"
+        );
+        assert_eq!(
+            preview["bottom_shell_layers"], "5",
+            "preview for {pattern} raises bottom shells for full density"
+        );
     }
     for (change, status) in [
         (json!({"sparse_infill_pattern":"unknown"}), 400),
@@ -86,27 +116,48 @@ pub fn strength_settings(browser: bool) {
         &json!({"default_printer_id":"p1"}),
         204,
     );
-    assert_eq!(strength(&rig.get("/api/default-settings")), changed);
-    assert_eq!(rig.get(&format!("/api/plates/{}", id(&original))), original);
+    assert_eq!(
+        strength(&rig.get("/api/default-settings")),
+        changed,
+        "default settings keep strength when omitted"
+    );
+    assert_eq!(
+        rig.get(&format!("/api/plates/{}", id(&original))),
+        original,
+        "changing defaults leaves existing plates unchanged"
+    );
     let new=rig.post("/api/plates/import",&json!({"name":"New defaults","models":[{"name":"parts/cube.stl","source":"parts/cube.stl","quantity":1}]}),201);
-    assert_eq!(strength(&new), changed);
+    assert_eq!(
+        strength(&new),
+        changed,
+        "new plate uses the changed defaults"
+    );
     rig.stop(false);
     rig.launch();
     rig.idle();
-    assert_eq!(strength(&rig.get("/api/default-settings")), changed);
+    assert_eq!(
+        strength(&rig.get("/api/default-settings")),
+        changed,
+        "default strength survives restart"
+    );
     assert_eq!(
         strength(&rig.get(&format!("/api/plates/{}", id(&new)))),
-        changed
+        changed,
+        "plate strength survives restart"
     );
     let job = rig.add(3);
     let first = rig.estimated(&job);
     assert_eq!(
         first["input"]["settings"]["profiles"]["process.json"]["sparse_infill_pattern"],
-        "adaptivecubic"
+        "adaptivecubic",
+        "first estimate uses the default infill pattern"
     );
     rig.edit_conditions(&changed);
     let second = rig.estimated(&job);
-    assert_ne!(first["id"], second["id"]);
+    assert_ne!(
+        first["id"], second["id"],
+        "strength change produces a new estimate"
+    );
     let process = &second["input"]["settings"]["profiles"]["process.json"];
     assert_eq!(
         (
@@ -115,33 +166,60 @@ pub fn strength_settings(browser: bool) {
             process["bottom_shell_layers"].as_str(),
             process["top_shell_thickness"].as_str()
         ),
-        (Some("4"), Some("10"), Some("6"), Some("2"))
+        (Some("4"), Some("10"), Some("6"), Some("2")),
+        "process profile applies walls and derived shells"
     );
-    assert_eq!(process["sparse_infill_density"], "22.5%");
-    assert_eq!(process["sparse_infill_pattern"], "gyroid");
-    assert_eq!(process["brim_type"], "no_brim");
-    assert_eq!(rig.plate["conditions"]["brim_enabled"], false);
+    assert_eq!(
+        process["sparse_infill_density"], "22.5%",
+        "process profile applies the infill density"
+    );
+    assert_eq!(
+        process["sparse_infill_pattern"], "gyroid",
+        "process profile applies the infill pattern"
+    );
+    assert_eq!(process["brim_type"], "no_brim", "brim is off by default");
+    assert_eq!(
+        rig.plate["conditions"]["brim_enabled"], false,
+        "plate brim is disabled by default"
+    );
     let mut previous = second;
     for enabled in [true, false] {
         rig.edit_conditions(&json!({"brim_enabled":enabled}));
         let current = rig.estimated(&job);
-        assert_ne!(current["id"], previous["id"]);
+        assert_ne!(
+            current["id"], previous["id"],
+            "brim toggle to {enabled} produces a new estimate"
+        );
         let process = &current["input"]["settings"]["profiles"]["process.json"];
         assert_eq!(
             process["brim_type"],
-            if enabled { "outer_only" } else { "no_brim" }
+            if enabled { "outer_only" } else { "no_brim" },
+            "brim type follows brim_enabled={enabled}"
         );
-        assert_eq!(process["brim_width"], "5");
-        assert_eq!(process["brim_object_gap"], "0.1");
-        assert_eq!(process["wall_loops"], "4");
-        assert_eq!(process["sparse_infill_density"], "22.5%");
+        assert_eq!(process["brim_width"], "5", "brim width is fixed");
+        assert_eq!(process["brim_object_gap"], "0.1", "brim gap is fixed");
+        assert_eq!(
+            process["wall_loops"], "4",
+            "brim toggle keeps the wall loops"
+        );
+        assert_eq!(
+            process["sparse_infill_density"], "22.5%",
+            "brim toggle keeps the infill density"
+        );
         previous = current;
     }
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert!(
+        rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),
+        "estimates neither print nor upload"
+    );
     let traces = rig.traces().len();
     rig.next(&job, 200);
     until(|| rig.broker.prints().len() == 1, 12);
-    assert_eq!(rig.traces().len(), traces);
+    assert_eq!(
+        rig.traces().len(),
+        traces,
+        "printing a ready estimate does not slice again"
+    );
     rig.report("RUNNING");
     rig.phase("printing");
     let frozen = rig.stored(&job, "execution_json");
@@ -153,11 +231,20 @@ pub fn strength_settings(browser: bool) {
         &merge(&json!({"default_printer_id":"p1"}), &default),
         204,
     );
-    assert_eq!(rig.stored(&job, "execution_json"), frozen);
-    assert_eq!(rig.stored(&job, "attempt_json"), attempt);
     assert_eq!(
-        serde_json::from_str::<Value>(&frozen).unwrap()["profiles"]["process.json"],
-        previous["input"]["settings"]["profiles"]["process.json"]
+        rig.stored(&job, "execution_json"),
+        frozen,
+        "active execution stays frozen after edits"
+    );
+    assert_eq!(
+        rig.stored(&job, "attempt_json"),
+        attempt,
+        "active attempt stays frozen after edits"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&frozen).expect("stored execution is JSON")["profiles"]["process.json"],
+        previous["input"]["settings"]["profiles"]["process.json"],
+        "execution uses the last estimated process profile"
     );
     let queued = rig.add(3);
     rig.estimated(&queued);
@@ -167,36 +254,71 @@ pub fn strength_settings(browser: bool) {
     for table in ["plates", "default_settings"] {
         for key in KEYS {
             db.execute(&format!("ALTER TABLE {table} DROP COLUMN {key}"), [])
-                .unwrap();
+                .expect("strength column drop applies");
         }
     }
-    db.execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN archived; ALTER TABLE plates DROP COLUMN deleted; DROP TABLE plate_imports; PRAGMA user_version=9;").unwrap();
+    db.execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; ALTER TABLE plates DROP COLUMN support_interface_filament_id; ALTER TABLE plates DROP COLUMN support_enabled; ALTER TABLE plates DROP COLUMN brim_enabled; ALTER TABLE plates DROP COLUMN archived; ALTER TABLE plates DROP COLUMN deleted; DROP TABLE plate_imports; PRAGMA user_version=9;").expect("legacy v9 schema downgrade applies");
     drop(db);
     rig.launch();
     rig.report("RUNNING");
     rig.phase("printing");
     rig.estimated(&queued);
-    assert_eq!(rig.stored(&job, "execution_json"), frozen);
-    assert_eq!(rig.stored(&job, "attempt_json"), attempt);
-    assert_eq!(rig.stored(&job, "artifact_path"), artifact);
+    assert_eq!(
+        rig.stored(&job, "execution_json"),
+        frozen,
+        "migration keeps the active execution"
+    );
+    assert_eq!(
+        rig.stored(&job, "attempt_json"),
+        attempt,
+        "migration keeps the active attempt"
+    );
+    assert_eq!(
+        rig.stored(&job, "artifact_path"),
+        artifact,
+        "migration keeps the active artifact"
+    );
     assert!(
         strength(&rig.get(&format!("/api/plates/{}", id(&rig.plate))))
             .as_object()
-            .unwrap()
+            .expect("strength is an object")
             .values()
-            .all(Value::is_null)
+            .all(Value::is_null),
+        "legacy plate has no strength overrides"
     );
-    assert_eq!(strength(&rig.get("/api/default-settings")), default);
+    assert_eq!(
+        strength(&rig.get("/api/default-settings")),
+        default,
+        "legacy defaults migrate to the built-in strength"
+    );
     assert_eq!(
         rig.get(&format!("/api/plates/{}", id(&rig.plate)))["conditions"]["brim_enabled"],
-        false
+        false,
+        "legacy plate migrates with brim disabled"
     );
     let legacy = rig.estimated(&queued)["input"]["settings"]["profiles"]["process.json"].clone();
-    assert_eq!(legacy["sparse_infill_pattern"], "crosshatch");
-    assert_eq!(legacy["wall_loops"], "2");
-    assert_eq!(legacy["top_shell_layers"], "5");
-    assert_eq!(rig.broker.prints().len(), 1);
-    assert_eq!(rig.ftp.uploads().len(), 1);
+    assert_eq!(
+        legacy["sparse_infill_pattern"], "crosshatch",
+        "legacy plate uses the process profile infill pattern"
+    );
+    assert_eq!(
+        legacy["wall_loops"], "2",
+        "legacy plate uses the process profile wall loops"
+    );
+    assert_eq!(
+        legacy["top_shell_layers"], "5",
+        "legacy plate uses the process profile top shells"
+    );
+    assert_eq!(
+        rig.broker.prints().len(),
+        1,
+        "migration sends no extra print"
+    );
+    assert_eq!(
+        rig.ftp.uploads().len(),
+        1,
+        "migration uploads nothing extra"
+    );
     rig.send(json!({"type":"remove","job_id":queued["id"]}), 200);
     if browser {
         rig.browser(
@@ -216,47 +338,66 @@ pub fn legacy_support() {
     let job = rig.add(0);
     rig.next(&job, 200);
     rig.start_phase("unknown");
-    assert_eq!(rig.broker.prints().len(), 1);
+    assert_eq!(rig.broker.prints().len(), 1, "job was sent to the printer");
     rig.stop(false);
-    let mut execution: Value = serde_json::from_str(&rig.stored(&job, "execution_json")).unwrap();
+    let mut execution: Value = serde_json::from_str(&rig.stored(&job, "execution_json"))
+        .expect("stored execution is JSON");
     for key in ["interface", "setting", "ams_slot_id"] {
-        execution.as_object_mut().unwrap().remove(key);
+        execution
+            .as_object_mut()
+            .expect("execution is an object")
+            .remove(key);
     }
     execution["profiles"]["filament.json"]
         .as_object_mut()
-        .unwrap()
+        .expect("filament profile is an object")
         .remove("filament_colour");
     let db = rig.db();
     legacy_schema::queue_v16(&db);
     for key in ["support_enabled", "support_interface_filament_id"] {
         execution["plate"]["conditions"]
             .as_object_mut()
-            .unwrap()
+            .expect("execution plate conditions are an object")
             .remove(key);
         db.execute(&format!("ALTER TABLE plates DROP COLUMN {key}"), [])
-            .unwrap();
+            .expect("support column drop applies");
     }
     db.execute(
         "UPDATE print_jobs SET execution_json=?1,estimate_json=NULL WHERE id=?2",
         [execution.to_string(), id(&job).to_owned()],
     )
-    .unwrap();
+    .expect("legacy execution update applies");
     db.execute_batch("DROP TABLE print_history; ALTER TABLE plates DROP COLUMN start_options_json; ALTER TABLE plate_items DROP COLUMN roles_json; ALTER TABLE plates DROP COLUMN secondary_filament_id; DROP TABLE plate_imports; ALTER TABLE plates DROP COLUMN archived; PRAGMA user_version=12;")
-        .unwrap();
+        .expect("legacy v12 schema downgrade applies");
     drop(db);
     rig.launch();
     rig.idle();
     rig.phase("needs_attention");
-    assert_eq!(rig.broker.prints().len(), 1);
-    assert_eq!(rig.queue()["current"]["id"], job["id"]);
+    assert_eq!(
+        rig.broker.prints().len(),
+        1,
+        "migration sends no extra print"
+    );
+    assert_eq!(
+        rig.queue()["current"]["id"],
+        job["id"],
+        "legacy job stays current"
+    );
     let plate = rig.get(&format!("/api/plates/{}", id(&rig.plate)));
-    assert_eq!(plate["conditions"]["support_enabled"], false);
-    assert!(plate["conditions"]["support_interface_filament_id"].is_null());
+    assert_eq!(
+        plate["conditions"]["support_enabled"], false,
+        "legacy plate migrates with support disabled"
+    );
+    assert!(
+        plate["conditions"]["support_interface_filament_id"].is_null(),
+        "legacy plate migrates without a support interface filament"
+    );
     assert_eq!(
         rig.db()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        24
+            .expect("database has a user_version"),
+        24,
+        "legacy database migrates to the current schema version"
     );
     rig.report("FAILED");
     until(|| rig.queue()["allowed"]["retry"] == true, 12);
@@ -265,14 +406,18 @@ pub fn legacy_support() {
         200,
     );
     until(|| rig.broker.prints().len() == 2, 12);
-    assert_eq!(rig.broker.prints()[1]["ams_mapping"], json!([0]));
+    assert_eq!(
+        rig.broker.prints()[1]["ams_mapping"],
+        json!([0]),
+        "retry maps AMS slot 0"
+    );
     rig.report("RUNNING");
     rig.phase("printing");
     rig.stop(false);
     rig.launch();
     rig.report("RUNNING");
     rig.phase("printing");
-    assert_eq!(rig.broker.prints().len(), 2);
+    assert_eq!(rig.broker.prints().len(), 2, "restart sends no extra print");
 }
 
 #[allow(clippy::too_many_lines)]
@@ -285,12 +430,18 @@ pub fn support_interface(browser: bool) {
     let blue = rig.materials[1]["id"].clone();
     let gf=rig.post("/api/filaments",&json!({"name":"接触面用の長い名前・PETG-GF 黒","vendor":"Fixture","material":"PETG-GF","color":"000000FF","bambu_filament_id":null}),201);
     rig.post(&format!("/api/filaments/{}/settings",id(&gf)),&json!({"machine_profile_key":MACHINE,"base_profile_key":"Generic PETG","overrides_json":{}}),201);
-    assert_eq!(rig.plate["conditions"]["support_enabled"], false);
-    assert!(rig.plate["conditions"]["support_interface_filament_id"].is_null());
+    assert_eq!(
+        rig.plate["conditions"]["support_enabled"], false,
+        "support starts disabled"
+    );
+    assert!(
+        rig.plate["conditions"]["support_interface_filament_id"].is_null(),
+        "support interface filament starts unset"
+    );
     rig.edit_conditions(&json!({"support_enabled":true}));
     assert_eq!(
-        rig.plate["conditions"]["support_interface_filament_id"],
-        white
+        rig.plate["conditions"]["support_interface_filament_id"], white,
+        "enabling support defaults the interface to the plate material"
     );
     let job = rig.send(
         json!({"type":"add","plate_id":rig.plate["id"],"plate_version":rig.plate["version"]}),
@@ -298,28 +449,39 @@ pub fn support_interface(browser: bool) {
     )["waiting"][0]
         .clone();
     let first = rig.estimated(&job);
-    assert!(first["input"]["settings"].get("interface").is_none());
+    assert!(
+        first["input"]["settings"].get("interface").is_none(),
+        "same-material interface needs no separate interface settings"
+    );
     assert_eq!(
-        first["input"]["settings"]["profiles"]["process.json"]["support_interface_filament"],
-        "1"
+        first["input"]["settings"]["profiles"]["process.json"]["support_interface_filament"], "1",
+        "same-material interface uses filament 1"
     );
     rig.edit_conditions(&json!({"support_interface_filament_id":blue}));
     let mut second = rig.estimated(&job);
-    assert_ne!(second["id"], first["id"]);
+    assert_ne!(
+        second["id"], first["id"],
+        "interface change produces a new estimate"
+    );
     let settings = &second["input"]["settings"];
-    assert_eq!(settings["ams_slot"], 0);
-    assert_eq!(settings["interface"]["ams_slot_id"], "");
+    assert_eq!(settings["ams_slot"], 0, "main material uses AMS slot 0");
     assert_eq!(
-        settings["profiles"]["process.json"]["support_interface_filament"],
-        "2"
+        settings["interface"]["ams_slot_id"], "",
+        "estimate does not bind the interface to an AMS slot"
+    );
+    assert_eq!(
+        settings["profiles"]["process.json"]["support_interface_filament"], "2",
+        "separate interface uses filament 2"
     );
     assert_eq!(
         settings["profiles"]["filament.json"]["filament_colour"],
-        json!(["#FFFFFF"])
+        json!(["#FFFFFF"]),
+        "main filament profile is white"
     );
     assert_eq!(
         settings["profiles"]["interface.json"]["filament_colour"],
-        json!(["#00FFFF"])
+        json!(["#00FFFF"]),
+        "interface filament profile is blue"
     );
     for change in 0..3 {
         match change {
@@ -329,16 +491,23 @@ pub fn support_interface(browser: bool) {
         }
         let current = rig.estimated(&job);
         if change == 1 {
-            assert_eq!(current["id"], second["id"]);
+            assert_eq!(
+                current["id"], second["id"],
+                "AMS remapping keeps the estimate"
+            );
         } else {
-            assert_ne!(current["id"], second["id"]);
+            assert_ne!(
+                current["id"], second["id"],
+                "temperature change {change} produces a new estimate"
+            );
         }
         second = current;
     }
     rig.edit_conditions(&json!({"support_enabled":false}));
     assert_eq!(
         rig.edit_conditions(&json!({"support_enabled":true}))["conditions"]["support_interface_filament_id"],
-        blue
+        blue,
+        "re-enabling support keeps the chosen interface filament"
     );
     rig.estimated(&job);
     let slot = rig.slot(3);
@@ -351,15 +520,25 @@ pub fn support_interface(browser: bool) {
         "/api/queue?printer_id=p1&plate_id={}",
         id(&rig.plate)
     ));
-    assert_eq!(q["admission"]["allowed"], false);
+    assert_eq!(
+        q["admission"]["allowed"], false,
+        "unloaded interface material blocks admission"
+    );
     assert!(
         q["admission"]["reason"]
             .as_str()
-            .unwrap()
-            .contains("support interface")
+            .expect("blocked admission has a reason")
+            .contains("support interface"),
+        "admission reason names the support interface"
     );
-    assert_eq!(q["waiting"][0]["estimate"]["state"], "ready");
-    assert!(rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty());
+    assert_eq!(
+        q["waiting"][0]["estimate"]["state"], "ready",
+        "unloading the interface keeps the estimate ready"
+    );
+    assert!(
+        rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),
+        "blocked admission neither prints nor uploads"
+    );
     rig.map_material(3, 1);
     rig.estimated(&job);
     if browser {
@@ -373,14 +552,25 @@ pub fn support_interface(browser: bool) {
     rig.ftp.action(Action::Wait);
     rig.next(&job, 200);
     until(|| rig.ftp.received.load(Ordering::SeqCst), 10);
-    assert_eq!(rig.traces().len(), before);
+    assert_eq!(
+        rig.traces().len(),
+        before,
+        "starting a ready estimate does not slice again"
+    );
     let frozen = rig.stored(&job, "execution_json");
     rig.edit_conditions(&json!({"support_interface_filament_id":gf["id"]}));
-    assert_eq!(rig.stored(&job, "execution_json"), frozen);
+    assert_eq!(
+        rig.stored(&job, "execution_json"),
+        frozen,
+        "uploading execution stays frozen after edits"
+    );
     rig.map_material(3, 1);
     rig.ftp.release();
     rig.start_phase("not_sent");
-    assert!(rig.broker.prints().is_empty());
+    assert!(
+        rig.broker.prints().is_empty(),
+        "changed interface material aborts the print"
+    );
     rig.send(
         json!({"type":"retry","expected_job":job["id"],"cleared":true}),
         409,
@@ -402,7 +592,10 @@ pub fn support_interface(browser: bool) {
     until(|| rig.slot(3)["reported"]["present"] != true, 12);
     rig.ftp.release();
     rig.start_phase("not_sent");
-    assert!(rig.broker.prints().is_empty());
+    assert!(
+        rig.broker.prints().is_empty(),
+        "missing interface spool aborts the print"
+    );
     rig.idle();
     rig.map_material(3, 1);
     for (index, old) in [(1, 225), (0, 216)] {
@@ -413,26 +606,42 @@ pub fn support_interface(browser: bool) {
         rig.temperature(index, old + 1);
         rig.ftp.release();
         rig.start_phase("not_sent");
-        assert!(rig.broker.prints().is_empty());
+        assert!(
+            rig.broker.prints().is_empty(),
+            "temperature change on filament {index} aborts the print"
+        );
         rig.temperature(index, old);
     }
     retry(&rig);
     until(|| rig.broker.prints().len() == 1, 12);
-    assert_eq!(rig.broker.prints()[0]["ams_mapping"], json!([0, 3]));
-    let active: Value = serde_json::from_str(&rig.stored(&job, "execution_json")).unwrap();
-    assert_eq!(active["interface"]["filament"]["id"], blue);
     assert_eq!(
-        active["plate"]["conditions"]["support_interface_filament_id"],
-        blue
+        rig.broker.prints()[0]["ams_mapping"],
+        json!([0, 3]),
+        "print maps main and interface slots"
+    );
+    let active: Value = serde_json::from_str(&rig.stored(&job, "execution_json"))
+        .expect("stored execution is JSON");
+    assert_eq!(
+        active["interface"]["filament"]["id"], blue,
+        "execution uses the blue interface filament"
+    );
+    assert_eq!(
+        active["plate"]["conditions"]["support_interface_filament_id"], blue,
+        "execution plate names the blue interface filament"
     );
     assert_eq!(
         active["profiles"],
-        serde_json::from_str::<Value>(&frozen).unwrap()["profiles"]
+        serde_json::from_str::<Value>(&frozen).expect("stored execution is JSON")["profiles"],
+        "retried execution keeps the original profiles"
     );
     rig.start_phase("unknown");
     rig.stop(false);
     rig.launch();
     rig.idle();
-    assert_eq!(rig.queue()["current"]["state"], "needs_attention");
-    assert_eq!(rig.broker.prints().len(), 1);
+    assert_eq!(
+        rig.queue()["current"]["state"],
+        "needs_attention",
+        "unknown start needs attention after restart"
+    );
+    assert_eq!(rig.broker.prints().len(), 1, "restart sends no extra print");
 }

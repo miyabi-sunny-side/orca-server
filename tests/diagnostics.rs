@@ -27,7 +27,7 @@ fn log(rig: &Rig) -> String {
 }
 fn data_version(c: &rusqlite::Connection) -> i64 {
     c.query_row("PRAGMA data_version", [], |r| r.get(0))
-        .unwrap()
+        .expect("PRAGMA data_version is readable")
 }
 fn empty_idle(rig: &Rig) {
     let mut report = rig.full.clone();

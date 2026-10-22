@@ -473,21 +473,25 @@ fn blocked(rig: &Rig, job: &Value) {
     let q = rig.queue();
     assert_eq!(q["allowed"]["retry"], false, "{q}");
     assert_eq!(
-        q["recovery"]["retry_reason"],
-        "Wait for a matching terminal report for the previous start"
+        q["recovery"]["retry_reason"], "Wait for a matching terminal report for the previous start",
+        "{q}"
     );
     post_queue(rig, &retry(rig, job), 409);
 }
 fn retry_once(rig: &Rig, job: &Value) {
     let prints = rig.broker.prints().len();
     let q = rig.queue();
-    assert_eq!(q["allowed"]["discard"], true);
+    assert_eq!(q["allowed"]["discard"], true, "{q}");
     let request = retry(rig, job);
     post_queue(rig, &request, 200);
     until(|| rig.broker.prints().len() == prints + 1, 12);
     post_queue(rig, &request, 200);
     thread::sleep(Duration::from_millis(300));
-    assert_eq!(rig.broker.prints().len(), prints + 1);
+    assert_eq!(
+        rig.broker.prints().len(),
+        prints + 1,
+        "a repeated retry request should start only one print"
+    );
 }
 
 #[test]

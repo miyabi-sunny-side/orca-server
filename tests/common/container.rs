@@ -10,7 +10,10 @@ pub fn docker(args: &[&str]) -> String {
         "Docker failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    String::from_utf8(output.stdout)
+        .expect("docker output is UTF-8")
+        .trim()
+        .to_owned()
 }
 pub struct Container {
     pub image: String,
@@ -23,10 +26,16 @@ pub struct Container {
 impl Container {
     pub fn new(image: &str, store: &Path, output: &Path) -> Self {
         let id = |flag: &str| {
-            String::from_utf8(Command::new("id").arg(flag).output().unwrap().stdout)
-                .unwrap()
-                .trim()
-                .to_owned()
+            String::from_utf8(
+                Command::new("id")
+                    .arg(flag)
+                    .output()
+                    .expect("id runs")
+                    .stdout,
+            )
+            .expect("id output is UTF-8")
+            .trim()
+            .to_owned()
         };
         let owner = format!("{}:{}", id("-u"), id("-g"));
         let mount = format!("{}:/data/plates", store.display());
@@ -53,7 +62,7 @@ impl Container {
         }
     }
     pub fn launch(&mut self, root: &Path, env: &BTreeMap<String, String>) {
-        assert!(!self.running);
+        assert!(!self.running, "container is already running");
         let mut args: Vec<String> = [
             "run",
             "-d",
@@ -100,9 +109,11 @@ impl Container {
                 .create(true)
                 .append(true)
                 .open(self.output.join("server.log"))
-                .unwrap();
-            log.write_all(&output.stdout).unwrap();
-            log.write_all(&output.stderr).unwrap();
+                .expect("server log opens for append");
+            log.write_all(&output.stdout)
+                .expect("container stdout is logged");
+            log.write_all(&output.stderr)
+                .expect("container stderr is logged");
         }
         let _ = Command::new("docker")
             .args(["rm", "-f", &self.name])
@@ -115,9 +126,9 @@ impl Container {
         docker(&[
             "cp",
             &format!("{}:{path}", self.name),
-            output.to_str().unwrap(),
+            output.to_str().expect("output path is UTF-8"),
         ]);
-        fs::read(output).unwrap()
+        fs::read(output).expect("copied file is readable")
     }
 }
 impl Drop for Container {
@@ -143,7 +154,7 @@ impl Drop for Container {
             .status();
         if !thread::panicking() {
             assert!(
-                status.unwrap().success(),
+                status.expect("docker chown runs").success(),
                 "restore owned temporary store permissions"
             );
         }

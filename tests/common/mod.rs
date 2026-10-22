@@ -33,7 +33,7 @@ pub fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 pub fn fixture(name: &str) -> Vec<u8> {
-    fs::read(repo().join("tests/fixtures").join(name)).unwrap()
+    fs::read(repo().join("tests/fixtures").join(name)).expect("fixture file is readable")
 }
 pub fn until(mut condition: impl FnMut() -> bool, seconds: u64) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
@@ -47,25 +47,42 @@ pub fn until(mut condition: impl FnMut() -> bool, seconds: u64) {
 }
 pub fn flag(path: &Path, on: bool) {
     if on {
-        fs::write(path, []).unwrap();
+        fs::write(path, []).expect("flag file is writable");
     } else if let Err(e) = fs::remove_file(path) {
-        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::NotFound,
+            "remove flag {}: {e}",
+            path.display()
+        );
     }
 }
 pub fn id(value: &Value) -> &str {
-    value["id"].as_str().unwrap()
+    value["id"].as_str().expect("value has a string id")
 }
 pub fn array(value: &Value) -> &[Value] {
-    value.as_array().unwrap()
+    value.as_array().expect("value is a JSON array")
 }
 pub fn edit(value: &Value) -> Value {
     let mut value = value.clone();
-    value.as_object_mut().unwrap().remove("id");
-    value.as_object_mut().unwrap().remove("imported");
-    value.as_object_mut().unwrap().remove("roles");
+    value
+        .as_object_mut()
+        .expect("edited value is a JSON object")
+        .remove("id");
+    value
+        .as_object_mut()
+        .expect("edited value is a JSON object")
+        .remove("imported");
+    value
+        .as_object_mut()
+        .expect("edited value is a JSON object")
+        .remove("roles");
     if let Some(models) = value.get_mut("models").and_then(Value::as_array_mut) {
         for model in models {
-            model.as_object_mut().unwrap().remove("roles");
+            model
+                .as_object_mut()
+                .expect("model is a JSON object")
+                .remove("roles");
         }
     }
     value
@@ -73,7 +90,10 @@ pub fn edit(value: &Value) -> Value {
 pub fn printer_settings(value: &Value) -> Value {
     let mut value = value.clone();
     for key in ["id", "status", "machine", "configuration_error"] {
-        value.as_object_mut().unwrap().remove(key);
+        value
+            .as_object_mut()
+            .expect("printer settings are a JSON object")
+            .remove(key);
     }
     value
 }
@@ -81,39 +101,56 @@ pub fn merge(base: &Value, patch: &Value) -> Value {
     let mut value = base.clone();
     value
         .as_object_mut()
-        .unwrap()
-        .extend(patch.as_object().unwrap().clone());
+        .expect("merge base is a JSON object")
+        .extend(
+            patch
+                .as_object()
+                .expect("merge patch is a JSON object")
+                .clone(),
+        );
     value
 }
 pub fn sha256(path: &Path) -> String {
-    let output = Command::new("sha256sum").arg(path).output().unwrap();
-    assert!(output.status.success());
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .expect("sha256sum runs");
+    assert!(
+        output.status.success(),
+        "sha256sum failed for {}",
+        path.display()
+    );
     String::from_utf8(output.stdout)
-        .unwrap()
+        .expect("sha256sum output is UTF-8")
         .split_whitespace()
         .next()
-        .unwrap()
+        .expect("sha256sum prints a hash")
         .to_owned()
 }
 pub fn zip_read(bytes: &[u8], name: &str) -> Vec<u8> {
     use std::io::Read;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("bytes are a zip archive");
     let mut result = Vec::new();
     archive
         .by_name(name)
-        .unwrap()
+        .expect("zip archive contains the entry")
         .read_to_end(&mut result)
-        .unwrap();
+        .expect("zip entry is decompressible");
     result
 }
 pub fn zip_json(bytes: &[u8], name: &str) -> Value {
-    serde_json::from_slice(&zip_read(bytes, name)).unwrap()
+    serde_json::from_slice(&zip_read(bytes, name)).expect("zip entry is JSON")
 }
 pub fn json_file(path: &Path) -> Value {
-    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    serde_json::from_slice(&fs::read(path).expect("JSON file is readable")).expect("file is JSON")
 }
 pub fn write_json(path: &Path, value: &Value) {
-    fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+    fs::write(
+        path,
+        serde_json::to_vec(value).expect("value is serializable"),
+    )
+    .expect("JSON file is writable");
 }
 
 pub struct Process {
@@ -126,7 +163,7 @@ impl Process {
     }
     pub fn spawn(command: &mut Command) -> Self {
         Self {
-            child: command.process_group(0).spawn().unwrap(),
+            child: command.process_group(0).spawn().expect("process spawns"),
             stopped: false,
         }
     }
@@ -143,14 +180,19 @@ impl Process {
             .stderr(Stdio::null())
             .status();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.child.try_wait().unwrap().is_none() {
+        while self
+            .child
+            .try_wait()
+            .expect("child status is queryable")
+            .is_none()
+        {
             if Instant::now() >= deadline {
                 let _ = Command::new("kill")
                     .args(["-KILL", "--", &format!("-{}", self.child.id())])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
-                self.child.wait().unwrap();
+                self.child.wait().expect("killed child is reaped");
                 break;
             }
             thread::sleep(Duration::from_millis(20));
@@ -173,16 +215,21 @@ impl HttpPeer {
     pub fn new(
         handler: impl Fn(&str, &str, &[u8]) -> (u16, Vec<u8>) + Send + Sync + 'static,
     ) -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        listener
+            .set_nonblocking(true)
+            .expect("listener becomes nonblocking");
+        let base = format!(
+            "http://{}",
+            listener.local_addr().expect("listener has a local address")
+        );
         let (stop, rx) = tokio::sync::oneshot::channel();
         let handler: Handler = Arc::new(handler);
         let thread = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap();
+                .expect("tokio runtime builds");
             runtime.block_on(async {
                 async fn request(
                     State(handler): State<Handler>,
@@ -192,18 +239,22 @@ impl HttpPeer {
                 ) -> impl IntoResponse {
                     let (status, data) = handler(method.as_str(), &uri.to_string(), &body);
                     (
-                        StatusCode::from_u16(status).unwrap(),
+                        StatusCode::from_u16(status).expect("handler returns a valid HTTP status"),
                         [("content-type", "application/json")],
                         data,
                     )
                 }
                 let app = Router::new().fallback(any(request)).with_state(handler);
-                axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), app)
-                    .with_graceful_shutdown(async {
-                        let _ = rx.await;
-                    })
-                    .await
-                    .unwrap();
+                axum::serve(
+                    tokio::net::TcpListener::from_std(listener)
+                        .expect("std listener converts to tokio"),
+                    app,
+                )
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+                .expect("HTTP peer serves until shutdown");
             });
         });
         Self {
@@ -221,7 +272,7 @@ impl Drop for HttpPeer {
         if let Some(thread) = self.thread.take() {
             let result = thread.join();
             if !std::thread::panicking() {
-                result.unwrap();
+                result.expect("HTTP peer thread did not panic");
             }
         }
     }
@@ -231,7 +282,8 @@ fn fake_slicer(root: &Path) -> PathBuf {
     let app = root.join("app");
     let profiles = app.join("resources/profiles/BBL");
     for category in ["machine", "process", "filament"] {
-        fs::create_dir_all(profiles.join(category)).unwrap();
+        fs::create_dir_all(profiles.join(category))
+            .expect("fake slicer profile directory is creatable");
     }
     let machines = [
         MACHINE,
@@ -241,7 +293,7 @@ fn fake_slicer(root: &Path) -> PathBuf {
     for (i, machine) in machines.iter().enumerate() {
         write_json(
             &profiles.join(format!("machine/{i}.json")),
-            &json!({"name":machine,"instantiation":"true","nozzle_diameter":[if i==0 {"0.4"}else{"0.2"}],"printer_model":machine.split(" 0.").next().unwrap(),"default_print_profile":PROCESS,"default_filament_profile":[FILAMENT]}),
+            &json!({"name":machine,"instantiation":"true","nozzle_diameter":[if i==0 {"0.4"}else{"0.2"}],"printer_model":machine.split(" 0.").next().expect("machine name has a nozzle suffix"),"default_print_profile":PROCESS,"default_filament_profile":[FILAMENT]}),
         );
     }
     write_json(
@@ -258,17 +310,17 @@ fn fake_slicer(root: &Path) -> PathBuf {
         );
     }
     let binary = std::env::current_exe()
-        .unwrap()
+        .expect("test executable path is available")
         .parent()
-        .unwrap()
+        .expect("test executable lives in a directory")
         .parent()
-        .unwrap()
+        .expect("test directory has a parent")
         .join("examples/fixture-slicer");
     assert!(
         binary.is_file(),
         "missing Rust fixture: run cargo build --example fixture-slicer (cargo test also builds examples)"
     );
-    fs::copy(binary, app.join("AppRun")).unwrap();
+    fs::copy(binary, app.join("AppRun")).expect("fixture slicer copies into the app directory");
     app
 }
 
@@ -300,13 +352,13 @@ impl Rig {
         let root = tempfile::Builder::new()
             .prefix("orca-rust-test-")
             .tempdir()
-            .unwrap();
+            .expect("temporary directory is creatable");
         let store = root.path().join("plates");
-        fs::create_dir(&store).unwrap();
+        fs::create_dir(&store).expect("store directory is creatable");
         let output = std::env::var_os("ORCA_TEST_OUTPUT")
             .map_or_else(|| root.path().join("output"), PathBuf::from)
             .join(format!("{name}-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&output).unwrap();
+        fs::create_dir_all(&output).expect("output directory is creatable");
         certificate(root.path(), "trusted", version);
         let broker = Peer::broker(root.path(), "trusted", SERIAL);
         let ftp = Peer::ftps(root.path(), "trusted");
@@ -316,34 +368,38 @@ impl Rig {
         )])));
         let content = files.clone();
         let scad = HttpPeer::new(move |_, path, _| {
-            let files = content.lock().unwrap();
+            let files = content.lock().expect("SCAD files mutex is not poisoned");
             if path == "/api/models" {
                 return (
                     200,
-                    serde_json::to_vec(&files.keys().collect::<Vec<_>>()).unwrap(),
+                    serde_json::to_vec(&files.keys().collect::<Vec<_>>())
+                        .expect("model list is serializable"),
                 );
             }
             // URLs are decoded via the existing URL parser without treating '+' as a space in paths.
             let path = path
                 .split('?')
                 .next()
-                .unwrap()
+                .expect("split yields at least one part")
                 .strip_prefix("/models/")
                 .unwrap_or(path);
             let key: String =
                 reqwest::Url::parse(&format!("http://localhost/?p={}", path.replace('+', "%2B")))
-                    .unwrap()
+                    .expect("model path forms a valid URL")
                     .query_pairs()
                     .next()
-                    .unwrap()
+                    .expect("URL has the p query pair")
                     .1
                     .into_owned();
             files
                 .get(&key)
                 .map_or((404, b"not found".to_vec()), |v| (200, v.clone()))
         });
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let port = listener
+            .local_addr()
+            .expect("listener has a local address")
+            .port();
         let mut env = BTreeMap::new();
         let app = appdir.map_or_else(|| fake_slicer(root.path()), Path::to_path_buf);
         for (key, value) in [
@@ -364,7 +420,8 @@ impl Rig {
         ] {
             env.insert(key.to_owned(), value);
         }
-        let mut full: Value = serde_json::from_slice(&fixture("p1_status.json")).unwrap();
+        let mut full: Value =
+            serde_json::from_slice(&fixture("p1_status.json")).expect("status fixture is JSON");
         full["print"]["ams"]["tray_exist_bits"] = json!("9");
         full["print"]["ams"]["ams"][0]["tray"][3]["tray_type"] = json!("PLA");
         full["print"]["ams"]["ams"][0]["tray"][3]["tray_color"] = json!("00FFFFFF");
@@ -373,11 +430,11 @@ impl Rig {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {
                     std::env::current_exe()
-                        .unwrap()
+                        .expect("test executable path is available")
                         .parent()
-                        .unwrap()
+                        .expect("test executable lives in a directory")
                         .parent()
-                        .unwrap()
+                        .expect("test directory has a parent")
                         .join("orca-server")
                 }),
             arguments: vec![],
@@ -399,11 +456,11 @@ impl Rig {
                 .timeout(Duration::from_secs(20))
                 .no_proxy()
                 .build()
-                .unwrap(),
+                .expect("HTTP client builds"),
         }
     }
     pub fn launch(&mut self) {
-        assert!(self.process.is_none());
+        assert!(self.process.is_none(), "server is already launched");
         let before = self.broker.requests().len();
         if let Some(container) = &mut self.container {
             container.launch(self.root.path(), &self.env);
@@ -412,15 +469,15 @@ impl Rig {
                 .create(true)
                 .append(true)
                 .open(self.output.join("server.log"))
-                .unwrap();
+                .expect("server log opens for append");
             let mut command = Command::new(&self.binary);
             command.args(&self.arguments);
             command
                 .current_dir(self.root.path())
                 .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("PATH", std::env::var_os("PATH").expect("PATH is set"))
                 .envs(&self.env)
-                .stdout(log.try_clone().unwrap())
+                .stdout(log.try_clone().expect("server log handle clones"))
                 .stderr(log);
             self.process = Some(Process::spawn(&mut command));
         }
@@ -460,18 +517,19 @@ impl Rig {
         body: Option<&Value>,
         origin: Option<&str>,
     ) -> (u16, Value) {
-        let mut request = self
-            .http
-            .request(method.parse().unwrap(), format!("{}{path}", self.base));
+        let mut request = self.http.request(
+            method.parse().expect("HTTP method is valid"),
+            format!("{}{path}", self.base),
+        );
         if let Some(body) = body {
             request = request.json(body);
         }
         if let Some(origin) = origin {
             request = request.header("origin", origin);
         }
-        let response = request.send().unwrap();
+        let response = request.send().expect("API request is sent");
         let code = response.status().as_u16();
-        let bytes = response.bytes().unwrap();
+        let bytes = response.bytes().expect("API response body is readable");
         assert!(
             !bytes.windows(SECRET.len()).any(|v| v == SECRET.as_bytes()),
             "secret in API response"
@@ -538,7 +596,7 @@ impl Rig {
         array(&self.get("/api/printers/p1/ams")["slots"])
             .iter()
             .find(|v| v["slot_index"] == index && v["ams_id"] == 0)
-            .unwrap()
+            .expect("AMS 0 has the requested slot")
             .clone()
     }
     pub fn specification(&self, slot: u64) -> Value {
@@ -563,7 +621,9 @@ impl Rig {
         let plate = plate.unwrap_or_else(|| self.plate.clone());
         let mut plate = self.get(&format!("/api/plates/{}", id(&plate)));
         let mut spec = spec.unwrap_or_else(|| self.specification(3));
-        spec.as_object_mut().unwrap().remove("ams_slot_id");
+        spec.as_object_mut()
+            .expect("specification is a JSON object")
+            .remove("ams_slot_id");
         let conditions = merge(&plate["conditions"], &spec);
         if plate["conditions"] != conditions {
             let mut data = edit(&plate);
@@ -583,12 +643,12 @@ impl Rig {
         let mut plate = self.plate.clone();
         if slot != 3 {
             let models: Vec<_> = array(&plate["models"]).iter().map(edit).collect();
-            plate=self.post("/api/plates/import",&json!({"name":format!("{} white",plate["name"].as_str().unwrap()),"models":models}),201);
+            plate=self.post("/api/plates/import",&json!({"name":format!("{} white",plate["name"].as_str().expect("plate has a string name")),"models":models}),201);
         }
         let action = self.add_action(Some(self.specification(slot)), Some(plate));
         array(&self.send(action, 200)["waiting"])
             .last()
-            .unwrap()
+            .expect("add leaves a waiting job")
             .clone()
     }
     pub fn next(&self, job: &Value, expected: u16) -> Value {
@@ -618,7 +678,7 @@ impl Rig {
         fs::read_to_string(self.root.path().join("cli.jsonl"))
             .unwrap_or_default()
             .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
+            .map(|s| serde_json::from_str(s).expect("CLI trace line is JSON"))
             .collect()
     }
     pub fn hold(&self, on: bool) {
@@ -628,12 +688,16 @@ impl Rig {
         array(&self.queue()["waiting"])
             .iter()
             .find(|j| j["id"] == job["id"])
-            .unwrap()
+            .expect("job is in the waiting queue")
             .clone()
     }
     pub fn ready(&self, job: &Value) {
         until(|| self.waiting(job)["estimate"]["state"] == "ready", 30);
-        assert_eq!(self.waiting(job)["estimate"]["seconds"], 1140);
+        assert_eq!(
+            self.waiting(job)["estimate"]["seconds"],
+            1140,
+            "estimate seconds match the print fixture"
+        );
     }
     pub fn finish(&self) {
         self.report("RUNNING");
@@ -648,11 +712,15 @@ impl Rig {
         );
     }
     pub fn db(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(self.store.join("orca.sqlite3")).unwrap()
+        rusqlite::Connection::open(self.store.join("orca.sqlite3")).expect("SQLite store opens")
     }
     pub fn artifact(&self, name: &str) -> PathBuf {
         self.store
-            .join(self.queue()["current"]["artifact_path"].as_str().unwrap())
+            .join(
+                self.queue()["current"]["artifact_path"]
+                    .as_str()
+                    .expect("current job has an artifact path"),
+            )
             .join(name)
     }
     pub fn check(&self) {
@@ -697,23 +765,32 @@ impl Rig {
         let full = self.full.clone();
         HttpPeer::new(move |method, _, body| {
             if method == "POST" {
-                let value: Value = serde_json::from_slice(body).unwrap();
+                let value: Value =
+                    serde_json::from_slice(body).expect("control request body is JSON");
                 if let Some(on) = value["slice_hold"].as_bool() {
                     flag(&root.join("cli-hold"), on);
                 } else if let Some(on) = value["slice_fail"].as_bool() {
                     flag(&root.join("cli-fail"), on);
                 } else if value["fail_upload"] == true {
-                    ftp_actions.send(peers::Action::Fail).unwrap();
+                    ftp_actions
+                        .send(peers::Action::Fail)
+                        .expect("FTPS peer action channel is open");
                 } else if value["disconnect"] == true {
-                    actions.send(peers::Action::Disconnect).unwrap();
+                    actions
+                        .send(peers::Action::Disconnect)
+                        .expect("MQTT peer action channel is open");
                 } else {
                     let mut report = full.clone();
                     if let Some(state) = value["state"].as_str() {
-                        let records = records.lock().unwrap();
+                        let records = records
+                            .lock()
+                            .expect("broker records mutex is not poisoned");
                         let index = value["index"]
                             .as_i64()
                             .filter(|n| *n >= 0)
-                            .map_or(records.prints.len() - 1, |n| usize::try_from(n).unwrap());
+                            .map_or(records.prints.len() - 1, |n| {
+                                usize::try_from(n).expect("print index fits in usize")
+                            });
                         let command = &records.prints[index];
                         report["print"] = merge(
                             &report["print"],
@@ -725,16 +802,18 @@ impl Rig {
                     }
                     actions
                         .send(peers::Action::Report(
-                            serde_json::to_vec(&report).unwrap(),
+                            serde_json::to_vec(&report).expect("report is serializable"),
                             false,
                             format!("device/{SERIAL}/report"),
                         ))
-                        .unwrap();
+                        .expect("MQTT peer action channel is open");
                 }
             }
-            let records = records.lock().unwrap();
-            let uploads = uploads.lock().unwrap();
-            (200,serde_json::to_vec(&json!({"prints":records.prints,"uploads":uploads.uploads,"count":records.prints.len()})).unwrap())
+            let records = records
+                .lock()
+                .expect("broker records mutex is not poisoned");
+            let uploads = uploads.lock().expect("FTPS records mutex is not poisoned");
+            (200,serde_json::to_vec(&json!({"prints":records.prints,"uploads":uploads.uploads,"count":records.prints.len()})).expect("control response is serializable"))
         })
     }
 }
@@ -753,9 +832,9 @@ impl Rig {
             .post(format!("{}/api/plates", self.base))
             .multipart(form)
             .send()
-            .unwrap();
-        assert_eq!(response.status(), 201);
-        response.json().unwrap()
+            .expect("plate upload request is sent");
+        assert_eq!(response.status(), 201, "plate upload {name} is created");
+        response.json().expect("plate upload response is JSON")
     }
     pub fn browser(&self, context_name: &str, context: &Value, control: Option<&HttpPeer>) {
         self.browser_env(context_name, context, control, &[]);
@@ -785,7 +864,7 @@ impl Rig {
         }
         command.envs(extra.iter().map(|(k, v)| (k, v)));
         assert!(
-            command.status().unwrap().success(),
+            command.status().expect("npm runs").success(),
             "Chromium scenario failed: {context_name}"
         );
     }
@@ -806,7 +885,8 @@ impl Rig {
                 "artifact_path",
                 "estimate_json"
             ]
-            .contains(&column)
+            .contains(&column),
+            "unknown stored column: {column}"
         );
         self.db()
             .query_row(
@@ -818,11 +898,14 @@ impl Rig {
                 [id(job)],
                 |r| r.get(0),
             )
-            .unwrap()
+            .expect("stored column is readable")
     }
     pub fn cached_artifact(&self, job: &Value, column: &str) -> Vec<u8> {
-        assert!(["project", "gcode"].contains(&column));
-        self.db().query_row(&format!("SELECT s.{column} FROM plate_slices s JOIN print_jobs j ON j.plate_id=s.plate_id AND j.printer_id=s.printer_id WHERE j.id=?1"), [id(job)], |r|r.get(0)).unwrap()
+        assert!(
+            ["project", "gcode"].contains(&column),
+            "unknown cached artifact column: {column}"
+        );
+        self.db().query_row(&format!("SELECT s.{column} FROM plate_slices s JOIN print_jobs j ON j.plate_id=s.plate_id AND j.printer_id=s.printer_id WHERE j.id=?1"), [id(job)], |r|r.get(0)).expect("cached artifact is readable")
     }
     pub fn estimated(&self, job: &Value) -> Value {
         until(
@@ -833,7 +916,7 @@ impl Rig {
             },
             30,
         );
-        serde_json::from_str(&self.stored(job, "estimate_json")).unwrap()
+        serde_json::from_str(&self.stored(job, "estimate_json")).expect("stored estimate is JSON")
     }
     pub fn temperature(&self, index: usize, value: i64) {
         let fid = id(&self.materials[index]);
@@ -860,22 +943,30 @@ impl Rig {
     /// Write `parts/large.stl`: the 20 mm cube scaled to 200 × 200 × 10 mm, which fits the
     /// P1S (256 mm) but not the A1 mini (180 mm) bed.
     pub fn large_model(&self) {
-        let mut large = self.files.lock().unwrap()["parts/cube.stl"].clone();
-        let count = u32::from_le_bytes(large[80..84].try_into().unwrap()) as usize;
+        let mut large =
+            self.files.lock().expect("SCAD files mutex is not poisoned")["parts/cube.stl"].clone();
+        let count = u32::from_le_bytes(
+            large[80..84]
+                .try_into()
+                .expect("STL header has a 4-byte triangle count"),
+        ) as usize;
         for triangle in 0..count {
             for (axis, offset) in (96 + triangle * 50..132 + triangle * 50)
                 .step_by(4)
                 .enumerate()
             {
                 let scale = [10., 10., 0.5][axis % 3];
-                let value =
-                    f32::from_le_bytes(large[offset..offset + 4].try_into().unwrap()) * scale;
+                let value = f32::from_le_bytes(
+                    large[offset..offset + 4]
+                        .try_into()
+                        .expect("STL coordinate is 4 bytes"),
+                ) * scale;
                 large[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             }
         }
         self.files
             .lock()
-            .unwrap()
+            .expect("SCAD files mutex is not poisoned")
             .insert("parts/large.stl".to_owned(), large);
     }
     /// Register an A1 mini 0.4 with its bundled default process and bed on its own isolated
@@ -886,32 +977,41 @@ impl Rig {
             "http://localhost/api/slicer/profiles",
             [("machine", mini)],
         )
-        .unwrap();
-        let defaults =
-            self.get(&format!("{}?{}", query.path(), query.query().unwrap()))["defaults"].clone();
+        .expect("profile query URL is valid");
+        let defaults = self.get(&format!(
+            "{}?{}",
+            query.path(),
+            query.query().expect("profile query URL has a query")
+        ))["defaults"]
+            .clone();
         let peer = Peer::broker(self.root.path(), "trusted", "MINI");
         let settings = merge(
             &printer_settings(&self.get("/api/printers/p1")),
             &json!({"name":"A1 mini","serial":"MINI","mqtt_port":peer.port,"machine_profile_key":mini,
                 "default_process_profile_key":defaults["process"],"bed_type":defaults["bed"],
                 "access_code":SECRET,
-                "tls_certificate":fs::read_to_string(self.root.path().join("trusted.pem")).unwrap()}),
+                "tls_certificate":fs::read_to_string(self.root.path().join("trusted.pem")).expect("trusted certificate is readable")}),
         );
         let device = self.post("/api/printers", &settings, 201);
         (peer, id(&device).to_owned())
     }
     /// Give `material` a setting for the printer's machine from its generic PLA profile.
     pub fn configure_material(&self, material: &str, machine: &str) {
-        let query =
-            reqwest::Url::parse_with_params("http://localhost/", [("machine", machine)]).unwrap();
+        let query = reqwest::Url::parse_with_params("http://localhost/", [("machine", machine)])
+            .expect("profile query URL is valid");
         let choices = self.get(&format!(
             "/api/filaments/{material}/profiles?{}",
-            query.query().unwrap()
+            query.query().expect("profile query URL has a query")
         ));
         let base = array(&choices)
             .iter()
-            .find(|p| p["key"].as_str().unwrap().starts_with("Generic PLA"))
-            .unwrap()["key"]
+            .find(|p| {
+                p["key"]
+                    .as_str()
+                    .expect("filament profile has a string key")
+                    .starts_with("Generic PLA")
+            })
+            .expect("a Generic PLA profile is offered")["key"]
             .clone();
         self.post(
             &format!("/api/filaments/{material}/settings"),
@@ -933,7 +1033,7 @@ impl Rig {
         let slot = array(&inventory["slots"])
             .iter()
             .find(|s| s["slot_index"] == 3)
-            .unwrap()
+            .expect("AMS 0 has slot 3")
             .clone();
         self.put(
             &format!("/api/printers/{printer}/ams/{}", id(&slot)),
@@ -943,15 +1043,15 @@ impl Rig {
     }
     pub fn rows(&self, sql: &str, args: &[&str]) -> Vec<Vec<rusqlite::types::Value>> {
         let db = self.db();
-        let mut statement = db.prepare(sql).unwrap();
+        let mut statement = db.prepare(sql).expect("SQL statement prepares");
         let count = statement.column_count();
         statement
             .query_map(rusqlite::params_from_iter(args), |r| {
                 (0..count).map(|i| r.get(i)).collect()
             })
-            .unwrap()
+            .expect("SQL query runs")
             .collect::<Result<_, _>>()
-            .unwrap()
+            .expect("SQL rows are readable")
     }
 }
 impl Rig {
@@ -972,7 +1072,7 @@ impl Rig {
                 reqwest::blocking::multipart::Part::bytes(data.clone())
                     .file_name((*name).to_owned())
                     .mime_str("application/octet-stream")
-                    .unwrap(),
+                    .expect("octet-stream is a valid MIME type"),
             );
         }
         let response = self
@@ -981,9 +1081,11 @@ impl Rig {
             .timeout(Duration::from_mins(2))
             .multipart(form)
             .send()
-            .unwrap();
+            .expect("multipart request is sent");
         let status = response.status();
-        let bytes = response.bytes().unwrap();
+        let bytes = response
+            .bytes()
+            .expect("multipart response body is readable");
         assert_eq!(
             status.as_u16(),
             expected,
@@ -999,16 +1101,20 @@ impl Rig {
         fields: &[(&str, &str)],
         expected: u16,
     ) -> Value {
-        serde_json::from_slice(&self.multipart(path, files, fields, expected)).unwrap()
+        serde_json::from_slice(&self.multipart(path, files, fields, expected))
+            .expect("multipart response is JSON")
     }
     pub fn bytes(&self, path: &str) -> Vec<u8> {
         let response = self
             .http
             .get(format!("{}{path}", self.base))
             .send()
-            .unwrap();
-        assert_eq!(response.status(), 200);
-        response.bytes().unwrap().to_vec()
+            .expect("binary request is sent");
+        assert_eq!(response.status(), 200, "download {path} succeeds");
+        response
+            .bytes()
+            .expect("binary response body is readable")
+            .to_vec()
     }
 }
 
