@@ -36,6 +36,7 @@
     } | null;
     external_spool: { material: string | null } | null;
     firmware: { name: string; sw_ver: string }[] | null;
+    descriptions?: Record<string, string>;
     live: Live & {
       speed: { level: Reading; percent: Reading };
       fans: { part: Reading; aux: Reading; chamber: Reading };
@@ -258,10 +259,12 @@
     {#if status.live.hms.length || status.print.error}
       <ul class="codes" aria-label="本体のエラー">
         {#if status.print.error}
+          {@const code = errorCode(status.print.error)}
           {@const line = errorLine({
             kind: "device_error",
             field: "print_error",
-            code: errorCode(status.print.error),
+            code,
+            description: status.descriptions?.[code],
           })}
           <li>
             <strong>{line.text}</strong>
@@ -283,6 +286,7 @@
           </li>{/if}
         {#each status.live.hms as code (code)}<li>
             HMS {code}
+            {status.descriptions?.[code] ?? ""}
             {#if hmsHelp(code)}<a
                 class="icon-btn"
                 href={hmsHelp(code)}

@@ -20,6 +20,9 @@ for (const width of [320, 375, 900])
         },
       });
       Object.assign(q.printer.print, { state: "PAUSE", error: 0x03008010 });
+      Object.assign(q.printer, {
+        descriptions: { "0300-8010": "冷却ファンの回転速度は異常があります。" },
+      });
       Object.assign(q, {
         waiting: [],
         recovery: {
@@ -34,7 +37,9 @@ for (const width of [320, 375, 900])
       await expect(page.locator(".current-job")).not.toHaveAttribute("open");
       await expect(failure).toBeVisible();
       await expect(failure).toContainText("0300-8010");
-      await expect(failure).toContainText("ホットエンド冷却ファン");
+      await expect(failure).toContainText(
+        "冷却ファンの回転速度は異常があります。",
+      );
       await expect(failure).toContainText("現在");
       await expect(failure).not.toContainText("PAUSE");
       await expect(failure).toBeInViewport();
@@ -96,7 +101,7 @@ for (const width of [320, 375, 900])
       expect(commands).toHaveLength(0);
     });
 
-test("unmanaged and unknown errors remain visible, while stale reports are labelled", async ({
+test("unmanaged and unlisted errors remain visible, while stale reports are labelled", async ({
   page,
 }) => {
   const { q, commands } = await queueFixture(page);
@@ -105,8 +110,7 @@ test("unmanaged and unknown errors remain visible, while stale reports are label
   Object.assign(q.printer.print, { state: "PAUSE", error: 0xffff1234 });
   await page.goto("/");
   const failure = page.locator(".device-failure");
-  await expect(failure).toContainText("FFFF-1234");
-  await expect(failure).toContainText("未確認");
+  await expect(failure.locator("strong")).toHaveText("FFFF-1234");
   await expect(failure.getByRole("link", { name: /公式/ })).toBeVisible();
   Object.assign(job, {
     state: "needs_attention",

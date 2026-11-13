@@ -143,7 +143,7 @@ it("keeps the saved failure's details for the expanded job and a short job statu
   expect(jobStatus({ ...failed, failure: null })).toBe("要確認");
 });
 
-it("keeps live errors distinct from saved failures and explains only verified codes", async () => {
+it("keeps live errors distinct from saved failures and explains them from the printer's table", async () => {
   const { queueFailure, failureHelp } = await import("./queue");
   const saved = {
     kind: "device_error",
@@ -165,6 +165,19 @@ it("keeps live errors distinct from saved failures and explains only verified co
     },
   });
   expect(queueFailure(null, paused)?.failure.code).toBe("0300-8010");
+  const described = {
+    ...paused,
+    descriptions: { "0300-8010": "冷却ファンの回転速度は異常があります。" },
+  };
+  expect(queueFailure(job, described)?.failure.description).toBe(
+    "冷却ファンの回転速度は異常があります。",
+  );
+  expect(
+    queueFailure(
+      { ...job, failure: { ...saved, description: "保存済みの説明" } },
+      { ...described, synchronized: false },
+    )?.failure.description,
+  ).toBe("保存済みの説明");
   expect(queueFailure(job, { ...paused, synchronized: false })).toEqual({
     current: false,
     failure: saved,
@@ -193,10 +206,9 @@ it("keeps live errors distinct from saved failures and explains only verified co
       state: "PAUSE",
     },
   });
-  expect(failureHelp("0300-8010")?.description).toContain(
-    "ホットエンド冷却ファン",
-  );
-  expect(failureHelp("FFFF-1234")?.description).toContain("未確認");
+  expect(failureHelp("0300-8010")).toContain("e=03008010");
+  expect(failureHelp("FFFF-1234")).toContain("e=FFFF1234");
+  expect(failureHelp("0300")).toBeNull();
   expect(failureHelp(undefined)).toBeNull();
 });
 
@@ -371,20 +383,25 @@ it("names the printer's reported state in Japanese", () => {
   expect(printerStateText(null)).toBe("状態不明");
 });
 
-it("shows a failure as one code with a short meaning and a help link", () => {
-  const fan = errorLine({
+it("shows a failure as one code with the official meaning and a help link", () => {
+  const homing = errorLine({
     kind: "device_error",
     field: "print_error",
-    code: "0300-8010",
+    code: "0300-4000",
+    description: "Z軸の原点復帰に失敗しました。タスクは停止されました。",
   });
-  expect(fan.text).toBe("0300-8010 ホットエンド冷却ファンの回転異常");
-  expect(fan.help).toContain("e=03008010");
-  const unknown = errorLine({
+  expect(homing.text).toBe(
+    "0300-4000 Z軸の原点復帰に失敗しました。タスクは停止されました。",
+  );
+  expect(homing.help).toContain("e=03004000");
+  // A code the table lacks is shown as it is, never with a made-up or "unknown" meaning.
+  const unlisted = errorLine({
     kind: "device_error",
     field: "print_error",
     code: "0300-400C",
   });
-  expect(unknown.text).toBe("0300-400C 意味は未確認");
+  expect(unlisted.text).toBe("0300-400C");
+  expect(unlisted.help).toContain("e=0300400C");
   expect(errorLine({ kind: "stopped", state: "FAILED" })).toEqual({
     text: "印刷停止",
     help: null,
@@ -392,4 +409,54 @@ it("shows a failure as one code with a short meaning and a help link", () => {
   expect(errorLine({ kind: "rejected", reason: "Storage full" }).text).toBe(
     "開始拒否",
   );
+});
+
+it("says near the buttons why the last attempt did not start, once", async () => {
+  const { attentionNote } = await import("./queue");
+  const notSent =
+    "Printer status or selected AMS changed during transfer; no start command was sent";
+  const job = {
+    state: "needs_attention",
+    last_error: notSent,
+    failure: null,
+  } as Job;
+  const queue = {
+    current: job,
+    printer,
+    recovery: { retry_reason: null, discard_reason: null },
+  };
+  expect(attentionNote(queue)).toBe(
+    "転送中に機器またはAMSの状態が変わりました。開始命令は送っていません。",
+  );
+  // The printer's own failure line already explains the stop.
+  expect(
+    attentionNote({
+      ...queue,
+      current: { ...job, failure: { kind: "stopped", state: "FAILED" } },
+    }),
+  ).toBeNull();
+  expect(
+    attentionNote({
+      ...queue,
+      printer: { ...printer, print: { ...printer.print, error: 0x03004000 } },
+    }),
+  ).toBeNull();
+  // A blocked retry shows its own reason next to the buttons.
+  expect(
+    attentionNote({
+      ...queue,
+      recovery: {
+        retry_reason:
+          "Wait for a matching terminal report for the previous start",
+        discard_reason: null,
+      },
+    }),
+  ).toBeNull();
+  expect(
+    attentionNote({ ...queue, current: { ...job, last_error: null } }),
+  ).toBeNull();
+  expect(
+    attentionNote({ ...queue, current: { ...job, state: "printing" } }),
+  ).toBeNull();
+  expect(attentionNote({ ...queue, current: null })).toBeNull();
 });

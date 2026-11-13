@@ -101,6 +101,9 @@ pub struct Status {
     pub auto_refill: AutoRefill,
     /// Temperatures, fans, light, camera, HMS and options from the merged report.
     pub live: Value,
+    /// Official descriptions of the reported `print_error` and HMS codes, by the code as shown
+    /// (`0300-4000`, `0300_0D00_0002_0001`). A code the table lacks is absent.
+    pub descriptions: std::collections::BTreeMap<String, String>,
     /// Module names and versions from the last `get_version` answer on this connection.
     pub firmware: Option<Value>,
 }
@@ -258,6 +261,8 @@ pub struct State {
     pub saves: Saves,
     /// Latest FTPS failure: time and the stage that failed.
     pub upload_failure: Option<(u64, &'static str)>,
+    /// Device type whose official table describes this printer's codes.
+    pub model: Option<String>,
     nozzle_diameter: Option<String>,
     nozzle_material: Option<String>,
     pub start: Option<crate::print_start::Attempt>,
@@ -290,6 +295,7 @@ impl State {
             link: Link::default(),
             saves: Saves::default(),
             upload_failure: None,
+            model: None,
             nozzle_diameter: None,
             nozzle_material: None,
             start: None,
@@ -318,6 +324,7 @@ impl State {
         link.synchronized_at = None;
         let saves = std::mem::take(&mut self.saves);
         let upload_failure = self.upload_failure.take();
+        let model = self.model.take();
         let full_ams = (self.full_ams.take(), self.full_ams_seen.clone());
         let counts = (
             self.reports,
@@ -342,6 +349,7 @@ impl State {
         self.link = link;
         self.saves = saves;
         self.upload_failure = upload_failure;
+        self.model = model;
         self.start = start;
         self.epoch = epoch;
         self.connection = "connected";
@@ -488,6 +496,7 @@ impl State {
             other => other,
         };
         let synchronized = connection == "connected" && self.synchronized && fresh;
+        let live = crate::bambu::live(&self.document);
         Status {
             nozzle_diameter: self.nozzle_diameter.clone(),
             nozzle_material: self.nozzle_material.clone(),
@@ -502,7 +511,12 @@ impl State {
             ams: self.ams.clone(),
             external_spool: self.external_spool.clone(),
             auto_refill: self.auto_refill.clone(),
-            live: crate::bambu::live(&self.document),
+            descriptions: crate::codes::reported(
+                self.model.as_deref(),
+                self.print.error,
+                &live["hms"],
+            ),
+            live,
             firmware: self.firmware.clone(),
         }
     }

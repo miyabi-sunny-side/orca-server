@@ -82,6 +82,8 @@ struct Event {
     plate: String,
     tries: u8,
     failure: Option<Failure>,
+    /// Official description of the failure code, when the printer's table has one.
+    meaning: Option<String>,
 }
 fn payload(event: &Event, base: Option<&Url>) -> Value {
     fn name(value: &str) -> String {
@@ -128,6 +130,10 @@ fn payload(event: &Event, base: Option<&Url>) -> Value {
                 event.attempt_id,
                 code
             );
+            if let Some(meaning) = &event.meaning {
+                text.push_str("\n意味: ");
+                text.push_str(&name(meaning));
+            }
             if let Some(state) = &failure.state {
                 text.push_str("\n本体の状態: ");
                 text.push_str(&name(state));
@@ -276,10 +282,18 @@ fn reserve(db: &Database) -> Result<(Option<Event>, Duration)> {
         [],
         |r| r.get(0),
     )?;
-    let row=tx.query_row("SELECT rowid,attempt_id,job_id,printer_id,printer_name,plate_name,tries,next_at,detail_json FROM print_notifications WHERE state IN ('pending','unknown') AND tries<3 ORDER BY rowid LIMIT 1",[],|r|Ok((Event{rowid:r.get(0)?,attempt_id:r.get(1)?,job_id:r.get(2)?,printer_id:r.get(3)?,printer:r.get(4)?,plate:r.get(5)?,tries:r.get(6)?,failure:r.get::<_,Option<String>>(8)?.and_then(|s|serde_json::from_str(&s).ok())},r.get::<_,i64>(7)?))).optional()?;
-    let Some((mut event, due)) = row else {
+    let row=tx.query_row("SELECT n.rowid,n.attempt_id,n.job_id,n.printer_id,n.printer_name,n.plate_name,n.tries,n.next_at,n.detail_json,p.serial FROM print_notifications n LEFT JOIN printers p ON p.id=n.printer_id WHERE n.state IN ('pending','unknown') AND n.tries<3 ORDER BY n.rowid LIMIT 1",[],|r|Ok((Event{rowid:r.get(0)?,attempt_id:r.get(1)?,job_id:r.get(2)?,printer_id:r.get(3)?,printer:r.get(4)?,plate:r.get(5)?,tries:r.get(6)?,failure:r.get::<_,Option<String>>(8)?.and_then(|s|serde_json::from_str(&s).ok()),meaning:None},r.get::<_,i64>(7)?,r.get::<_,Option<String>>(9)?))).optional()?;
+    let Some((mut event, due, serial)) = row else {
         return Ok((None, Duration::from_secs(1)));
     };
+    event.meaning = event
+        .failure
+        .as_ref()
+        .and_then(|failure| failure.code.as_deref())
+        .and_then(|code| {
+            let model = serial.as_deref().and_then(crate::codes::model);
+            crate::codes::describe(model.as_deref(), code)
+        });
     let wait = due.max(pause).saturating_sub(now);
     if wait > 0 {
         return Ok((None, Duration::from_millis(wait.unsigned_abs().min(60_000))));
@@ -376,6 +390,7 @@ mod tests {
     async fn fixture_service() {
         tracing_subscriber::fmt().with_ansi(false).init();
         let root = std::path::PathBuf::from(std::env::var_os("PLATES_DIR").unwrap());
+        crate::codes::open(&root);
         let store = Store::open(&root).unwrap();
         if std::env::var("NOTIFICATION_TEST_ENABLED").unwrap() == "1" {
             let cert = std::fs::read(std::env::var("NOTIFICATION_TEST_CERT").unwrap()).unwrap();
@@ -456,6 +471,7 @@ mod tests {
             plate: "<@123>\n[click](https://evil.test) `x`".into(),
             tries: 0,
             failure: None,
+            meaning: None,
             rowid: 1,
         };
         let base = public_url("https://printer.example/tools/").unwrap();
@@ -492,7 +508,7 @@ mod tests {
         }
     }
     #[test]
-    fn failure_content_names_the_attempt_and_raw_code_without_inventing_meaning() {
+    fn failure_content_names_the_attempt_the_raw_code_and_its_official_meaning() {
         use crate::print_start::{Failure, FailureKind};
         let event = Event {
             attempt_id: "attempt-1".into(),
@@ -508,12 +524,25 @@ mod tests {
                 reason: None,
                 state: Some("PAUSE".into()),
             }),
+            meaning: Some("Z軸の原点復帰に失敗しました。".into()),
             rowid: 1,
         };
         let content = payload(&event, None)["content"]
             .as_str()
             .unwrap()
             .to_owned();
+        assert!(content.contains(
+            "コード: print_error 0300-4001\n意味: Z軸の原点復帰に失敗しました。\n本体の状態: PAUSE"
+        ));
+        let event = Event {
+            meaning: None,
+            ..event
+        };
+        let content = payload(&event, None)["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!content.contains("意味"), "no meaning is invented");
         assert!(content.starts_with("印刷エラー · 確認が必要\n"));
         assert!(content.contains("試行: attempt-1") && content.contains("ジョブ: job-1"));
         assert!(content.contains("コード: print_error 0300-4001"));

@@ -12,6 +12,8 @@ export type Failure = {
   code?: string;
   reason?: string;
   state?: string;
+  /** Official description of `code` from the printer's table, when it has one. */
+  description?: string;
 };
 /** Where the printer takes filament from; the user chooses it per job. */
 export type Feed = "ams" | "external";
@@ -59,6 +61,8 @@ export type Printer = {
   ams: Ams | null;
   external_spool?: { material: string | null } | null;
   live?: Live;
+  /** Official descriptions of the reported error and HMS codes, by the code as shown. */
+  descriptions?: Record<string, string>;
 };
 type Reading = number | null;
 export type Live = {
@@ -243,51 +247,53 @@ export function queueFailure(
     printer.synchronized &&
     printer.print.error
   ) {
+    const code = errorCode(printer.print.error);
+    const description = printer.descriptions?.[code];
     return {
       current: true,
       failure: {
         kind: "device_error",
         field: "print_error",
-        code: errorCode(printer.print.error),
+        code,
         state: printer.print.state ?? undefined,
+        ...(description ? { description } : {}),
       },
     };
   }
   return saved ? { current: false, failure: saved } : null;
 }
 
-// BambuStudio da8b44ee: resources/hms/hms_en_094.json (03008010),
-// src/slic3r/GUI/HMS.cpp get_hms_wiki_url; no device ID is sent to the help site.
-export function failureHelp(code?: string) {
+// BambuStudio da8b44ee src/slic3r/GUI/HMS.cpp get_hms_wiki_url; no device ID is sent to the help site.
+export function failureHelp(code?: string): string | null {
   const hex = code?.replaceAll("-", "").toUpperCase();
   if (!hex || !/^[0-9A-F]{8}$/.test(hex)) return null;
-  return {
-    description:
-      hex === "03008010"
-        ? "ホットエンド冷却ファンの回転異常です。"
-        : "このエラーコードの意味は未確認です。公式情報を確認してください。",
-    url: `https://e.bambulab.com/index.php?${new URLSearchParams({ e: hex, s: "device_hms", lang: "ja" })}`,
-  };
+  return `https://e.bambulab.com/index.php?${new URLSearchParams({ e: hex, s: "device_hms", lang: "ja" })}`;
 }
-const knownCodes: Record<string, string> = {
-  // BambuStudio da8b44ee resources/hms/hms_en_094.json
-  "03008010": "ホットエンド冷却ファンの回転異常",
-};
-/** One place for a failure: the raw code with a verified short meaning, and the official help. */
+/** One place for a failure: the raw code with its official description, and the official help. */
 export function errorLine(failure: Failure): {
   text: string;
   help: string | null;
 } {
-  const hex = failure.code?.replaceAll("-", "").toUpperCase();
-  if (!failure.code || !hex)
+  if (!failure.code)
     return {
       text: failure.kind === "rejected" ? "開始拒否" : "印刷停止",
       help: null,
     };
   return {
-    text: `${failure.code} ${knownCodes[hex] ?? "意味は未確認"}`,
-    help: failureHelp(failure.code)?.url ?? null,
+    text: [failure.code, failure.description].filter(Boolean).join(" "),
+    help: failureHelp(failure.code),
   };
+}
+/** Why the last attempt did not start, for the line next to the retry buttons. */
+export function attentionNote(
+  queue: Pick<QueueState, "current" | "printer" | "recovery">,
+): string | null {
+  const job = queue.current;
+  if (job?.state !== "needs_attention" || !job.last_error) return null;
+  // The printer's failure line, or the reason a retry is blocked, is already shown there.
+  if (queueFailure(job, queue.printer) || queue.recovery?.retry_reason)
+    return null;
+  return failureMessage(job.last_error, job);
 }
 /** BambuStudio HMS.cpp get_hms_wiki_url with the long `%08X%08X` code; no device ID is sent. */
 export function hmsHelp(code: string): string | null {
@@ -308,7 +314,7 @@ export const failureText: Record<string, string> = {
   "Models must fit together on one plate":
     "モデルがこのプリンターの台に乗りません。個数を減らすか、台の広いプリンターで印刷してください。",
   "Wait for a matching terminal report for the previous start":
-    "前の開始結果が不明です。本体から対象の停止・終了報告を受け取るまでお待ちください。",
+    "前の開始結果が不明です。本体が対象の停止・完了を報告するか、本体の電源を入れ直すと解除されます。",
   "Wait for a fresh synchronized printer report":
     "本体の最新状態を取得するまでお待ちください。",
   "Clear the printer error before recovery":
@@ -362,6 +368,8 @@ export const failureText: Record<string, string> = {
     "準備中にAMS割当または材料が変わりました。",
   "Printer status or selected AMS changed during transfer; no start command was sent":
     "転送中に機器またはAMSの状態が変わりました。開始命令は送っていません。",
+  "Printer did not report its state after the transfer; no start command was sent":
+    "転送後に本体の状態を確認できませんでした。開始命令は送っていません。",
 
   "Selected AMS tray is absent, unknown or has a different material":
     "選択したAMSの材料・装填状態が合いません。本体を確認してください。",
@@ -380,7 +388,7 @@ export const failureText: Record<string, string> = {
   "Print paused; resume or stop it on the printer":
     "印刷が一時停止しています。本体で再開するか停止してください。",
   "Print ended without a completion report; inspect the printer":
-    "完了報告なしに印刷が終了しました。本体を確認してください。",
+    "印刷は完了せずに終わりました。プレートを確認して再印刷か除外を選んでください。",
   "The external spool prints one material; use the AMS or one material for every role":
     "外部スプールで印刷できるのは1材料だけです。AMSを使うか、全ての役割を同じ材料にしてください。",
   "External spool reports a different material; change the spool or its setting on the printer":

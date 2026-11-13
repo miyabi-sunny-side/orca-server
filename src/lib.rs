@@ -2,6 +2,7 @@ mod ams;
 mod artifacts;
 mod bambu;
 mod camera;
+pub mod codes;
 mod database;
 mod estimates;
 mod filament;

@@ -123,8 +123,15 @@ fn stopped_retry_rechecks_changes_after_transfer() {
             until(|| rig.ftp.received.load(Ordering::SeqCst), 10);
             match change {
                 "disconnect" => {
+                    // The transfer ends while disconnected; the next connection reports an idle
+                    // printer, which no longer confirms the stopped print.
+                    let requests = rig.broker.requests().len();
                     rig.broker.action(Action::Disconnect);
                     until(|| rig.queue()["printer"]["synchronized"] == false, 10);
+                    rig.ftp.release();
+                    until(|| rig.broker.requests().len() > requests, 20);
+                    assert_eq!(rig.queue()["printer"]["start"]["phase"], "uploading");
+                    rig.broker.send(&rig.full);
                 }
                 "material" => {
                     let slot = rig.slot(3);
@@ -714,4 +721,133 @@ fn reprint_blocks_deleted_invalid_and_unavailable_latest_inputs() {
         assert_eq!(rig.broker.prints().len(), 1);
         assert_eq!(rig.ftp.contents().len(), 1);
     }
+}
+
+/// Production journal of 2026-11-13 (P1S 01.07): Z homing failed while RUNNING and the printer
+/// returned to IDLE without ever reporting FAILED. The fixture keeps the reports that carry
+/// print state; the subtask and the start sequence are replaced by this run's.
+#[test]
+fn recorded_idle_after_a_device_error_recovers_without_a_power_cycle() {
+    let mut rig = Rig::new("idle-after-error");
+    rig.launch();
+    rig.seed();
+    let job = rig.add(3);
+    rig.next(&job, 200);
+    until(|| rig.broker.prints().len() == 1, 12);
+    let sent = rig.broker.prints()[0].clone();
+    let recorded = String::from_utf8(fixture("p1s_z_homing_failure.jsonl"))
+        .expect("the journal is UTF-8")
+        .replace(
+            "orca-1ecde054-9ad7-46dd-a261-50defdf9358c",
+            sent["subtask_name"]
+                .as_str()
+                .expect("the start names a subtask"),
+        )
+        .replace("\"55555401\"", &sent["sequence_id"].to_string());
+    let reports = orca_server::journal::reports(&recorded);
+    assert_eq!(reports.len(), 15, "every recorded report is replayed");
+    let connections = || rig.get("/api/journal?printer=p1&kind=connection&limit=1000");
+    let before = connections();
+    for bytes in reports {
+        rig.broker.report(bytes, false, None);
+    }
+    rig.phase("needs_attention");
+    until(|| rig.queue()["allowed"]["retry"] == true, 12);
+    let stopped = rig.queue();
+    assert_eq!(
+        stopped["allowed"],
+        json!({"next":false,"retry":true,"discard":true})
+    );
+    assert!(stopped["recovery"]["retry_reason"].is_null());
+    assert_eq!(stopped["current"]["failure"]["code"], "0300-4000");
+    assert_eq!(stopped["printer"]["print"]["state"], "IDLE");
+    assert_eq!(connections(), before, "the connection never dropped");
+    post_queue(&rig, &retry(&rig, &job), 200);
+    until(|| rig.broker.prints().len() == 2, 12);
+    assert_ne!(
+        rig.broker.prints()[1]["subtask_name"],
+        sent["subtask_name"],
+        "the retry is a new attempt"
+    );
+    rig.check();
+}
+
+/// The P1S stops answering MQTT while it receives a file. On 2026-11-13 a slow transfer outlived
+/// the keepalive, the connection was replaced, and the finished transfer was thrown away.
+#[test]
+fn a_reconnect_during_transfer_starts_once_from_the_current_report() {
+    for (name, released_first, state) in [
+        ("synchronized", false, "IDLE"),
+        ("waiting", true, "IDLE"),
+        ("busy", true, "RUNNING"),
+    ] {
+        let mut rig = Rig::new(&format!("transfer-reconnect-{name}"));
+        rig.launch();
+        rig.seed();
+        let job = rig.add(3);
+        rig.ftp.action(Action::Wait);
+        rig.next(&job, 200);
+        until(|| rig.ftp.received.load(Ordering::SeqCst), 10);
+        let requests = rig.broker.requests().len();
+        rig.broker.action(Action::Disconnect);
+        until(|| rig.queue()["printer"]["synchronized"] == false, 10);
+        if released_first {
+            rig.ftp.release();
+        }
+        until(|| rig.broker.requests().len() > requests, 20);
+        assert_eq!(
+            rig.queue()["printer"]["start"]["phase"],
+            "uploading",
+            "{name}: nothing is decided before the new connection reports"
+        );
+        let mut report = rig.full.clone();
+        report["print"]["gcode_state"] = json!(state);
+        rig.broker.send(&report);
+        until(|| rig.queue()["printer"]["synchronized"] == true, 10);
+        rig.ftp.release();
+        if state == "IDLE" {
+            until(|| rig.broker.prints().len() == 1, 12);
+            rig.report("RUNNING");
+            rig.phase("printing");
+        } else {
+            rig.start_phase("not_sent");
+            rig.phase("needs_attention");
+            assert_eq!(
+                rig.queue()["current"]["last_error"],
+                "Printer status or selected AMS changed during transfer; no start command was sent"
+            );
+        }
+        assert_eq!(
+            rig.broker.prints().len(),
+            usize::from(state == "IDLE"),
+            "{name}"
+        );
+        rig.check();
+    }
+}
+
+#[test]
+fn a_transfer_without_a_later_report_is_given_up_without_a_start() {
+    let mut rig = Rig::new("transfer-no-report");
+    rig.launch();
+    rig.seed();
+    let job = rig.add(3);
+    rig.ftp.action(Action::Wait);
+    rig.next(&job, 200);
+    until(|| rig.ftp.received.load(Ordering::SeqCst), 10);
+    rig.broker.action(Action::Disconnect);
+    until(|| rig.queue()["printer"]["synchronized"] == false, 10);
+    rig.ftp.release();
+    // The printer reconnects but never sends a full report; the rig waits ten seconds.
+    until(
+        || rig.queue()["printer"]["start"]["phase"] == "not_sent",
+        30,
+    );
+    rig.phase("needs_attention");
+    let view = rig.queue();
+    assert_eq!(
+        view["current"]["last_error"],
+        "Printer did not report its state after the transfer; no start command was sent"
+    );
+    assert!(rig.broker.prints().is_empty());
 }

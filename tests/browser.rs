@@ -263,7 +263,15 @@ fn print_history() {
 #[ignore = "requires Chromium and official Orca 2.4.2"]
 fn stopped_recovery() {
     let mut rig = Rig::with_options("browser-recovery", "v3", Some(&appdir()));
+    let _site = rig.describe(&[
+        ("03008010", "冷却ファンの回転速度は異常があります。"),
+        (
+            "03004000",
+            "Z軸の原点復帰に失敗しました。タスクは停止されました。",
+        ),
+    ]);
     rig.launch();
+    until(|| rig.store.join("codes/ja_TES.json").is_file(), 12);
     rig.seed();
     let first = rig.add(3);
     let next = rig.add(3);
@@ -330,7 +338,12 @@ fn printer_controls() {
     rig.full["print"]["bed_target_temper"] = json!(60);
     rig.full["print"]["lights_report"] = json!([{"node":"chamber_light","mode":"on"}]);
     rig.full["print"]["hms"] = json!([{"attr":0x0300_0D00_u32,"code":0x0001_0004}]);
+    let _site = rig.describe(&[(
+        "03000D0000010004",
+        "ヒートベッドの原点復帰に異常があります。",
+    )]);
     rig.launch();
+    until(|| rig.store.join("codes/ja_TES.json").is_file(), 12);
     rig.seed();
     let plate = rig.configure(None, None);
     rig.add(3);

@@ -67,6 +67,9 @@ test("start options, print controls and the printer page act on the printer", as
   await expect(
     page.getByRole("link", { name: /HMS 0300_0D00_0001_0004 の公式解説/ }),
   ).toHaveAttribute("href", /e=03000D0000010004/);
+  await expect(page.getByRole("list", { name: "本体のエラー" })).toContainText(
+    "HMS 0300_0D00_0001_0004 ヒートベッドの原点復帰に異常があります。",
+  );
   for (const scheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: scheme });
     await shot(page, `control-375-${scheme}`);

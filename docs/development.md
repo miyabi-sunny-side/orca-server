@@ -26,6 +26,7 @@ API要求はポート3000へ転送されます。配布する際は画面とRust
 | `PLATES_DIR` | `data/plates` | プレートとSQLite台帳の保存先。コンテナ内では`/data/plates`。書込み権限が必要です。 |
 | `SCAD_LIVE_URL` | 未設定 | scad-liveのHTTP URL。モデル一覧・SCAD参照の保存/更新・試算と印刷時の取得に必要です。 |
 | `ORCA_APPDIR` | ネイティブでは未設定、コンテナでは`/opt/orcaslicer` | 公式OrcaSlicer 2.4.2の展開先。詳細は[スライス](slicing.md)を参照。 |
+| `BAMBU_ERROR_TABLE_URL` | `https://e.bambulab.com/query.php` | [エラーコードの説明](printer.md#エラーコードの説明)の取得先。`off`で取得しません。 |
 | `DISCORD_WEBHOOK_URL` | 未設定 | Discordの完了通知。形式と配送条件は[通知設定](container.md#discordの完了通知)を参照。 |
 | `ORCA_PUBLIC_URL` | 未設定 | 通知に付けるキューリンクの基準URL。省略するとリンクなし。 |
 | `ORCA_TIMEOUT_SECS` | `300` | 各CLI工程の上限秒数。OrcaSlicerを設定する場合は1〜3600。 |

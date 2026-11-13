@@ -147,8 +147,16 @@ fn role_updates_and_ams_changes_cannot_replace_frozen_inputs_or_start_wrong_mate
             rig.broker.send(&report);
             until(|| rig.slot(3)["reported"]["present"] != true, 12);
         } else {
+            // The connection is replaced during the transfer and the new one reports the
+            // tray gone: the start is judged by that report, not by the lost connection.
+            let requests = rig.broker.requests().len();
             rig.broker.action(Action::Disconnect);
             until(|| rig.queue()["printer"]["synchronized"] != true, 12);
+            rig.ftp.release();
+            until(|| rig.broker.requests().len() > requests, 20);
+            let mut report = rig.full.clone();
+            report["print"]["ams"]["tray_exist_bits"] = json!("1");
+            rig.broker.send(&report);
         }
         rig.ftp.release();
         rig.start_phase("not_sent");

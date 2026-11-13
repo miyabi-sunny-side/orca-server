@@ -336,6 +336,13 @@ impl Attempt {
                 self.phase = Phase::Paused;
                 self.message = None;
             }
+            // The printer ran this subtask and now names it idle without an error: the print is
+            // over. Some aborts (a failed Z homing on the P1S) never report FAILED, so waiting
+            // for one would hold the job until a power cycle.
+            Some("IDLE") if self.observed_printing && status.print.error == Some(0) => self.fail(
+                Phase::Resolved,
+                "Print ended without a completion report; inspect the printer",
+            ),
             Some("IDLE") if self.observed_printing => self.fail(
                 Phase::Unknown,
                 "Print ended without a completion report; inspect the printer",
@@ -753,16 +760,71 @@ mod tests {
         a.observe(&json!({"print":{"command":"push_status"}}), &status);
         for (state, phase) in [
             ("PAUSE", Phase::Paused),
-            ("IDLE", Phase::Unknown),
+            ("IDLE", Phase::Resolved),
             ("FAILED", Phase::Unknown),
         ] {
             let mut stopped = a.clone();
             status.print.state = Some(state.into());
             stopped.observe(&json!({"print":{"command":"push_status"}}), &status);
             assert_eq!(stopped.phase, phase);
-            assert!(stopped.blocks_start());
+            assert_eq!(stopped.blocks_start(), phase != Phase::Resolved, "{state}");
             assert_ne!(stopped.phase, Phase::Finished);
         }
+    }
+
+    /// 2026-11-13, P1S 01.07: Z homing failed while RUNNING, then the same subtask reported IDLE
+    /// and the error cleared. No FAILED ever followed, on a connection that stayed up.
+    #[test]
+    fn a_matching_idle_after_printing_ends_the_attempt_without_a_reconnect() {
+        let push = json!({"print":{"command":"push_status"}});
+        let mut a = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        let mut status = printing(&mut a);
+        status.print.error = Some(0x0300_4000);
+        a.observe(&push, &status);
+        assert_eq!(a.phase, Phase::Unknown);
+        status.print.state = Some("IDLE".into());
+        a.observe(&push, &status);
+        assert_eq!(a.phase, Phase::Unknown, "the error is still reported");
+        assert!(a.blocks_start());
+        status.print.error = Some(0);
+        a.observe(&push, &status);
+        assert_eq!(a.phase, Phase::Resolved);
+        assert!(!a.blocks_start());
+        let failure = a.failure.clone().expect("the reported code stays");
+        assert_eq!(failure.kind, FailureKind::DeviceError);
+        assert_eq!(failure.code.as_deref(), Some("0300-4000"));
+        assert!(
+            a.completed_at.is_none(),
+            "an aborted print is not a completion"
+        );
+        a.observe(&push, &status);
+        assert_eq!(
+            a.phase,
+            Phase::Resolved,
+            "repeated idle reports change nothing"
+        );
+        status.print.state = Some("RUNNING".into());
+        a.observe(&push, &status);
+        assert_eq!(a.phase, Phase::Printing, "a later start is tracked again");
+
+        // A start never seen running proves nothing by reporting idle: before PREPARE the
+        // printer names the new subtask while still IDLE.
+        let mut unseen = Attempt::new("plate".into(), "job".into(), 0, "PLA".into());
+        unseen.sent(10);
+        let mut idle = ready();
+        idle.print.name = Some(unseen.name());
+        idle.print.state = Some("IDLE".into());
+        idle.print.error = Some(0);
+        unseen.observe(&push, &idle);
+        assert_eq!(unseen.phase, Phase::AwaitingConfirmation);
+        unseen.tick(700, 600);
+        unseen.observe(&push, &idle);
+        assert_eq!(
+            unseen.phase,
+            Phase::Unknown,
+            "an unseen start stays uncertain"
+        );
+        assert!(unseen.blocks_start());
     }
 
     fn idle_snapshot() -> Status {

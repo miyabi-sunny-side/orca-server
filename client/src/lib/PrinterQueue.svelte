@@ -13,6 +13,7 @@
   import {
     estimateText,
     failureMessage,
+    attentionNote,
     errorLine,
     failureLines,
     queueFailure,
@@ -390,7 +391,9 @@
   {@const slot = inventory?.slots.find((s) => s.id === job.ams_slot_id)}
   {@const material =
     filaments.find((f) => f.id === job.filament_id)?.name ?? "材料未設定"}
-  {@const reason = job.estimate?.error || job.hold_reason || job.last_error}
+  {@const noted = queue && job === queue.current && attentionNote(queue)}
+  {@const reason =
+    job.estimate?.error || job.hold_reason || (noted ? null : job.last_error)}
   <div class="job-details">
     <p class="full-name">{job.name}</p>
     <p>予定材料: {material}</p>
@@ -568,6 +571,9 @@
             })}>除外</button
         >
       </div>
+      {#if attentionNote(queue)}
+        <p class="failure" role="status">{attentionNote(queue)}</p>
+      {/if}
       {#if !reported?.current && queue.recovery?.retry_reason}
         <p class="failure" role="status">
           <span>{failureMessage(queue.recovery.retry_reason)}</span>

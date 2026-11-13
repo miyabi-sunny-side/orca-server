@@ -86,6 +86,7 @@ impl Container {
             "P1_FTPS_PORT",
             "P1_START_TIMEOUT_SECS",
             "SCAD_LIVE_URL",
+            "BAMBU_ERROR_TABLE_URL",
         ] {
             args.extend(["-e".into(), format!("{key}={}", env[key])]);
         }

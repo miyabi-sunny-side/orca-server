@@ -46,6 +46,7 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
       field: "print_error",
       code: "0300-8010",
       state: "PAUSE",
+      description: "冷却ファンの回転速度は異常があります。",
     });
   for (const [width, scheme] of [
     [900, "light"],
@@ -60,7 +61,7 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
     await expect(page.locator(".device-failure")).toBeVisible();
     await expect(page.locator(".device-failure")).toContainText("0300-8010");
     await expect(page.locator(".device-failure")).toContainText(
-      "ホットエンド冷却ファン",
+      "冷却ファンの回転速度は異常があります。",
     );
     await expect(
       page.locator(".device-failure").getByRole("link", { name: /公式/ }),
@@ -69,6 +70,40 @@ test("stopped jobs recover through editing, retry, removal and next", async ({
       page.getByRole("button", { name: "再印刷", exact: true }),
     ).toBeVisible();
     await capture(`device-error-${width}-${scheme}`);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.setViewportSize({ width: 900, height: 812 });
+  await report("RUNNING");
+  // 2026-11-13: Z homing failed, then the P1S reported the same job idle and never FAILED.
+  // The retry must come back without a power cycle, with the code explained.
+  await request.post(control, {
+    data: { state: "RUNNING", print_error: 0x03004000 },
+  });
+  await expect
+    .poll(async () => (await state()).current?.failure?.code)
+    .toBe("0300-4000");
+  await request.post(control, { data: { state: "IDLE" } });
+  await expect.poll(async () => (await state()).allowed.retry).toBe(true);
+  for (const [width, scheme] of [
+    [900, "light"],
+    [320, "dark"],
+  ] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.setViewportSize({ width, height: 812 });
+    await page.reload();
+    await expect(page.locator(".current-job")).not.toHaveAttribute("open");
+    await expect(page.locator(".device-failure")).toContainText("前回");
+    await expect(page.locator(".device-failure strong")).toHaveText(
+      "0300-4000 Z軸の原点復帰に失敗しました。タスクは停止されました。",
+    );
+    await expect(
+      page.getByRole("button", { name: "再印刷", exact: true }),
+    ).toBeEnabled();
+    await expect(
+      page.getByRole("button", { name: "除外", exact: true }),
+    ).toBeEnabled();
+    await expect(page.getByText(/前の開始結果が不明です/)).toHaveCount(0);
+    await capture(`idle-after-error-${width}-${scheme}`);
   }
   await page.emulateMedia({ colorScheme: "light" });
   await page.setViewportSize({ width: 900, height: 812 });

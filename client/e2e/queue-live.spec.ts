@@ -193,8 +193,12 @@ test("queue starts and continues with one action on mobile and desktop", async (
   await add(2, 3); await request.post(control, { data: { fail_upload: true } });
   await next().click();
   await expect(page.locator(".current-job summary")).toContainText("要確認");
+  // The reason sits next to the retry without opening the job, and is not repeated inside it.
+  const reason = page.getByText("印刷データを転送できませんでした");
+  await expect(page.locator(".current-job")).not.toHaveAttribute("open");
+  await expect(reason).toHaveCount(1);
   await page.locator(".current-job summary").click();
-  await expect(page.getByRole("alert")).toContainText("印刷データを転送できませんでした");
+  await expect(reason).toHaveCount(1);
   await expect(page.getByRole('link',{name:'温度を設定'})).toHaveCount(0);
   const retry = page.getByRole("button", { name: "再印刷", exact: true });
   await expect(retry).toBeEnabled();

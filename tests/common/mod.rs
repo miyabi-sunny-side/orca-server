@@ -417,6 +417,8 @@ impl Rig {
             ("P1_MQTT_PORT", broker.port.to_string()),
             ("P1_FTPS_PORT", ftp.port.to_string()),
             ("P1_START_TIMEOUT_SECS", "10".to_owned()),
+            // Tests never ask the official site; one that needs a table serves its own.
+            ("BAMBU_ERROR_TABLE_URL", "off".to_owned()),
         ] {
             env.insert(key.to_owned(), value);
         }
@@ -756,6 +758,26 @@ impl Drop for Rig {
     }
 }
 impl Rig {
+    /// Serve these code descriptions as the official site does and point the server at them.
+    /// Eight digit codes are print errors, sixteen digit codes HMS. Keep the peer alive.
+    pub fn describe(&mut self, rows: &[(&str, &str)]) -> HttpPeer {
+        let list = |digits: usize| -> Vec<Value> {
+            rows.iter()
+                .filter(|(code, _)| code.len() == digits)
+                .map(|(code, text)| json!({"ecode":code,"intro":text}))
+                .collect()
+        };
+        let answer = json!({"result":0,"t":1,"ver":1,"data":{
+            "device_error":{"ver":1,"ja":list(8)},"device_hms":{"ver":1,"ja":list(16)}}})
+        .to_string()
+        .into_bytes();
+        let site = HttpPeer::new(move |_, _, _| (200, answer.clone()));
+        self.env.insert(
+            "BAMBU_ERROR_TABLE_URL".into(),
+            format!("{}/query.php", site.base),
+        );
+        site
+    }
     pub fn control(&self) -> HttpPeer {
         let records = self.broker.records.clone();
         let uploads = self.ftp.records.clone();

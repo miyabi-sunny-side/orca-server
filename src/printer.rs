@@ -393,7 +393,8 @@ impl Drop for Observation {
 }
 
 enum Request {
-    Start(String, u64),
+    /// A transferred attempt, by id, that is ready for its start command.
+    Start(String),
     AutoRefill {
         enabled: bool,
         epoch: u64,
@@ -486,6 +487,10 @@ impl Printer {
         inventory: Option<(crate::database::Database, crate::database::Device)>,
     ) -> std::result::Result<Self, &'static str> {
         let mut initial = State::new(config.is_some());
+        if let Some(config) = &config {
+            crate::codes::register(&config.serial);
+            initial.model = crate::codes::model(&config.serial);
+        }
         if let Some((db, device)) = &inventory {
             initial.start = db
                 .restore_attempt(&device.id)
@@ -953,7 +958,7 @@ impl Printer {
                 );
             } else if printer
                 .starts
-                .try_send(Request::Start(transfer.id.clone(), epoch))
+                .try_send(Request::Start(transfer.id.clone()))
                 .is_err()
             {
                 start.fail(
@@ -1214,11 +1219,37 @@ async fn snapshot(
     sent
 }
 
-/// Send a transferred start once, and only on the connection it was admitted for.
+/// How long a transferred start waits for a synchronized report before it is given up; never
+/// longer than the configured wait for the start confirmation.
+const START_SYNC_SECS: u64 = 60;
+
+/// What to do with a transferred start that has not been sent yet.
+#[derive(Debug, PartialEq, Eq)]
+enum Transferred {
+    /// The current connection is synchronized: check the start against it now.
+    Decide,
+    Wait,
+    /// No synchronized report arrived in time.
+    GiveUp,
+}
+
+/// A reconnect during the transfer does not void it: the printer keeps the file, so the start
+/// is judged by the state the current connection reports, once it is synchronized.
+fn transferred(synchronized: bool, now: u64, deadline: u64) -> Transferred {
+    if synchronized {
+        Transferred::Decide
+    } else if now >= deadline {
+        Transferred::GiveUp
+    } else {
+        Transferred::Wait
+    }
+}
+
+/// Send a transferred start once, when the current, synchronized report still admits it.
 fn send_start(
     state: &mut State,
     id: &str,
-    same_connection: bool,
+    synchronized: bool,
     client: &AsyncClient,
     request: &str,
     config: &Config,
@@ -1235,8 +1266,12 @@ fn send_start(
     };
     let admitted =
         inventory.is_some_and(|(db, device)| db.check_attempt(device, start, &status).is_ok());
-    if !same_connection
-        || !admitted
+    if !synchronized {
+        start.fail(
+            Phase::NotSent,
+            "Printer did not report its state after the transfer; no start command was sent",
+        );
+    } else if !admitted
         || print_start::check_nozzle(&status, &config.nozzle_diameter, &config.nozzle_material)
             .is_err()
     {
@@ -1270,6 +1305,20 @@ fn send_start(
         }
     }
     persist(inventory, state);
+}
+
+/// The transferred start that is due now, with whether a synchronized report backs it.
+fn due(
+    waiting: &mut Option<(String, u64)>,
+    subscribed: bool,
+    state: &State,
+) -> Option<(String, bool)> {
+    let (_, deadline) = waiting.as_ref()?;
+    let synchronized = subscribed && state.status(now()).synchronized;
+    if transferred(synchronized, now(), *deadline) == Transferred::Wait {
+        return None;
+    }
+    waiting.take().map(|(id, _)| (id, synchronized))
 }
 
 /// Save the observed attempt. A failure and its recovery are logged once, not on every retry.
@@ -1503,6 +1552,9 @@ async fn run(
         .as_ref()
         .map_or(String::new(), |(_, device)| device.id.clone());
     let mut last_phase = None;
+    // A transferred attempt and the time its wait for a synchronized report ends. It outlives
+    // the connection: only the start command itself is never carried over.
+    let mut waiting: Option<(String, u64)> = None;
     loop {
         // New queues on reconnect: requests from a lost connection are never replayed.
         let (client, mut events) = AsyncClient::new(options.clone(), 8);
@@ -1568,8 +1620,8 @@ async fn run(
                     };
                     let mut state = state.lock().await;
                     let status=state.status(now());
-                    let (id,epoch)=match command {
-                        Request::Start(id,epoch) => (id,epoch),
+                    let id=match command {
+                        Request::Start(id) => id,
                         Request::Snapshot { .. } | Request::Control { .. } => unreachable!("handled before locking"),
                         Request::AutoRefill{enabled,epoch,response} => {
                             let result=if response.is_closed() || !subscribed || state.epoch!=epoch || !status.synchronized || status.auto_refill.supported!=Some(true) {
@@ -1581,9 +1633,11 @@ async fn run(
                             continue;
                         },
                     };
-                    let same_connection = state.epoch == epoch && subscribed;
-                    send_start(&mut state, &id, same_connection, &client, &request, &config, inventory.as_ref());
-                    log_phase(&printer, &mut last_phase, &state);
+                    waiting = Some((id, now() + START_SYNC_SECS.min(config.start_timeout)));
+                    if let Some((id, synchronized)) = due(&mut waiting, subscribed, &state) {
+                        send_start(&mut state, &id, synchronized, &client, &request, &config, inventory.as_ref());
+                        log_phase(&printer, &mut last_phase, &state);
+                    }
                 }
                 _ = tick.tick() => {
                     expire(&mut pending, now(), "No reply from the printer within 10 seconds; check the reported state");
@@ -1598,6 +1652,10 @@ async fn run(
                     }
                     persist(inventory.as_ref(), &mut state);
                     log_phase(&printer, &mut last_phase, &state);
+                    if let Some((id, synchronized)) = due(&mut waiting, subscribed, &state) {
+                        send_start(&mut state, &id, synchronized, &client, &request, &config, inventory.as_ref());
+                        log_phase(&printer, &mut last_phase, &state);
+                    }
                     // Drop this client's queue so timed-out writes cannot be sent later.
                     if timed_out { break (if synchronized { "start_timeout" } else { "unsynchronized" }, None); }
                 }
@@ -1627,6 +1685,19 @@ async fn run(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_transferred_start_waits_for_a_synchronized_report_and_gives_up_in_time() {
+        assert_eq!(transferred(true, 10, 70), Transferred::Decide);
+        assert_eq!(
+            transferred(true, 99, 70),
+            Transferred::Decide,
+            "a report that arrives with the deadline is still judged"
+        );
+        assert_eq!(transferred(false, 10, 70), Transferred::Wait);
+        assert_eq!(transferred(false, 69, 70), Transferred::Wait);
+        assert_eq!(transferred(false, 70, 70), Transferred::GiveUp);
+    }
 
     fn fixture(dir: &std::path::Path, name: &str, version: &str) -> Config {
         let pem = dir.join(format!("{name}.pem"));

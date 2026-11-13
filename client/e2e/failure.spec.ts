@@ -40,7 +40,7 @@ for (const width of [320, 375, 900])
       await expect(summary.locator("..")).not.toHaveAttribute("open");
       await expect(failure).toBeVisible();
       await expect(failure).toContainText("現在");
-      await expect(failure).toContainText("0500-4003 意味は未確認");
+      await expect(failure.locator("strong")).toHaveText("0500-4003");
       await expect(failure).not.toContainText(reason.trim());
       q.printer.print.error = 0;
       await page.reload();
@@ -79,3 +79,52 @@ for (const width of [320, 375, 900])
       await expect(failure).toContainText("印刷停止");
     });
   }
+
+for (const width of [320, 900])
+  for (const colorScheme of ["dark", "light"] as const)
+    test(`${width} ${colorScheme}: an attempt that never started says why next to the retry`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 812 });
+      await page.emulateMedia({ colorScheme });
+      const { q, commands } = await queueFixture(page);
+      Object.assign(q.current, {
+        state: "needs_attention",
+        last_error:
+          "Printer status or selected AMS changed during transfer; no start command was sent",
+        failure: null,
+      });
+      Object.assign(q.printer, { ready_to_print: true });
+      Object.assign(q.printer.print, { state: "IDLE", error: 0 });
+      Object.assign(q, {
+        waiting: [],
+        allowed: { next: false, retry: true, discard: true },
+        recovery: { retry_reason: null, discard_reason: null },
+      });
+      await page.goto("/");
+      const note = page.getByText(
+        "転送中に機器またはAMSの状態が変わりました。開始命令は送っていません。",
+      );
+      await expect(page.locator(".current-job")).not.toHaveAttribute("open");
+      await expect(note).toHaveCount(1);
+      await expect(note).toBeInViewport();
+      const retry = page.getByRole("button", { name: "再印刷", exact: true });
+      await expect(retry).toBeEnabled();
+      await expect(retry).toBeInViewport();
+      await expect(page.locator(".btn.primary:visible")).toHaveCount(1);
+      if (process.env.E2E_EVIDENCE_DIR)
+        await page.screenshot({
+          path: `${process.env.E2E_EVIDENCE_DIR}/not-started-${width}-${colorScheme}.png`,
+          fullPage: true,
+        });
+      // Opening the job does not say it a second time.
+      await page.locator(".current-job > summary").click();
+      await expect(page.locator(".current-job")).toHaveAttribute("open");
+      await expect(note).toHaveCount(1);
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      expect(commands).toHaveLength(0);
+    });

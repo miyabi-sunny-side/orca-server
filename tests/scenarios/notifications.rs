@@ -172,7 +172,10 @@ fn isolated_notification_delivery() {
     );
     rig.env
         .insert("NOTIFICATION_TEST_URL".into(), webhook.url.clone());
+    // The printer's table explains 0300-4001 and has no entry for 0500-4003.
+    let _site = rig.describe(&[("03004001", "原点復帰に **失敗** しました。")]);
     rig.launch();
+    until(|| rig.store.join("codes/ja_TES.json").is_file(), 12);
     rig.seed();
     let path = format!("/api/plates/{}", id(&rig.plate));
     let mut plate = edit(&rig.get(&path));
@@ -369,6 +372,8 @@ fn isolated_notification_delivery() {
     assert!(
         text.starts_with("印刷開始の拒否 · 確認が必要")
             && text.contains("コード: err_code 0500-4003")
+            && !text.contains("意味"),
+        "a code the table lacks gains no meaning: {text}"
     );
     let count = count + 1;
     rig.idle();
@@ -414,15 +419,17 @@ fn isolated_notification_delivery() {
     );
     coded(&rig, "PAUSE", 0x0300_4001, None);
     until(|| !rig.queue()["current"]["failure"].is_null(), 12);
-    let failure =
-        json!({"kind":"device_error","field":"print_error","code":"0300-4001","state":"PAUSE"});
+    let failure = json!({"kind":"device_error","field":"print_error","code":"0300-4001","state":"PAUSE",
+        "description":"原点復帰に **失敗** しました。"});
     assert_eq!(rig.queue()["current"]["failure"], failure);
     until(|| webhook.len() == count + 1, 12);
     let text = content(&webhook, count);
     assert!(
         text.starts_with("印刷エラー · 確認が必要")
-            && text.contains("コード: print_error 0300-4001")
-            && text.contains("本体の状態: PAUSE")
+            && text.contains(
+                "コード: print_error 0300-4001\n意味: 原点復帰に \\*\\*失敗\\*\\* しました。\n本体の状態: PAUSE"
+            ),
+        "the official meaning follows the code, without Discord markup: {text}"
     );
     for _ in 0..3 {
         coded(&rig, "PAUSE", 0x0300_4001, None);

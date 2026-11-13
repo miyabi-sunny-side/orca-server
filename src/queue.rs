@@ -911,6 +911,15 @@ impl Service {
         let current_view = current
             .map(|job| -> Result<Value> {
                 let mut value = json!(job);
+                // Looked up on reading, so a table downloaded later also explains saved failures.
+                if let Some(code) = job.failure.as_ref().and_then(|f| f.code.as_deref())
+                    && let Some(text) = crate::codes::describe(
+                        crate::codes::model(&self.device.settings.serial).as_deref(),
+                        code,
+                    )
+                {
+                    value["failure"]["description"] = json!(text);
+                }
                 if job.state == "needs_attention" {
                     // A retry takes the feed the printer has now, not the stopped attempt's.
                     value["feed"] = json!(printer_feed(status));
