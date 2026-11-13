@@ -106,8 +106,7 @@ CLIは試算と印刷準備を合わせてサーバー内で1件ずつ実行し�
 
 ```sh
 npm --prefix client run build
-cargo build --locked --example fixture-slicer
-ORCA_TEST_OUTPUT=/tmp/orca-cli-check cargo test --locked --test official_cli -- --ignored
+ORCA_TEST_OUTPUT=/tmp/orca-cli-check cargo test --locked --test it official_cli:: -- --ignored
 ```
 
 検証する主な内容は次のとおりです。

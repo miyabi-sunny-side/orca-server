@@ -660,5 +660,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../tests/scenarios/notifications.rs"]
+#[path = "../tests/it/scenarios/notifications.rs"]
 mod delivery_tests;

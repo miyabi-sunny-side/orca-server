@@ -37,7 +37,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["blocking"
 
 [[example]]
 name = "fixture-slicer"
-path = "tests/common/slicer.rs"
+path = "tests/it/common/slicer.rs"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

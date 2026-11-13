@@ -1,0 +1,398 @@
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
+use orca_server::plates::Store;
+use serde_json::Value;
+use tower::ServiceExt;
+
+fn upload(method: &str, path: &str, name: &str, data: &str) -> Request<Body> {
+    let body = format!(
+        "--orca\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\n{name}\r\n--orca\r\nContent-Disposition: form-data; name=\"models\"; filename=\"parts/box.stl\"\r\nContent-Type: model/stl\r\n\r\n{data}\r\n--orca--\r\n"
+    );
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "multipart/form-data; boundary=orca")
+        .body(Body::from(body))
+        .expect("multipart upload request is valid")
+}
+
+async fn json(response: axum::response::Response) -> Value {
+    serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body is readable"),
+    )
+    .expect("response body is JSON")
+}
+
+#[tokio::test]
+async fn deleted_plate_stays_stored_but_cannot_be_listed_read_or_edited() {
+    let root = tempfile::tempdir().unwrap();
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    let saved = json(
+        app.clone()
+            .oneshot(upload(
+                "POST",
+                "/api/plates",
+                "Disposable cube",
+                include_str!("../fixtures/triangle.stl"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let id = saved["id"].as_str().unwrap();
+    let path = format!("/api/plates/{id}");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    for path in [
+        &path,
+        &format!(
+            "{path}/files/{}",
+            saved["models"][0]["id"].as_str().unwrap()
+        ),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let listed = json(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plates?q=cube")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(listed, serde_json::json!([]));
+    let mut edit = saved.clone();
+    edit.as_object_mut().unwrap().remove("id");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header("content-type", "application/json")
+                .body(Body::from(edit.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let c = rusqlite::Connection::open(root.path().join("orca.sqlite3")).unwrap();
+    let (name, original): (String, Vec<u8>) = c.query_row("SELECT p.name,i.original FROM plates p JOIN plate_items i ON p.id=i.plate_id WHERE p.id=?1", [id], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(name, "Disposable cube");
+    assert_eq!(original, include_bytes!("../fixtures/triangle.stl"));
+}
+
+async fn call(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request is valid"),
+        )
+        .await
+        .expect("router call is infallible");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body is readable");
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn archive_and_restore_move_plates_between_list_views_without_changing_them() {
+    let root = tempfile::tempdir().unwrap();
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    let mut saved = Vec::new();
+    for name in ["Washing pot holder", "Desk box"] {
+        let response = app
+            .clone()
+            .oneshot(upload(
+                "POST",
+                "/api/plates",
+                name,
+                include_str!("../fixtures/triangle.stl"),
+            ))
+            .await
+            .unwrap();
+        saved.push(json(response).await);
+    }
+    let id = saved[0]["id"].as_str().unwrap();
+    let archive = format!("/api/plates/{id}/archive");
+    for _ in 0..2 {
+        assert_eq!(call(&app, "PUT", &archive).await.0, StatusCode::NO_CONTENT);
+    }
+    let names = |list: &Value| -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates").await.1),
+        ["Desk box"]
+    );
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates?q=washing").await.1),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/plates?archived=true").await.1,
+        serde_json::json!([saved[0]])
+    );
+    assert_eq!(
+        names(
+            &call(&app, "GET", "/api/plates?archived=true&q=washing")
+                .await
+                .1
+        ),
+        ["Washing pot holder"]
+    );
+    assert_eq!(
+        names(
+            &call(&app, "GET", "/api/plates?archived=true&q=desk")
+                .await
+                .1
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates?archived=false").await.1),
+        ["Desk box"]
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/plates?archived=maybe").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&app, "GET", &format!("/api/plates/{id}")).await.1,
+        saved[0]
+    );
+    let file = format!(
+        "/api/plates/{id}/files/{}",
+        saved[0]["models"][0]["id"].as_str().unwrap()
+    );
+    assert_eq!(call(&app, "GET", &file).await.0, StatusCode::OK);
+    for _ in 0..2 {
+        assert_eq!(
+            call(&app, "DELETE", &archive).await.0,
+            StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(
+        names(&call(&app, "GET", "/api/plates").await.1),
+        ["Desk box", "Washing pot holder"]
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/plates?archived=true").await.1,
+        serde_json::json!([])
+    );
+    assert_eq!(
+        call(&app, "DELETE", &format!("/api/plates/{id}")).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let missing = "/api/plates/00000000-0000-4000-8000-000000000000/archive".to_owned();
+    for uri in [&archive, &missing] {
+        for method in ["PUT", "DELETE"] {
+            assert_eq!(call(&app, method, uri).await.0, StatusCode::NOT_FOUND);
+        }
+    }
+}
+
+#[tokio::test]
+async fn multipart_save_search_download_and_restart_use_the_same_store() {
+    let root = tempfile::tempdir().unwrap();
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    let response = app
+        .clone()
+        .oneshot(upload(
+            "POST",
+            "/api/plates",
+            "Desk box",
+            include_str!("../fixtures/triangle.stl"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved = json(response).await;
+    let id = saved["id"].as_str().unwrap();
+    let file = saved["models"][0]["id"].as_str().unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/plates/{id}/files/{file}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        include_bytes!("../fixtures/triangle.stl").as_slice()
+    );
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/plates?q=dsbx")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await[0]["id"], saved["id"]);
+    let replacement = serde_json::json!({"name":"Renamed","version":saved["version"],"models":[{
+        "id":saved["models"][0]["id"],"name":"parts/box.stl","source":null,"quantity":2}]});
+    let replace = |value: &Value| {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/plates/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(value.to_string()))
+            .unwrap()
+    };
+    let response = app.clone().oneshot(replace(&replacement)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let changed = json(response).await;
+    assert_eq!(changed["name"], "Renamed");
+    assert_ne!(changed["version"], saved["version"]);
+    assert_eq!(changed["models"][0]["quantity"], 2);
+    assert_eq!(
+        app.clone()
+            .oneshot(replace(&replacement))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/plates/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(response).await, changed);
+}
+
+#[tokio::test]
+async fn bad_upload_unknown_plate_and_unlisted_files_fail_without_losing_data() {
+    let root = tempfile::tempdir().unwrap();
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    let response = app
+        .clone()
+        .oneshot(upload(
+            "POST",
+            "/api/plates",
+            "Valid",
+            include_str!("../fixtures/triangle.stl"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved = json(response).await;
+    let id = saved["id"].as_str().unwrap();
+    let response=app.clone().oneshot(Request::builder().method("PUT").uri(format!("/api/plates/{id}"))
+        .header("content-type","application/json").body(Body::from(serde_json::json!({"name":"Invalid","version":saved["version"],"models":[{"id":saved["models"][0]["id"],"name":"parts/box.stl","source":null,"quantity":0}]}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(json(response).await["error"].is_string());
+    for path in [
+        format!("/api/plates/{id}/files/plate.json"),
+        format!("/api/plates/{}", uuid::Uuid::new_v4()),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/plates/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json(response).await, saved);
+}
+
+#[tokio::test]
+async fn browser_writes_must_come_from_the_serving_origin() {
+    let root = tempfile::tempdir().unwrap();
+    let app = orca_server::app_with_store(Store::open(root.path()).unwrap());
+    for origin in ["https://unrelated.example", "null", "not a URI"] {
+        let mut request = upload(
+            "POST",
+            "/api/plates",
+            "Injected",
+            include_str!("../fixtures/triangle.stl"),
+        );
+        request
+            .headers_mut()
+            .insert("host", "orca.local:3000".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("origin", origin.parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    assert!(
+        Store::open(root.path())
+            .unwrap()
+            .list("")
+            .unwrap()
+            .is_empty()
+    );
+    let mut request = upload(
+        "POST",
+        "/api/plates",
+        "Allowed",
+        include_str!("../fixtures/triangle.stl"),
+    );
+    request
+        .headers_mut()
+        .insert("host", "orca.local:3000".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("origin", "http://orca.local:3000".parse().unwrap());
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+}

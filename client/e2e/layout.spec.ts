@@ -162,7 +162,8 @@ test("keyboard selection persists across filtering and failed saves retain edits
   await page.getByRole("checkbox").check(); await page.getByRole("button", { name: "構成を確認（2）" }).click();
   await page.getByLabel("プレート名", { exact: true }).fill("小物入れ");
   await page.getByLabel("box.stl の個数").fill("3");
-  await page.getByRole("button", { name: "保存", exact: true }).click(); await expect(page.getByRole("alert")).toBeVisible();
+  // The unmocked material list reports its own failure; only the save's alert is meant here.
+  await page.getByRole("button", { name: "保存", exact: true }).click(); await expect(page.getByRole("alert").filter({ hasText: "入力やモデルを確認してください" })).toBeVisible();
   await page.getByRole("button", { name: "モデル選択へ" }).click();
   await page.getByRole("checkbox", { name: "holder.stl" }).uncheck(); await page.getByRole("button", { name: "構成を確認（1）" }).click();
   await expect(page.getByLabel("プレート名", { exact: true })).toHaveValue("小物入れ");
