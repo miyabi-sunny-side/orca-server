@@ -120,6 +120,10 @@ const TESTS: &[Test] = &[
         "200 percent text stays inside 320px in both lists and menus",
         lists_with_bigger_text
     ),
+    test!(
+        "the support choice and its material are 44px targets in each window",
+        support_targets
+    ),
 ];
 
 /// What every document of the page runs first: the stand-in for the API of the server.
@@ -1139,6 +1143,57 @@ async fn lists_with_bigger_text(page: Arc<Page>, server: Arc<Server>) {
                 &button("[role=dialog]", name),
             )
             .await;
+        }
+    }
+}
+
+async fn support_targets(page: Arc<Page>, server: Arc<Server>) {
+    let white = json!({"id": "white", "name": "PLA 白", "vendor": "Fixture", "material": "PLA"});
+    let routes = json!({
+        "/api/default-settings": {"json": {"default_printer_id": "p1", "conditions": {"filament_id": "white"},
+            "infill_patterns": ["adaptivecubic"], "reason": null}},
+        "/api/printers": {"json": [{"id": "p1", "name": "P1S", "machine_profile_key": "Bambu Lab P1S 0.4 nozzle"}]},
+        "/api/scad/model-info": {"json": {"roles": ["primary"]}},
+        "/api/scad/models": {"json": ["cube.stl"]},
+        "/api/plate-filaments": {"json": {"filaments": [white], "selected": white, "selected_state": "loaded",
+            "loaded_ids": ["white"], "printers": [{"id": "p1", "name": "P1S", "state": "current", "unassigned": false}]}},
+    });
+    for width in [375, 900] {
+        for theme in LOOKS {
+            let look = format!("{width} {theme}");
+            lay(&page, &routes).await;
+            page.look(theme, width, 900).await;
+            page.open(&server.url("/plates/new")).await;
+            shows(&page, "input[type=checkbox]").await;
+            page.until(
+                "the model is chosen and the composition opens",
+                "const c = document.querySelector('input[type=checkbox]'); if (!c.checked) c.click(); \
+                 const b = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '構成を確認（1）'); \
+                 if (b && !b.disabled) b.click(); \
+                 return document.querySelector('details.settings-details')?.getBoundingClientRect().height > 0;",
+                Value::Null,
+            )
+            .await;
+            shows(&page, "details.settings-details summary").await;
+            page.js(
+                "document.querySelector('details.settings-details').open = true; \
+                 [...document.querySelectorAll('label')].find((l) => l.textContent.includes('サポートを使う')).querySelector('input').click();",
+                Value::Null,
+            )
+            .await;
+            let heights = page
+                .until(
+                    &look,
+                    "const s = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '').startsWith('接触面のフィラメント')); \
+                     const l = [...document.querySelectorAll('label')].find((l) => l.textContent.includes('サポートを使う')); \
+                     return s && [l.getBoundingClientRect().height, s.getBoundingClientRect().height];",
+                    Value::Null,
+                )
+                .await;
+            for height in heights.as_array().unwrap() {
+                assert!(height.as_f64().unwrap() >= 44.0, "{look}: {heights}");
+            }
+            no_overflow(&page, &look).await;
         }
     }
 }

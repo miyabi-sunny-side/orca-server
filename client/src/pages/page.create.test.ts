@@ -475,3 +475,186 @@ it("late defaults and failed saves preserve manual input; legacy values come fro
     wall_loops: 2,
   });
 });
+
+it("support selection stays optional, searchable and persistent", async () => {
+  const filaments = [
+    {
+      id: "white",
+      name: "PLA 白",
+      vendor: "Fixture",
+      material: "PLA",
+      loaded: true,
+    },
+    {
+      id: "blue",
+      name: "PLA 青",
+      vendor: "Fixture",
+      material: "PLA",
+      loaded: true,
+    },
+    {
+      id: "gf",
+      name: "PETG-GF 黒",
+      vendor: "Fixture",
+      material: "PETG-GF",
+      loaded: false,
+    },
+  ];
+  let saved: any;
+  const api = server(({ path, url, body }) => {
+    if (path === "/api/default-settings")
+      return {
+        json: {
+          default_printer_id: "p1",
+          conditions: { filament_id: "white" },
+          infill_patterns: ["adaptivecubic"],
+          reason: null,
+        },
+      };
+    if (path === "/api/printers")
+      return {
+        json: [
+          {
+            id: "p1",
+            name: "P1S",
+            machine_profile_key: "Bambu Lab P1S 0.4 nozzle",
+          },
+        ],
+      };
+    if (path === "/api/scad/model-info")
+      return { json: { roles: ["primary"] } };
+    if (path === "/api/scad/models") return { json: ["cube.stl"] };
+    if (path === "/api/plate-filaments") {
+      const q = (url.searchParams.get("q") ?? "").toLowerCase();
+      const all = url.searchParams.get("include_unloaded") === "true";
+      const selected = url.searchParams.get("selected_id");
+      const found = filaments.filter(
+        (f) =>
+          (all || f.loaded) &&
+          `${f.name} ${f.vendor}`.toLowerCase().includes(q),
+      );
+      const chosen = filaments.find((f) => f.id === selected) ?? null;
+      return {
+        json: {
+          filaments: found,
+          selected: chosen,
+          selected_state: chosen
+            ? chosen.loaded
+              ? "loaded"
+              : "unloaded"
+            : "unset",
+          loaded_ids: filaments.filter((f) => f.loaded).map((f) => f.id),
+          printers: [
+            { id: "p1", name: "P1S", state: "current", unassigned: false },
+          ],
+        },
+      };
+    }
+    if (path === "/api/plates/import") {
+      saved = body;
+      return { status: 201, json: { id, version: 1, ...body } };
+    }
+  });
+  visit("/plates/new");
+  await fireEvent.click(await screen.findByRole("checkbox"));
+  await click("構成を確認（1）");
+  await waitFor(() => expect(details()).toBeTruthy());
+  await typeInto(field("プレート名"), "接触面の材料");
+  expect(details().open).toBe(false);
+  const selector = () =>
+    screen.queryByRole<HTMLButtonElement>("button", {
+      name: /接触面のフィラメント/,
+    });
+  expect(selector()).toBeNull();
+  await fireEvent.click(details().querySelector("summary")!);
+  const support = field("サポートを使う");
+  expect(support.checked).toBe(false);
+  await fireEvent.click(support);
+  await waitFor(() => expect(selector()?.textContent).toContain("PLA 白"));
+  const search = async () => {
+    const box = await screen.findByRole<HTMLInputElement>("searchbox", {
+      name: "材料を検索",
+    });
+    await waitFor(() => expect(document.activeElement).toBe(box));
+    return box;
+  };
+  const choices = () => [
+    ...document.querySelectorAll<HTMLButtonElement>(".choices button"),
+  ];
+  await fireEvent.click(selector()!);
+  await typeInto(await search(), "PLA");
+  await waitFor(() => expect(choices()).toHaveLength(2));
+  await fireEvent.click(
+    screen.getByRole("button", { name: /PLA 青.*Fixture/ }),
+  );
+  await waitFor(() => expect(selector()?.textContent).toContain("PLA 青"));
+  await waitFor(() => expect(document.activeElement).toBe(selector()));
+  await fireEvent.click(support);
+  expect(selector()).toBeNull();
+  await fireEvent.click(support);
+  await waitFor(() => expect(selector()?.textContent).toContain("PLA 青"));
+  await fireEvent.click(selector()!);
+  await fireEvent.click(
+    screen.getByLabelText("所持していないフィラメントを選択する"),
+  );
+  const box = await search();
+  await typeInto(box, "PETG-GF");
+  await waitFor(() => expect(choices()).toHaveLength(1));
+  await press("ArrowDown", box);
+  expect(document.activeElement).toBe(choices()[0]);
+  await fireEvent.click(choices()[0]);
+  await waitFor(() => expect(selector()?.textContent).toContain("PETG-GF 黒"));
+  await fireEvent.click(selector()!);
+  await typeInto(await search(), "見つからない材料");
+  expect(await screen.findByText(/一致する材料がありません。/)).toBeTruthy();
+  await press("Escape", screen.getByRole("searchbox", { name: "材料を検索" }));
+  await waitFor(() => expect(document.activeElement).toBe(selector()));
+  expect(selector()!.textContent).toContain("PETG-GF 黒");
+  await click("保存");
+  await waitFor(() => expect(went).toEqual([`/plates/${id}`]));
+  expect(saved.conditions).toMatchObject({
+    support_enabled: true,
+    support_interface_filament_id: "gf",
+  });
+  // The plate cannot be queued until the support material is loaded.
+  api.route(({ path }) => {
+    if (path === `/api/plates/${id}`)
+      return {
+        json: {
+          id,
+          version: 1,
+          ...saved,
+          models: [{ id: "m", ...saved.models[0] }],
+        },
+      };
+    if (path === "/api/queue")
+      return {
+        json: {
+          epoch: "e",
+          generation: 0,
+          request_id: "r",
+          waiting: [],
+          current: null,
+          admission: {
+            allowed: false,
+            plate_version: 1,
+            reason:
+              "No confirmed AMS slot contains the support interface material",
+          },
+        },
+      };
+  });
+  visit(`/plates/${id}`);
+  expect(
+    await screen.findByText(
+      "接触面用のフィラメントをAMSに装填し、材料を割り当ててください。",
+    ),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("link", { name: "AMSを確認" }).getAttribute("href"),
+  ).toBe("/printers/p1/ams");
+  expect(
+    screen.getByRole<HTMLButtonElement>("button", { name: "印刷キューへ" })
+      .disabled,
+  ).toBe(true);
+});

@@ -5,7 +5,6 @@ use crate::scenarios::compact;
 use crate::scenarios::import;
 use crate::scenarios::plates;
 use crate::scenarios::registry;
-use crate::scenarios::strength_support as material;
 use serde_json::json;
 fn appdir() -> std::path::PathBuf {
     std::env::var_os("ORCA_APPDIR")
@@ -21,11 +20,6 @@ fn plate_admission() {
 #[ignore = "requires Chromium"]
 fn creation_defaults() {
     plates::creation_defaults(true);
-}
-#[test]
-#[ignore = "requires Chromium"]
-fn support_interface() {
-    material::support_interface(true);
 }
 #[test]
 #[ignore = "requires Chromium"]
