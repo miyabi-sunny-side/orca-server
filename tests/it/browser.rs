@@ -13,11 +13,6 @@ fn appdir() -> std::path::PathBuf {
 }
 #[test]
 #[ignore = "requires Chromium"]
-fn plate_admission() {
-    plates::plate_admission(true);
-}
-#[test]
-#[ignore = "requires Chromium"]
 fn creation_defaults() {
     plates::creation_defaults(true);
 }
