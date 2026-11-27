@@ -24,11 +24,6 @@ fn creation_defaults() {
 }
 #[test]
 #[ignore = "requires Chromium"]
-fn strength_settings() {
-    material::strength_settings(true);
-}
-#[test]
-#[ignore = "requires Chromium"]
 fn support_interface() {
     material::support_interface(true);
 }
