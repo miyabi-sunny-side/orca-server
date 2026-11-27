@@ -119,7 +119,7 @@ notifications() {
 }
 embedded_page() { bash tests/embedded_ui.sh "$target/debug/orca-server"; }
 official() {
-  ORCA_ROLE_UI=1 cargo test --locked --test it -- --ignored --nocapture \
+  cargo test --locked --test it -- --ignored --nocapture \
     official_cli:: material_roles:: registry_flows::independent_printers
 }
 browsers() {

@@ -388,15 +388,4 @@ fn official_role_assemblies_preserve_material_order_geometry_and_ams() {
         serde_json::to_vec_pretty(&results).unwrap(),
     )
     .unwrap();
-    if std::env::var_os("ORCA_ROLE_UI").is_some() {
-        rig.files
-            .lock()
-            .unwrap()
-            .insert("parts/roles.3mf".into(), fixture("material-roles.3mf"));
-        rig.browser(
-            "E2E_MATERIAL_ROLES_CONTEXT",
-            &json!({"primary":rig.materials[0]["id"],"secondary":rig.materials[1]["id"]}),
-            None,
-        );
-    }
 }

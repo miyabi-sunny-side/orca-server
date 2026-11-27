@@ -369,3 +369,66 @@ it("unknown, unmapped, empty and missing references remain distinct; clear saves
   );
   expect(screen.queryByRole("link", { name: "材料設定へ" })).toBeNull();
 });
+
+it("role materials save, reopen and are asked for with the keyboard", async () => {
+  const { api } = picker();
+  api.route(({ path, url }) => {
+    if (path === "/api/scad/models")
+      return { json: ["parts/roles.3mf", "parts/cube.stl"] };
+    if (path === "/api/scad/model-info")
+      return {
+        json: {
+          roles: url.searchParams.get("path")?.endsWith("roles.3mf")
+            ? ["primary", "secondary"]
+            : ["primary"],
+        },
+      };
+  });
+  visit("/plates/new");
+  await fireEvent.click(
+    await screen.findByRole("checkbox", { name: "parts/roles.3mf" }),
+  );
+  await click("構成を確認（1）");
+  await fireEvent.input(screen.getByLabelText("プレート名"), {
+    target: { value: "役割材料" },
+  });
+  const role = (name: string) =>
+    screen.getByRole<HTMLButtonElement>("button", {
+      name: new RegExp(`^${name}のフィラメント:`),
+    });
+  await waitFor(() => expect(role("primary").textContent).toContain("PLA 白"));
+  expect(role("secondary").textContent).toContain("フィラメントを選択");
+  await fireEvent.click(role("secondary"));
+  expect(
+    screen.getByRole("dialog", { name: "secondaryのフィラメントを選択" }),
+  ).toBeTruthy();
+  await focused(search);
+  await type("PLA 青");
+  await waitFor(() => expect(choices()).toHaveLength(1));
+  await press("ArrowDown", search());
+  expect(document.activeElement).toBe(option("blue"));
+  await fireEvent.click(option("blue")!);
+  await focused(() => role("secondary"));
+  expect(role("secondary").textContent).toContain("PLA 青");
+  await fireEvent.click(role("primary"));
+  await press("Escape", search());
+  await focused(() => role("primary"));
+  await click("保存");
+  await waitFor(() => expect(went).toHaveLength(1));
+  expect(api.to("POST", "/api/plates/import")[0].body.conditions).toMatchObject(
+    {
+      filament_id: "white",
+      secondary_filament_id: "blue",
+    },
+  );
+  // A model with one role asks for one material only.
+  visit("/plates/new");
+  await fireEvent.click(
+    await screen.findByRole("checkbox", { name: "parts/cube.stl" }),
+  );
+  await click("構成を確認（1）");
+  await waitFor(() => expect(main()).toBeTruthy());
+  expect(
+    screen.queryByRole("button", { name: /secondaryのフィラメント/ }),
+  ).toBeNull();
+});
