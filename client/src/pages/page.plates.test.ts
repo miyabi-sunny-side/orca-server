@@ -445,3 +445,108 @@ it("unconfigured services expose recovery without hiding the plate list", async 
     screen.getByRole("link", { name: "プレート一覧へ" }).getAttribute("href"),
   ).toBe("/plates");
 });
+
+it("right click, long press and the ContextMenu key archive and restore a plate", async () => {
+  const plate = {
+    id: "10000000-0000-4000-8000-000000000001",
+    name: "Philips 洗浄ポットホルダー",
+  };
+  const other = {
+    id: "10000000-0000-4000-8000-000000000002",
+    name: "Philips 洗浄ポットホルダー 予備",
+  };
+  const archivedIds = new Set<string>();
+  const all = [plate, other].map((p) => ({
+    ...p,
+    version: 1,
+    models: [
+      { id: "model", name: "cube.stl", source: "cube.stl", quantity: 1 },
+    ],
+    conditions: { filament_id: "white" },
+  }));
+  server(({ method, path, url }) => {
+    const id = path.match(/^\/api\/plates\/([^/]+)\/archive$/)?.[1];
+    if (id && method === "PUT") {
+      archivedIds.add(id);
+      return { status: 204 };
+    }
+    if (id && method === "DELETE") {
+      archivedIds.delete(id);
+      return { status: 204 };
+    }
+    if (path === "/api/plates") {
+      const archived = url.searchParams.get("archived") === "true";
+      return { json: all.filter((p) => archivedIds.has(p.id) === archived) };
+    }
+    if (path === "/api/printers")
+      return {
+        json: [{ id: "p1", name: "P1S", machine_profile_key: machine }],
+      };
+  });
+  const row = (name: string) =>
+    rows().find((r) => r.querySelector("strong")?.textContent?.trim() === name);
+  const menuNames = () =>
+    [
+      ...dialog().querySelectorAll(
+        ".plate-menu > button, .plate-menu .queue-add button",
+      ),
+    ]
+      .map((b) => b.textContent!.trim())
+      .filter((name) => name !== "キュー追加");
+  const open = async (gesture: string, target: HTMLElement) => {
+    if (gesture === "right") await fireEvent.contextMenu(target);
+    else if (gesture === "key") {
+      target.focus();
+      await press("ContextMenu", target);
+    } else {
+      const touch = { pointerType: "touch", clientX: 60, clientY: 20 };
+      await fireEvent.pointerDown(target, touch);
+      await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+      await fireEvent.pointerUp(target, touch);
+    }
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+  };
+  for (const gesture of ["right", "touch", "key"]) {
+    visit("/plates");
+    await waitFor(() => expect(row(plate.name)).toBeTruthy());
+    await open(gesture, row(plate.name)!);
+    expect(menuNames()).toEqual(["編集", "複製", "アーカイブ", "削除"]);
+    await click("アーカイブ", dialog());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("status").textContent).toBe(
+      `「${plate.name}」をアーカイブしました`,
+    );
+    expect(row(plate.name)).toBeUndefined();
+    expect(row(other.name)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(rows()[0]));
+    expect(
+      screen.getByRole("link", { name: "アーカイブ済み" }).getAttribute("href"),
+    ).toBe("/plates?archived=1");
+    visit("/plates?archived=1");
+    expect(
+      (await screen.findByRole("heading", { level: 1 })).textContent?.trim(),
+    ).toBe("アーカイブ");
+    await waitFor(() => expect(row(plate.name)).toBeTruthy());
+    expect(row(other.name)).toBeUndefined();
+    await open(gesture, row(plate.name)!);
+    expect(menuNames()).toEqual(["復元", "削除"]);
+    await click("復元", dialog());
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toBe(
+        `「${plate.name}」を復元しました`,
+      ),
+    );
+    expect(
+      await screen.findByText("アーカイブ済みのプレートはありません"),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "プレート一覧へ戻る" })
+        .getAttribute("href"),
+    ).toBe("/plates");
+  }
+  visit("/plates");
+  await waitFor(() => expect(row(plate.name)).toBeTruthy());
+  // Row click still opens the detail page.
+  expect(row(plate.name)!.getAttribute("href")).toBe(`/plates/${plate.id}`);
+});

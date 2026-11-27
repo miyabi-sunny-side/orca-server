@@ -1,0 +1,230 @@
+{
+  "printers": [
+    {
+      "id": "p1",
+      "name": "P1S",
+      "machine_profile_key": "Bambu Lab P1S 0.4 nozzle"
+    }
+  ],
+  "filaments": [
+    {
+      "id": "petg",
+      "name": "PETG-GF 黒",
+      "material": "PETG-GF",
+      "vendor": "Fixture"
+    }
+  ],
+  "ams": {
+    "slots": [
+      {
+        "id": "slot",
+        "ams_id": 1,
+        "slot_index": 0
+      }
+    ]
+  },
+  "queue": {
+    "epoch": "fixture-epoch",
+    "generation": 0,
+    "request_id": "20000000-0000-4000-8000-000000000000",
+    "current": {
+      "id": "00000000-0000-4000-8000-000000000000",
+      "plate_id": "10000000-0000-4000-8000-000000000000",
+      "name": "現在の印刷",
+      "state": "printing",
+      "filament_id": "petg",
+      "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+      "process_profile_key": "0.20mm Standard",
+      "bed_type": "Cool Plate",
+      "ams_slot_id": "slot",
+      "attempt_id": null,
+      "artifact_path": null,
+      "last_error": null,
+      "hold_reason": null,
+      "estimate": {
+        "state": "ready",
+        "seconds": 4800,
+        "error": null
+      }
+    },
+    "waiting": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "plate_id": "10000000-0000-4000-8000-000000000001",
+        "name": "1. 長い名前のプレート・前側ケースと追加の取り付け部品",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": null,
+        "estimate": {
+          "state": "ready",
+          "seconds": 4800,
+          "error": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "plate_id": "10000000-0000-4000-8000-000000000002",
+        "name": "2. 取り付け部品 2",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": null,
+        "estimate": {
+          "state": "failed",
+          "seconds": null,
+          "error": "Selected build plate temperature is missing or zero for this material"
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "plate_id": "10000000-0000-4000-8000-000000000003",
+        "name": "3. 取り付け部品 3",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": "No confirmed AMS slot contains the plate material",
+        "estimate": {
+          "state": "ready",
+          "seconds": 4800,
+          "error": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000004",
+        "plate_id": "10000000-0000-4000-8000-000000000004",
+        "name": "4. 取り付け部品 4",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": null,
+        "estimate": {
+          "state": "calculating",
+          "seconds": null,
+          "error": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000005",
+        "plate_id": "10000000-0000-4000-8000-000000000005",
+        "name": "5. 取り付け部品 5",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": null,
+        "estimate": {
+          "state": "ready",
+          "seconds": 4800,
+          "error": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000006",
+        "plate_id": "10000000-0000-4000-8000-000000000006",
+        "name": "6. 取り付け部品 6",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": null,
+        "estimate": {
+          "state": "ready",
+          "seconds": 4800,
+          "error": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000007",
+        "plate_id": "10000000-0000-4000-8000-000000000007",
+        "name": "7. 取り付け部品 7",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": null,
+        "estimate": {
+          "state": "ready",
+          "seconds": 4800,
+          "error": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "plate_id": "10000000-0000-4000-8000-000000000008",
+        "name": "8. 取り付け部品 8",
+        "state": "queued",
+        "filament_id": "petg",
+        "required_machine_profile_key": "Bambu Lab P1S 0.4 nozzle",
+        "process_profile_key": "0.20mm Standard",
+        "bed_type": "Cool Plate",
+        "ams_slot_id": "slot",
+        "attempt_id": null,
+        "artifact_path": null,
+        "last_error": null,
+        "hold_reason": null,
+        "estimate": {
+          "state": "ready",
+          "seconds": 4800,
+          "error": null
+        }
+      }
+    ],
+    "allowed": {
+      "next": false,
+      "retry": false,
+      "discard": false
+    },
+    "printer": {
+      "connection": "connected",
+      "synchronized": true,
+      "ready_to_print": false,
+      "print": {
+        "state": "RUNNING",
+        "percent": 35,
+        "remaining_minutes": 52,
+        "error": null
+      },
+      "ams": null
+    }
+  }
+}

@@ -35,6 +35,12 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 rmcp = { version = "3.1.2", features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "multipart", "rustls"] }
 
+# The page in a real browser: its own runner runs the tests one after another (tests/page.rs).
+[[test]]
+name = "page"
+path = "tests/page.rs"
+harness = false
+
 [[example]]
 name = "fixture-slicer"
 path = "tests/it/common/slicer.rs"
