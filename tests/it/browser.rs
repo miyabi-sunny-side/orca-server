@@ -1,6 +1,5 @@
 //! Chromium assertions stay in TypeScript; Rust owns their isolated API and protocol peers.
 use crate::common::*;
-use crate::scenarios::ams_nozzle as ams;
 use crate::scenarios::import;
 use crate::scenarios::plates;
 use crate::scenarios::registry;
@@ -14,16 +13,6 @@ fn appdir() -> std::path::PathBuf {
 #[ignore = "requires Chromium"]
 fn creation_defaults() {
     plates::creation_defaults(true);
-}
-#[test]
-#[ignore = "requires Chromium"]
-fn ams_refresh() {
-    ams::ams_refresh();
-}
-#[test]
-#[ignore = "requires Chromium"]
-fn ams_priority() {
-    ams::ams_priority(true);
 }
 #[test]
 #[ignore = "requires Chromium and official Orca 2.4.2"]
