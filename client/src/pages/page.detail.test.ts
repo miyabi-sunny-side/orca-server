@@ -217,3 +217,78 @@ it("search retains selected models across filtering and saving", async () => {
     [names[99], 1],
   ]);
 });
+
+it("a plate without machine conditions refuses the printer it does not fit and goes to the default one", async () => {
+  const plate = {
+    id,
+    version: 1,
+    name: "大きなトレイ",
+    models: [
+      { id: "item", name: "large.stl", source: "parts/large.stl", quantity: 1 },
+    ],
+    conditions: { filament_id: "white" },
+  };
+  const unfit = "The models do not fit on this printer's build plate";
+  const api = server(({ path, url }) => {
+    if (path === `/api/plates/${id}`) return { json: plate };
+    if (path === "/api/default-settings")
+      return {
+        json: { ...emptyDefaults, default_printer_id: "p1", reason: null },
+      };
+    if (path === "/api/printers")
+      return {
+        json: [
+          {
+            id: "a1",
+            name: "A1 mini",
+            machine_profile_key: "Bambu Lab A1 mini 0.4 nozzle",
+          },
+          {
+            id: "p1",
+            name: "P1S",
+            machine_profile_key: "Bambu Lab P1S 0.4 nozzle",
+          },
+        ],
+      };
+    if (path === "/api/queue") {
+      const allowed = url.searchParams.get("printer_id") !== "a1";
+      return {
+        json: {
+          epoch: "e",
+          generation: 0,
+          request_id: "r",
+          waiting: [],
+          current: null,
+          allowed: { next: false },
+          admission: {
+            allowed,
+            plate_version: 1,
+            reason: allowed ? null : unfit,
+          },
+        },
+      };
+    }
+  });
+  visit(`/plates/${id}`);
+  // The default printer is chosen first, not the first printer.
+  const target =
+    await screen.findByLabelText<HTMLSelectElement>("追加先のプリンター");
+  await waitFor(() => expect(target.value).toBe("p1"));
+  const add = () =>
+    screen.getByRole<HTMLButtonElement>("button", { name: "印刷キューへ" });
+  await waitFor(() => expect(add().disabled).toBe(false));
+  await fireEvent.change(target, { target: { value: "a1" } });
+  await waitFor(() =>
+    expect(
+      screen.getAllByText(/このプリンターの台に乗りません/).length,
+    ).toBeGreaterThan(0),
+  );
+  expect(add().disabled).toBe(true);
+  await waitFor(() => expect(target.disabled).toBe(false));
+  await fireEvent.change(target, { target: { value: "p1" } });
+  await click("印刷キューへ");
+  await waitFor(() => expect(api.to("POST", "/api/queue")).toHaveLength(1));
+  expect(
+    api.to("POST", "/api/queue")[0].url.searchParams.get("printer_id"),
+  ).toBe("p1");
+});

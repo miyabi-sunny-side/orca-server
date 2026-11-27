@@ -124,6 +124,14 @@ const TESTS: &[Test] = &[
         "the material choices are 44px targets and their dialog fits 200% text",
         support_targets
     ),
+    test!(
+        "the composition editor has 44px model actions and stays operable at 200% text",
+        editor_targets
+    ),
+    test!(
+        "files chosen to import are drawn from their own bytes and fit the window",
+        import_preview
+    ),
 ];
 
 /// What every document of the page runs first: the stand-in for the API of the server.
@@ -1217,6 +1225,85 @@ async fn support_targets(page: Arc<Page>, server: Arc<Server>) {
     }
 }
 
+async fn editor_targets(page: Arc<Page>, server: Arc<Server>) {
+    let front = "gridfinity/base-front.stl";
+    let routes = json!({
+        format!("/api/plates/{PLATE}"): {"json": {"id": PLATE, "version": 1, "name": "天馬ルームケース: base後",
+            "models": [{"id": "front", "name": front, "source": front, "quantity": 10}],
+            "conditions": {"filament_id": null}}},
+        "/api/default-settings": {"json": serde_json::from_str::<Value>(NO_DEFAULTS).unwrap()},
+        "/api/scad/model-info": {"json": {"roles": ["primary"]}},
+        "/api/scad/models": {"json": [front, "gridfinity/base-back.stl", "gridfinity/bin.stl"]},
+    });
+    for width in [375, 900] {
+        let look = format!("{width}");
+        lay(&page, &routes).await;
+        page.look("light", width, 900).await;
+        page.open(&server.url(&format!("/plates/{PLATE}?edit=1")))
+            .await;
+        let heights = page
+            .until(
+                &look,
+                &format!(
+                    "const b = [(() => {{ {} }})(), (() => {{ {} }})()]; \
+                     return b.every((e) => e) && b.map((e) => e.getBoundingClientRect().height);",
+                    button("", "モデルを追加"),
+                    button("", &format!("{front}を差し替え"))
+                ),
+                Value::Null,
+            )
+            .await;
+        for height in heights.as_array().unwrap() {
+            assert!(height.as_f64().unwrap() >= 44.0, "{look}: {heights}");
+        }
+    }
+    let size = "return parseFloat(getComputedStyle(document.querySelector('input[required][maxlength]')).fontSize);";
+    let before = page.js(size, Value::Null).await.as_f64().unwrap();
+    bigger_text(&page).await;
+    let after = page.js(size, Value::Null).await.as_f64().unwrap();
+    assert!(
+        (after - before * 2.0).abs() < 0.01,
+        "the name went from {before} to {after}"
+    );
+    no_overflow(&page, "200%").await;
+    press(&page, "", "モデルを追加").await;
+    shows(&page, "input[type=search]").await;
+    no_overflow(&page, "200% catalog").await;
+}
+
+async fn import_preview(page: Arc<Page>, server: Arc<Server>) {
+    let routes = json!({
+        "/api/default-settings": {"json": serde_json::from_str::<Value>(NO_DEFAULTS).unwrap()},
+    });
+    for width in [375, 1000] {
+        for theme in LOOKS {
+            let look = format!("{width} {theme}");
+            lay(&page, &routes).await;
+            page.look(theme, width, 900).await;
+            page.open(&server.url("/plates/new?source=file")).await;
+            shows(&page, "input[type=file]").await;
+            // The file chooser of the browser, as the files it hands over.
+            page.js(
+                "const [bytes] = arguments; const chosen = new DataTransfer(); \
+                 for (const name of ['一つ目のとても長いファイル名を含む形状の確認.stl', 'second.stl']) \
+                   chosen.items.add(new File([new Uint8Array(bytes)], name)); \
+                 const input = document.querySelector('input[type=file]'); \
+                 input.files = chosen.files; input.dispatchEvent(new Event('change', {bubbles: true}));",
+                json!([CUBE]),
+            )
+            .await;
+            says(&page, PREVIEW, "20.0 × 20.0 × 20.0 mm").await;
+            no_overflow(&page, &look).await;
+            bigger_text(&page).await;
+            no_overflow(&page, &format!("{look} 200%")).await;
+        }
+    }
+    assert!(
+        sent_to(&page, "GET", "/api/scad").await.is_empty(),
+        "importing asked SCAD"
+    );
+}
+
 // ---- the history ----
 
 fn history_routes() -> Value {
@@ -1438,6 +1525,8 @@ async fn estimates_fit(page: Arc<Page>, server: Arc<Server>) {
         )
         .await;
         no_overflow(&page, theme).await;
+        bigger_text(&page).await;
+        no_overflow(&page, &format!("{theme} 200%")).await;
     }
 }
 
