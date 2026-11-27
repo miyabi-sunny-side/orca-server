@@ -432,3 +432,100 @@ it("detail adds directly and preserves an unknown request through reload", async
   reload();
   await waitFor(async () => expect((await destination()).value).toBe("a1"));
 });
+
+it("after unplugging the AMS the queue prints from the external spool without any feed choice", async () => {
+  const { q, commands, api } = queueFixture();
+  Object.assign(q.current, {
+    state: "needs_attention",
+    failure: { kind: "stopped", state: "FAILED" },
+  });
+  q.waiting[0].feed = "external";
+  Object.assign(q.printer.print, { state: "FAILED", error: 0 });
+  Object.assign(q, {
+    allowed: { next: false, retry: true, discard: true },
+    recovery: { retry_reason: null, discard_reason: null },
+  });
+  visit("/");
+  await waitFor(() =>
+    expect($(".current-job summary")?.textContent).toContain("要確認"),
+  );
+  expect(screen.queryByText(/AMS slot|AMSを確認/)).toBeNull();
+  expect(screen.queryByLabelText("給材")).toBeNull();
+  const waiting = $$(".waiting-job details")[0] as HTMLDetailsElement;
+  await fireEvent.click(waiting.querySelector("summary")!);
+  expect(within(waiting).getByText(/外部スプール ·/)).toBeTruthy();
+  await click("再印刷");
+  await waitFor(() => expect(commands).toHaveLength(1));
+  expect(commands[0].action.type).toBe("retry");
+  api.route(({ path }) => {
+    if (path === "/api/printers/p1/ams")
+      return { json: { current: true, slots: [] } };
+  });
+  visit("/printers/p1/ams");
+  expect(
+    await screen.findByText("AMS未接続 · 外部スプールで印刷します"),
+  ).toBeTruthy();
+});
+
+it("stopped jobs recover through editing, retry, removal and next", async () => {
+  const { q, commands } = queueFixture();
+  Object.assign(q.current, {
+    state: "needs_attention",
+    failure: {
+      kind: "device_error",
+      field: "print_error",
+      code: "0300-4000",
+      state: "RUNNING",
+      description: "Z軸の原点復帰に失敗しました。タスクは停止されました。",
+    },
+  });
+  Object.assign(q.printer.print, { state: "IDLE", error: 0 });
+  Object.assign(q, {
+    allowed: { next: false, retry: true, discard: true },
+    recovery: { retry_reason: null, discard_reason: null },
+  });
+  visit("/queue?printer_id=p1");
+  const failure = await found(".device-failure");
+  expect($(".current-job")).toHaveProperty("open", false);
+  expect(failure.textContent).toContain("前回");
+  expect(failure.querySelector("strong")!.textContent).toBe(
+    "0300-4000 Z軸の原点復帰に失敗しました。タスクは停止されました。",
+  );
+  await waitFor(() => expect(retryButton().disabled).toBe(false));
+  expect(
+    screen.getByRole<HTMLButtonElement>("button", { name: "除外" }).disabled,
+  ).toBe(false);
+  expect(screen.queryByText(/前の開始結果が不明です/)).toBeNull();
+  expect($$(".btn.primary").filter(shown)).toHaveLength(1);
+  Object.assign(q.current, { failure: { kind: "stopped", state: "FAILED" } });
+  reload();
+  await waitFor(() =>
+    expect($(".device-failure")?.textContent).toContain("印刷停止"),
+  );
+  expect($(".current-job summary")!.textContent).toContain("要確認");
+  await fireEvent.click($(".current-job summary")!);
+  expect(
+    within($(".current-job")!)
+      .getByRole("link", { name: "プレートの条件を編集" })
+      .getAttribute("href"),
+  ).toBe(`/plates/${q.current.plate_id}?edit=1`);
+  await click("除外");
+  await waitFor(() => expect(commands).toHaveLength(1));
+  expect(commands[0].action).toEqual({
+    type: "discard",
+    expected_job: q.current.id,
+    cleared: true,
+  });
+  Object.assign(q, {
+    current: null,
+    allowed: { next: true, retry: false, discard: false },
+  });
+  q.printer.ready_to_print = false;
+  reload();
+  await click("印刷");
+  await waitFor(() => expect(commands).toHaveLength(2));
+  expect(commands[1].action).toMatchObject({
+    type: "next",
+    expected_job: q.waiting[0].id,
+  });
+});

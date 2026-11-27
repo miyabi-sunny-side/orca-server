@@ -212,3 +212,50 @@ it("original printer wins over saved selection; unavailable references remain re
   await press("Escape");
   expect(row.textContent).toContain(f.items[0].name);
 });
+
+it("history re-add repairs admission and retries one request through a reload", async () => {
+  const f = history();
+  let lose = true;
+  f.api.route(({ method, path }) => {
+    if (path !== "/api/queue" || method !== "POST" || !lose) return;
+    lose = false;
+    f.commands.push(f.api.sent.at(-1)!.body);
+    f.q.generation++;
+    return { abort: true };
+  });
+  f.hold(true);
+  visit("/history");
+  await waitFor(() => expect(rows()).toHaveLength(50));
+  await fireEvent.contextMenu(rows()[0]);
+  await waitFor(() => expect(addButton().disabled).toBe(true));
+  expect(
+    (await screen.findByRole("link", { name: "プレート編集" })).getAttribute(
+      "href",
+    ),
+  ).toBe(`/plates/${f.items[0].plate_id}?edit=1`);
+  await press("Escape");
+  f.hold(false);
+  await press("F10", rows()[0], { shiftKey: true });
+  await waitFor(() => expect(addButton().disabled).toBe(false));
+  addButton().click();
+  addButton().click();
+  expect(
+    await within(dialog()).findByRole("button", { name: "結果を再確認" }),
+  ).toBeTruthy();
+  await press("Escape");
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  // A reload keeps the request, so the retry sends the same one.
+  reload();
+  await waitFor(() => expect(rows()).toHaveLength(50));
+  await fireEvent.contextMenu(rows()[0]);
+  await click("結果を再確認", dialog());
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(rows()[0]));
+  expect(f.commands).toHaveLength(2);
+  expect(f.commands[1]).toEqual(f.commands[0]);
+  await fireEvent.contextMenu(rows()[0]);
+  await click("キューに追加", dialog());
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(f.commands).toHaveLength(3);
+  expect(f.commands[2]).not.toEqual(f.commands[0]);
+});

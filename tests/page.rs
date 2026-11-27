@@ -112,6 +112,14 @@ const TESTS: &[Test] = &[
         "sticky search stays in sight while the model list scrolls",
         sticky_search
     ),
+    test!(
+        "heading keeps search and rows in place in each window",
+        plate_heading_in_place
+    ),
+    test!(
+        "200 percent text stays inside 320px in both lists and menus",
+        lists_with_bigger_text
+    ),
 ];
 
 /// What every document of the page runs first: the stand-in for the API of the server.
@@ -1042,6 +1050,99 @@ async fn long_names_fit(page: Arc<Page>, server: Arc<Server>) {
     );
 }
 
+/// Where the heading, the search field and the archived-list link of the plate list lie.
+const HEADING_JS: &str = "
+const box = (e) => e.getBoundingClientRect();
+const input = box(document.querySelector('input[type=search]'));
+const link = box([...document.querySelectorAll('a')].find((a) => a.getAttribute('aria-label') === 'アーカイブ済み' || a.title === 'アーカイブ済み'));
+const h1 = box(document.querySelector('h1'));
+const create = box([...document.querySelectorAll('a')].find((a) => a.textContent.trim() === '新規作成'));
+return { link: link.width, row: Math.abs((link.y + link.height / 2) - (input.y + input.height / 2)),
+  heading: Math.abs((create.y + create.height / 2) - (h1.y + h1.height / 2)), input: input.y };";
+
+async fn plate_heading_in_place(page: Arc<Page>, server: Arc<Server>) {
+    for theme in LOOKS {
+        for width in [320, 375, 900] {
+            let look = format!("{width} {theme}");
+            lay(&page, &menu_routes("", false)).await;
+            page.look(theme, width, 800).await;
+            page.open(&server.url("/plates")).await;
+            page.until(
+                &look,
+                "return document.querySelectorAll('.plate-row').length === 2;",
+                Value::Null,
+            )
+            .await;
+            let at = page.js(HEADING_JS, Value::Null).await;
+            assert!(at["link"].as_f64().unwrap() >= 44.0, "{look}: {at}");
+            // The icon shares the search row; the heading stays one line and nothing is pushed down.
+            assert!(at["row"].as_f64().unwrap() < 2.0, "{look}: {at}");
+            assert!(at["heading"].as_f64().unwrap() < 6.0, "{look}: {at}");
+            // Same position as before the archived list (measured on v0.1.64 with the same window).
+            let input = if width >= 768 { 152.0 } else { 144.0 };
+            assert!(
+                (at["input"].as_f64().unwrap() - input).abs() < 0.5,
+                "{look}: {at}"
+            );
+            no_overflow(&page, &look).await;
+            open_plate_menu(&page).await;
+            no_overflow(&page, &format!("{look} menu")).await;
+            let mut archived = menu_routes("", false);
+            archived["/api/plates?q=&archived=true"] = archived["/api/plates"].clone();
+            lay(&page, &archived).await;
+            page.open(&server.url("/plates?archived=1")).await;
+            page.until(
+                &look,
+                "return document.querySelectorAll('.plate-row').length === 2;",
+                Value::Null,
+            )
+            .await;
+            no_overflow(&page, &format!("{look} archived")).await;
+        }
+    }
+}
+
+async fn lists_with_bigger_text(page: Arc<Page>, server: Arc<Server>) {
+    let mut routes = menu_routes("", false);
+    routes["/api/plates?q=&archived=true"] = routes["/api/plates"].clone();
+    lay(&page, &routes).await;
+    page.look("light", 320, 800).await;
+    for path in ["/plates", "/plates?archived=1"] {
+        page.open(&server.url(path)).await;
+        page.until(
+            path,
+            "return document.querySelectorAll('.plate-row').length === 2;",
+            Value::Null,
+        )
+        .await;
+        let size = "return parseFloat(getComputedStyle(document.querySelector('h1')).fontSize);";
+        let before = page.js(size, Value::Null).await.as_f64().unwrap();
+        bigger_text(&page).await;
+        let after = page.js(size, Value::Null).await.as_f64().unwrap();
+        assert!(
+            (after - before * 2.0).abs() < 0.01,
+            "{path}: the heading went from {before} to {after}"
+        );
+        no_overflow(&page, path).await;
+        open_plate_menu(&page).await;
+        no_overflow(&page, &format!("{path} menu")).await;
+        // The dialog scrolls, so its last actions stay reachable.
+        let names: &[&str] = if path == "/plates" {
+            &["アーカイブ", "削除"]
+        } else {
+            &["復元", "削除"]
+        };
+        for name in names {
+            in_sight(
+                &page,
+                &format!("{path}: {name}"),
+                &button("[role=dialog]", name),
+            )
+            .await;
+        }
+    }
+}
+
 // ---- the history ----
 
 fn history_routes() -> Value {
@@ -1590,6 +1691,9 @@ async fn hover_gives_up(page: &Page, normal: &Value) {
         json!(names[1])
     );
     let (x, y) = middle(page, &triangle).await;
+    // count the reads of the triangle from here on
+    page.js("sessionStorage.removeItem('test:sent');", Value::Null)
+        .await;
     page.mouse("hovered", x, y).await;
     let asked = |n: usize| {
         format!(
