@@ -624,3 +624,112 @@ it("queue starts and continues with one action, replays a lost start and refuses
   await fireEvent.click($(".current-job summary")!);
   expect(screen.getAllByText(reason)).toHaveLength(1);
 });
+
+it("Cool Plate failure links to the matching common setting, returns to the job and recovers without print", async () => {
+  const { q, api } = queueFixture();
+  const job = q.waiting[1];
+  const machine = encodeURIComponent(job.required_machine_profile_key);
+  const setting = {
+    id: "setting",
+    machine_profile_key: job.required_machine_profile_key,
+    base_profile_key: "Generic PETG-GF",
+    overrides_json: {
+      nozzle_temperature_initial_layer: 260,
+      nozzle_temperature: 260,
+      bed_temperature_initial_layer: 0,
+      bed_temperature: 0,
+    },
+  };
+  const product = {
+    id: "product",
+    name: "PETG-GF 黒",
+    vendor: "Fixture",
+    material: "PETG-GF",
+    bambu_filament_id: null,
+    settings: [setting],
+    colors: [],
+  };
+  api.route(({ method, path }) => {
+    if (path === "/api/filament-products/petg")
+      return { status: 404, json: { error: "not found" } };
+    if (path === "/api/filaments/petg")
+      return { json: { product_id: "product", settings: [setting] } };
+    if (path === "/api/filament-products/product") return { json: product };
+    if (path === "/api/printers/profiles")
+      return { json: [{ key: job.required_machine_profile_key, name: "P1S" }] };
+    if (path === "/api/filament-products/product/profiles")
+      return {
+        json: [
+          {
+            key: "Generic PETG-GF",
+            name: "Generic PETG-GF",
+            resolved: {
+              nozzle_temperature_initial_layer: 260,
+              nozzle_temperature: 260,
+              bed_temperature_initial_layer: 0,
+              bed_temperature: 0,
+            },
+          },
+        ],
+      };
+    if (
+      path === "/api/filament-products/product/settings/setting" &&
+      method === "PUT"
+    )
+      return { status: 204 };
+  });
+  visit("/");
+  const row = await waitFor(() => {
+    const found = $(`#job-${job.id}`) as HTMLDetailsElement;
+    expect(found).toBeTruthy();
+    return found;
+  });
+  await fireEvent.click(row.querySelector("summary")!);
+  expect(within(row).getByRole("alert").textContent).toContain(
+    "PETG-GF 黒のCool Plate温度が未設定または0℃",
+  );
+  const link = within(row).getByRole("link", { name: "温度を設定" });
+  expect(link.getAttribute("href")).toBe(
+    `/filaments/petg?machine=${machine}&return_queue=p1&return_job=${job.id}`,
+  );
+  // The material page opens the common setting of the job's machine at its bed temperature.
+  visit(link.getAttribute("href")!);
+  await waitFor(() => expect(went).toHaveLength(1));
+  expect(went[0]).toMatch(
+    /^\/filaments\/product\/settings\/setting\?.*return_job=.*#bed-temperature$/,
+  );
+  visit(went[0]);
+  const first =
+    await screen.findByLabelText<HTMLInputElement>("ベッド初層（℃）");
+  await waitFor(() => expect(first.value).toBe("0"));
+  await fireEvent.input(first, { target: { value: "65" } });
+  await fireEvent.input(screen.getByLabelText("ベッド通常層（℃）"), {
+    target: { value: "65" },
+  });
+  await click("保存");
+  await waitFor(() => expect(went).toHaveLength(2));
+  expect(went[1]).toBe(`/?printer_id=p1#job-${job.id}`);
+  expect(
+    api.to("PUT", "/api/filament-products/product/settings/setting")[0].body
+      .overrides_json,
+  ).toMatchObject({ bed_temperature_initial_layer: 65, bed_temperature: 65 });
+  // Back on the queue the job is open and estimated; a deleted plate does not stop it.
+  Object.assign(job, {
+    estimate: { state: "ready", seconds: 1140, error: null },
+    plate_deleted: true,
+  });
+  visit(went[1]);
+  const again = await waitFor(() => {
+    const found = $(`#job-${job.id}`) as HTMLDetailsElement;
+    expect(found?.open).toBe(true);
+    return found;
+  });
+  expect(again.querySelector("summary")!.textContent).toContain("約19分");
+  expect(within(again).queryByRole("alert")).toBeNull();
+  expect(again.textContent).toContain(
+    "一覧から削除済み · このジョブは継続できます",
+  );
+  expect(
+    within(again).queryByRole("link", { name: "プレートの条件を編集" }),
+  ).toBeNull();
+});

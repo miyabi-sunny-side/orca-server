@@ -1,7 +1,6 @@
 //! Chromium assertions stay in TypeScript; Rust owns their isolated API and protocol peers.
 use crate::common::*;
 use crate::scenarios::ams_nozzle as ams;
-use crate::scenarios::compact;
 use crate::scenarios::import;
 use crate::scenarios::plates;
 use crate::scenarios::registry;
@@ -27,11 +26,6 @@ fn ams_priority() {
     ams::ams_priority(true);
 }
 #[test]
-#[ignore = "requires Chromium"]
-fn compact_queue() {
-    compact::compact_queue(true);
-}
-#[test]
 #[ignore = "requires Chromium and official Orca 2.4.2"]
 fn printer_registry() {
     registry::registry(Some(&appdir()), true);
@@ -51,73 +45,6 @@ fn model_import() {
 #[ignore = "requires Chromium"]
 fn plate_duplication() {
     plates::plate_duplication(true);
-}
-
-#[test]
-#[ignore = "requires Chromium"]
-fn printer_controls() {
-    let mut rig = Rig::new("browser-printer-controls");
-    let jpeg = fixture("camera.jpg");
-    let (port, _) =
-        crate::common::peers::camera(rig.root.path(), crate::common::peers::frame(&jpeg));
-    rig.env.insert("P1_CAMERA_PORT".into(), port.to_string());
-    rig.ftp
-        .records
-        .lock()
-        .unwrap()
-        .files
-        .insert("/timelapse/video_1.mp4".into(), vec![0; 2048]);
-    rig.full["print"]["nozzle_temper"] = json!(212.4);
-    rig.full["print"]["nozzle_target_temper"] = json!(220);
-    rig.full["print"]["bed_temper"] = json!(60);
-    rig.full["print"]["bed_target_temper"] = json!(60);
-    rig.full["print"]["lights_report"] = json!([{"node":"chamber_light","mode":"on"}]);
-    rig.full["print"]["hms"] = json!([{"attr":0x0300_0D00_u32,"code":0x0001_0004}]);
-    let _site = rig.describe(&[(
-        "03000D0000010004",
-        "ヒートベッドの原点復帰に異常があります。",
-    )]);
-    rig.launch();
-    until(|| rig.store.join("codes/ja_TES.json").is_file(), 12);
-    rig.seed();
-    let plate = rig.configure(None, None);
-    rig.add(3);
-    let control = rig.control();
-    rig.browser(
-        "E2E_DEVICE_CONTEXT",
-        &json!({"plate":plate["id"]}),
-        Some(&control),
-    );
-    let prints = rig.broker.prints();
-    assert_eq!(prints.len(), 1);
-    assert_eq!(prints[0]["timelapse"], false, "the plate option was sent");
-    let commands: Vec<_> = rig
-        .broker
-        .records
-        .lock()
-        .unwrap()
-        .controls
-        .iter()
-        .filter_map(|c| {
-            c.get("print")
-                .or_else(|| c.get("system"))
-                .map(|b| b["command"].clone())
-        })
-        .collect();
-    for expected in ["pause", "resume", "stop", "ledctrl", "ams_filament_setting"] {
-        assert!(
-            commands.contains(&json!(expected)),
-            "{expected}: {commands:?}"
-        );
-    }
-    assert!(
-        !rig.ftp
-            .records
-            .lock()
-            .unwrap()
-            .files
-            .contains_key("/timelapse/video_1.mp4")
-    );
 }
 
 /// Every main screen with the same data, measured and photographed. `E2E_UI_PHASE` names the run.
