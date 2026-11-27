@@ -121,7 +121,7 @@ const TESTS: &[Test] = &[
         lists_with_bigger_text
     ),
     test!(
-        "the support choice and its material are 44px targets in each window",
+        "the material choices are 44px targets and their dialog fits 200% text",
         support_targets
     ),
 ];
@@ -1186,7 +1186,8 @@ async fn support_targets(page: Arc<Page>, server: Arc<Server>) {
                     &look,
                     "const s = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '').startsWith('接触面のフィラメント')); \
                      const l = [...document.querySelectorAll('label')].find((l) => l.textContent.includes('サポートを使う')); \
-                     return s && [l.getBoundingClientRect().height, s.getBoundingClientRect().height];",
+                     const m = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '').startsWith('フィラメント:')); \
+                     return s && [l, s, m].map((e) => e.getBoundingClientRect().height);",
                     Value::Null,
                 )
                 .await;
@@ -1194,6 +1195,24 @@ async fn support_targets(page: Arc<Page>, server: Arc<Server>) {
                 assert!(height.as_f64().unwrap() >= 44.0, "{look}: {heights}");
             }
             no_overflow(&page, &look).await;
+            // The material dialog keeps its search usable and inside itself at 200% text.
+            bigger_text(&page).await;
+            page.js(
+                "[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? '').startsWith('フィラメント:')).click();",
+                Value::Null,
+            )
+            .await;
+            let dialog = page
+                .until(
+                    &format!("{look}: the material dialog"),
+                    "const d = document.querySelector('[role=dialog]'); const s = d?.querySelector('input[type=search]'); \
+                     return s && [d.scrollWidth <= d.clientWidth, s.getBoundingClientRect().width];",
+                    Value::Null,
+                )
+                .await;
+            assert_eq!(dialog[0], true, "{look}: the dialog overflows");
+            assert!(dialog[1].as_f64().unwrap() > 200.0, "{look}: {dialog}");
+            no_overflow(&page, &format!("{look} dialog")).await;
         }
     }
 }
