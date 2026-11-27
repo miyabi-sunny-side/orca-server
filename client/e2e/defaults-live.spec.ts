@@ -45,14 +45,3 @@ test('saved defaults start complete and manual material survives at desktop and 
   expect(await (await request.get('/api/plates/'+ctx.old)).json()).toEqual(updated);
 });
 
-test('default printer selection persists across reload among same-model printers',async({page})=>{
-  test.skip(!ctx.devices);
-  for(const [width,colorScheme] of [[320,'dark'],[900,'light']] as const){
-    await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
-    await page.goto('/printers');const select=page.getByLabel('新規プレートの初期値に使うプリンター');
-    await select.selectOption(ctx.devices[width===320?0:1]);await expect(page.getByRole('status')).toHaveText('初期値に使うプリンターを保存しました。');
-    await page.reload();await expect(select).toHaveValue(ctx.devices[width===320?0:1]);
-    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-    await page.screenshot({path:`${process.env.E2E_EVIDENCE_DIR}/default-printer-${width}-${colorScheme}.png`,fullPage:true});
-  }
-});

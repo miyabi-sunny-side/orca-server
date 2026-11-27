@@ -529,3 +529,98 @@ it("stopped jobs recover through editing, retry, removal and next", async () => 
     expected_job: q.waiting[0].id,
   });
 });
+
+it("queue starts and continues with one action, replays a lost start and refuses a stale one", async () => {
+  const { q, commands, api } = queueFixture();
+  let lose = false,
+    stale = false;
+  api.route(({ method, path, body }) => {
+    if (path !== "/api/queue" || method !== "POST") return;
+    if (stale) {
+      commands.push(body);
+      return { status: 409, json: { error: "Queue changed" } };
+    }
+    if (lose) {
+      lose = false;
+      commands.push(body);
+      return { abort: true };
+    }
+  });
+  Object.assign(q.current, { state: "awaiting_removal" });
+  Object.assign(q.printer.print, { state: "FINISH", error: 0 });
+  q.allowed.next = true;
+  visit("/queue?printer_id=p1");
+  const current = await waitFor(() => screen.getByLabelText("現在の印刷"));
+  expect(current.textContent).toContain("取り外し待ち");
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  const next = () =>
+    screen.getByRole<HTMLButtonElement>("button", { name: "次を印刷" });
+  await waitFor(() => expect(next().disabled).toBe(false));
+  // A job the AMS cannot feed holds the start.
+  q.allowed.next = false;
+  q.waiting[0].hold_reason =
+    "No confirmed AMS slot contains the plate material";
+  reload();
+  await waitFor(() => expect(next().disabled).toBe(true));
+  expect($$(".waiting-job summary")[0].textContent).toContain("保留");
+  q.allowed.next = true;
+  q.waiting[0].hold_reason = null;
+  reload();
+  await waitFor(() => expect(next().disabled).toBe(false));
+  // A start whose answer is lost is sent again as the same request.
+  lose = true;
+  next().click();
+  next().click();
+  await click("結果を再確認");
+  await waitFor(() => expect(commands).toHaveLength(2));
+  expect(commands[1]).toEqual(commands[0]);
+  expect(commands[0].action).toEqual({
+    type: "next",
+    expected_job: q.waiting[0].id,
+    removed_job: q.current.id,
+    cleared: true,
+  });
+  // A start the server refuses as stale asks for a reload and starts nothing.
+  stale = true;
+  reload();
+  await click("次を印刷");
+  const staleAlert = () =>
+    screen
+      .queryAllByRole("alert")
+      .some((a) => a.textContent?.includes("状態が変わりました"));
+  await waitFor(() => expect(staleAlert()).toBe(true));
+  stale = false;
+  const sentBefore = commands.length;
+  await click("読み直す");
+  await waitFor(() => expect(next().disabled).toBe(false));
+  expect(commands).toHaveLength(sentBefore);
+  // With nothing waiting, the finished print is cleared with one action.
+  q.waiting = [];
+  q.allowed.discard = true;
+  reload();
+  await click("取り外した");
+  await waitFor(() =>
+    expect(commands.at(-1).action).toEqual({
+      type: "discard",
+      expected_job: q.current.id,
+      cleared: true,
+    }),
+  );
+  // A transfer failure says why next to the retry, once.
+  Object.assign(q.current, {
+    state: "needs_attention",
+    last_error: "FTPS transfer failed or timed out; no start command was sent",
+    failure: null,
+  });
+  Object.assign(q, {
+    allowed: { next: false, retry: true, discard: true },
+    recovery: { retry_reason: null, discard_reason: null },
+  });
+  reload();
+  const reason =
+    "印刷データを転送できませんでした。印刷開始の命令は送っていません。";
+  expect(await screen.findAllByText(reason)).toHaveLength(1);
+  expect($(".current-job")).toHaveProperty("open", false);
+  await fireEvent.click($(".current-job summary")!);
+  expect(screen.getAllByText(reason)).toHaveLength(1);
+});
