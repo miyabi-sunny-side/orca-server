@@ -19,7 +19,7 @@ fn ready(rig: &Rig) {
     );
 }
 #[allow(clippy::too_many_lines)]
-pub fn compact_queue(browser: bool) {
+pub fn compact_queue() {
     let mut rig = Rig::new("compact-queue");
     rig.full["print"]["ams"]["ams"][0]["tray"][0]["tray_type"] = json!("PETG");
     rig.launch();
@@ -113,19 +113,10 @@ pub fn compact_queue(browser: bool) {
         admission["reason"], reason,
         "admission reports the missing bed temperature"
     );
-    if browser {
-        let control = rig.control();
-        rig.browser(
-            "E2E_COMPACT_CONTEXT",
-            &json!({"plate":plate["id"],"material":material["id"],"job":one["id"]}),
-            Some(&control),
-        );
-    } else {
-        data["overrides_json"]["bed_temperature_initial_layer"] = json!(65);
-        data["overrides_json"]["bed_temperature"] = json!(65);
-        rig.put(&format!("{settings_path}/{}", id(&setting)), &data, 200);
-        rig.request("DELETE", &format!("/api/plates/{}", id(&plate)), None, 204);
-    }
+    data["overrides_json"]["bed_temperature_initial_layer"] = json!(65);
+    data["overrides_json"]["bed_temperature"] = json!(65);
+    rig.put(&format!("{settings_path}/{}", id(&setting)), &data, 200);
+    rig.request("DELETE", &format!("/api/plates/{}", id(&plate)), None, 204);
     ready(&rig);
     assert_eq!(
         rig.get(&format!("/api/filaments/{}", id(&material)))["settings"][0]["overrides_json"],

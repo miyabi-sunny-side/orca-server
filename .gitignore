@@ -7,6 +7,3 @@
 !.env.example
 *.log
 .DS_Store
-
-/client/test-results/
-/client/playwright-report/

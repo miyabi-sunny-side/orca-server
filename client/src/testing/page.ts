@@ -62,7 +62,7 @@ export function reset() {
   localStorage.clear();
 }
 
-/** Waits until the button is there and enabled, as Playwright's click does, and presses it. */
+/** Waits until the button is there and enabled, as a person would, and presses it. */
 export async function click(
   name: string | RegExp,
   within: HTMLElement = document.body,

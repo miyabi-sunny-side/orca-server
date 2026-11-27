@@ -109,7 +109,7 @@ pub fn model_fixture(painted: bool, multiple: bool) -> Vec<u8> {
         .into_inner()
 }
 #[allow(clippy::too_many_lines)]
-pub fn model_import(appdir: Option<&Path>, browser: bool) {
+pub fn model_import(appdir: Option<&Path>) {
     let mut rig = Rig::with_options("model-import", "v3", appdir);
     rig.launch();
     rig.seed();
@@ -326,13 +326,6 @@ pub fn model_import(appdir: Option<&Path>, browser: bool) {
         );
         fs::write(rig.output.join("resliced-preview.stl"), roundtrip)
             .expect("output directory is writable");
-    }
-    if browser {
-        rig.browser(
-            "E2E_IMPORT_CONTEXT",
-            &serde_json::json!({"fixtures":fixtures}),
-            None,
-        );
     }
     assert!(
         rig.broker.prints().is_empty() && rig.ftp.uploads().is_empty(),

@@ -132,6 +132,10 @@ const TESTS: &[Test] = &[
         "files chosen to import are drawn from their own bytes and fit the window",
         import_preview
     ),
+    test!(
+        "every main screen with the same data still fits the width at 200% text",
+        screens_fit
+    ),
 ];
 
 /// What every document of the page runs first: the stand-in for the API of the server.
@@ -227,7 +231,7 @@ async fn bigger_text(page: &Page) {
 }
 
 /// Finds the element `find` (a script that returns it) after scrolling it into view, and
-/// waits until some of it is inside the window (as Playwright's `toBeInViewport`).
+/// waits until some of it is inside the window.
 async fn in_sight(page: &Page, what: &str, find: &str) {
     page.until(
         &format!("{what} is in sight"),
@@ -1302,6 +1306,60 @@ async fn import_preview(page: Arc<Page>, server: Arc<Server>) {
         sent_to(&page, "GET", "/api/scad").await.is_empty(),
         "importing asked SCAD"
     );
+}
+
+/// What each main screen reads, the same data as the jsdom audit (client/src/testing/screens.json).
+const SCREENS: &str = include_str!("../client/src/testing/screens.json");
+
+async fn screens_fit(page: Arc<Page>, server: Arc<Server>) {
+    let answers: serde_json::Map<String, Value> = serde_json::from_str(SCREENS).unwrap();
+    let routes: serde_json::Map<String, Value> = answers
+        .into_iter()
+        .map(|(path, answer)| (path, json!({"json": answer})))
+        .collect();
+    let routes = Value::Object(routes);
+    let plate = "/plates/11111111-1111-4111-8111-111111111111";
+    let edit = format!("{plate}?edit=1");
+    let screens = [
+        ("/", ".current-job"),
+        ("/plates", ".plate-row"),
+        (plate, "h1"),
+        (edit.as_str(), "form"),
+        ("/plates/new", "input[type=checkbox]"),
+        ("/printers", "select"),
+        ("/printers/p1", "form"),
+        ("/printers/p1/ams", ".ams-slot"),
+        ("/printers/p1/control", "details"),
+        ("/filaments", "a[href='/filaments/product']"),
+        ("/filaments/product", "h1"),
+        ("/history", ".history-row"),
+        ("/about", "h1"),
+    ];
+    for (width, height, theme) in [(1280, 900, "light"), (375, 812, "dark")] {
+        page.look(theme, width, height).await;
+        for (path, ready) in screens {
+            let look = format!("{path} {width} {theme}");
+            lay(&page, &routes).await;
+            page.open(&server.url(path)).await;
+            shows(&page, &format!("main {ready}")).await;
+            page.js(
+                "const style = document.createElement('style'); \
+                 style.textContent = 'html { font-size: 200% !important; }'; document.head.append(style);",
+                Value::Null,
+            )
+            .await;
+            let widths = page
+                .js(
+                    "return [document.documentElement.scrollWidth, innerWidth];",
+                    Value::Null,
+                )
+                .await;
+            assert!(
+                widths[0].as_f64().unwrap() <= widths[1].as_f64().unwrap() + 1.0,
+                "{look}: 200% text overflows: {widths}"
+            );
+        }
+    }
 }
 
 // ---- the history ----

@@ -38,5 +38,5 @@ fn support() {
 #[test]
 #[ignore = "requires official Orca 2.4.2"]
 fn imported_geometry() {
-    import_scenario::model_import(Some(&appdir()), false);
+    import_scenario::model_import(Some(&appdir()));
 }

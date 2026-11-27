@@ -837,43 +837,6 @@ impl Rig {
         assert_eq!(response.status(), 201, "plate upload {name} is created");
         response.json().expect("plate upload response is JSON")
     }
-    pub fn browser(&self, context_name: &str, context: &Value, control: Option<&HttpPeer>) {
-        self.browser_env(context_name, context, control, &[]);
-    }
-    pub fn browser_env(
-        &self,
-        context_name: &str,
-        context: &Value,
-        control: Option<&HttpPeer>,
-        extra: &[(&str, String)],
-    ) {
-        // Each scenario keeps its own Playwright artifacts, so scenarios can run side by side.
-        let mut command = Command::new("npm");
-        command
-            .args(["run", "test:e2e", "--", "--workers=1"])
-            .arg(format!(
-                "--output={}",
-                self.output.join("playwright").display()
-            ))
-            .current_dir(repo().join("client"));
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("E2E_") {
-                command.env_remove(key);
-            }
-        }
-        command
-            .env("E2E_BASE_URL", &self.base)
-            .env(context_name, context.to_string())
-            .env("E2E_EVIDENCE_DIR", &self.output);
-        if let Some(control) = control {
-            command.env("E2E_PRINTER_CONTROL", &control.base);
-        }
-        command.envs(extra.iter().map(|(k, v)| (k, v)));
-        assert!(
-            command.status().expect("npm runs").success(),
-            "Chromium scenario failed: {context_name}"
-        );
-    }
 }
 impl Rig {
     pub fn edit_conditions(&mut self, changes: &Value) -> Value {

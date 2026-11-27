@@ -18,7 +18,6 @@ mod a1_fleet;
 mod ams_nozzle;
 mod ams_refresh;
 mod artifact_transform;
-mod browser;
 mod camera;
 mod cleanup;
 mod codes;

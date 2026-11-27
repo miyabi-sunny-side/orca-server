@@ -1,11 +1,11 @@
 use crate::scenarios::strength_support as settings;
 #[test]
 fn strength_settings() {
-    settings::strength_settings(false);
+    settings::strength_settings();
 }
 #[test]
 fn support_interface() {
-    settings::support_interface(false);
+    settings::support_interface();
 }
 #[test]
 fn legacy_support() {

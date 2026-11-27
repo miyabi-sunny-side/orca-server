@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local validation in two sizes.
-#   quick  the pre-commit set: format, lint, unit, integration and mocked-API browser tests.
-#   full   everything (the default): quick plus Chromium against the real API, official
-#          OrcaSlicer, the container image and its tests. Run it on the commit to release.
+#   quick  the pre-commit set: format, lint, unit, integration, the page in jsdom and the page
+#          in the browser (tests/page.rs, chrome-headless-shell that bin/browser fetches).
+#   full   everything (the default): quick plus official OrcaSlicer, the container image and
+#          its tests. Run it on the commit to release.
 # Independent stages run side by side; each writes its own log and the summary shows its time.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -15,17 +16,16 @@ case "$mode" in
     ;;
 esac
 
-tools=(cargo npm npx curl)
+tools=(cargo npm curl python3)
 if [[ $mode == full ]]; then
   : "${ORCA_APPDIR:?Set ORCA_APPDIR to the extracted official OrcaSlicer 2.4.2 AppDir}"
   test -x "$ORCA_APPDIR/AppRun"
   ORCA_APPDIR=$(cd "$ORCA_APPDIR" && pwd)
   export ORCA_APPDIR
-  tools+=(docker openssl python3 sha256sum)
+  tools+=(docker openssl sha256sum)
 fi
 for tool in "${tools[@]}"; do command -v "$tool" >/dev/null; done
 if [[ $mode == full ]]; then docker info >/dev/null; fi
-for name in ${!E2E_@}; do unset "$name"; done
 export ORCA_TEST_OUTPUT=${ORCA_TEST_OUTPUT:-$(mktemp -d /tmp/orca-local-check.XXXXXX)}
 mkdir -p "$ORCA_TEST_OUTPUT"
 ORCA_TEST_OUTPUT=$(cd "$ORCA_TEST_OUTPUT" && pwd)
@@ -100,9 +100,7 @@ client_checks() {
   npm --prefix client run format:check &&
     npm --prefix client run check &&
     npm --prefix client run lint:design &&
-    npm --prefix client test &&
-    (cd client && npx playwright install chromium) &&
-    npm --prefix client run test:e2e -- --workers=4
+    npm --prefix client test
 }
 rust_checks() {
   cargo fmt --all -- --check &&
@@ -110,6 +108,8 @@ rust_checks() {
     cargo test --locked --no-run
 }
 unit() { cargo test --locked --lib; }
+# bin/browser, which fetches the browser of the page tests.
+scripts() { python3 -B bin/test_browser.py; }
 # These tests mostly wait for processes and sockets, so more of them run than there are cores.
 integration() { cargo test --locked --test it -- --test-threads=16; }
 # The notification scenario starts the library's own test binary as its service.
@@ -122,9 +122,8 @@ official() {
   cargo test --locked --test it -- --ignored --nocapture \
     official_cli:: material_roles:: registry_flows::independent_printers
 }
-browsers() {
-  cargo test --locked --test it browser:: -- --ignored --test-threads=4 --nocapture
-}
+# One browser, the tests one after another (tests/page.rs).
+browser() { cargo test --locked --test page; }
 container_image() { docker build -t "$image" .; }
 container() {
   ORCA_TEST_IMAGE="$image" cargo test --locked --test it container:: -- --ignored --test-threads=1
@@ -138,16 +137,17 @@ step rust rust_checks
 # The image build takes every core; the timing-sensitive tests wait until it is done.
 if [[ $mode == full ]]; then join; fi
 stage unit unit
+stage scripts scripts
 stage integration integration
 stage notify notifications
 stage embedded embedded_page
 join
+# The page tests wait on the browser's own timing, so they run once the other stages are done.
+step browser browser
 if [[ $mode == full ]]; then
   stage official official
   stage container container
   join
-  # Chromium fails to capture screenshots when the slicer runs take the machine as well.
-  step browsers browsers
 fi
 printf 'Local verification passed (%s, %ss). Evidence: %s\n' \
   "$mode" "$((SECONDS - started))" "$ORCA_TEST_OUTPUT"

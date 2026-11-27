@@ -1,4 +1,4 @@
-use crate::common::peers::{Action, Peer, SECRET};
+use crate::common::peers::{Peer, SECRET};
 use crate::common::*;
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, thread, time::Duration};
@@ -46,7 +46,7 @@ fn slot(rig: &Rig, pid: &str, index: u64) -> Value {
         .clone()
 }
 #[allow(clippy::too_many_lines)]
-pub fn registry(appdir: Option<&Path>, browser: bool) {
+pub fn registry(appdir: Option<&Path>) {
     let mut rig = Rig::with_options("registry", "v1", appdir);
     rig.env
         .retain(|key, _| !key.starts_with("P1_") && key != "SCAD_LIVE_URL");
@@ -100,9 +100,6 @@ pub fn registry(appdir: Option<&Path>, browser: bool) {
         "A1 processes exclude the P1 default process"
     );
     rig.request("GET", "/api/slicer/profiles?machine=unknown", None, 400);
-    if browser {
-        rig.browser_env("E2E_REGISTRY_SETTINGS",&json!({"name":"UI second","host":"127.0.0.1","serial":"UISECOND","access_code":SECRET,"tls_certificate":pem,"machine_profile_key":MACHINE,"default_process_profile_key":p1_profiles["defaults"]["process"],"bed_type":p1_profiles["defaults"]["bed"],"nozzle_material":"unknown"}),None,&[("E2E_REGISTRY_CERT",rig.root.path().join("trusted.pem").display().to_string())]);
-    }
     let mut settings = Vec::new();
     let mut ids = Vec::new();
     for (i, profiles) in [&p1_profiles, &a1_profiles].iter().enumerate() {
@@ -307,7 +304,7 @@ fn delta(tray: Value) -> Value {
     report
 }
 #[allow(clippy::too_many_lines)]
-pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
+pub fn filament_ams(appdir: Option<&Path>) {
     let mut rig = Rig::with_options("filament-ams", "v1", appdir);
     rig.env
         .retain(|k, _| !k.starts_with("P1_") && k != "SCAD_LIVE_URL");
@@ -503,33 +500,6 @@ pub fn filament_ams(appdir: Option<&Path>, browser: bool) {
         "other printer slot stays unmapped"
     );
     rig.request("DELETE", &format!("/api/filaments/{}", id(gf)), None, 409);
-    if browser {
-        let actions = peers[0].actions.clone();
-        let full = full.clone();
-        let control = HttpPeer::new(move |_, _, body| {
-            let value: Value = serde_json::from_slice(body).expect("control request body is JSON");
-            if value["disconnect"] == true {
-                actions
-                    .send(Action::Disconnect)
-                    .expect("fixture peer accepts the disconnect");
-            } else {
-                let value = if value["full"] == true {
-                    full.clone()
-                } else {
-                    delta(value)
-                };
-                actions
-                    .send(Action::Report(
-                        serde_json::to_vec(&value).expect("report serializes to JSON"),
-                        false,
-                        "device/MATERIAL0/report".into(),
-                    ))
-                    .expect("fixture peer accepts the report");
-            }
-            (204, vec![])
-        });
-        rig.browser("E2E_FILAMENT_CONTEXT",&json!({"printer":ids[0],"gf":gf["id"],"black":black["id"],"white":white["id"],"petg":petg["id"],"machine":machine,"control":control.base}),None);
-    }
     peers[0].send(&delta(json!({"id":"0","tray_color":"000000FF"})));
     until(
         || {

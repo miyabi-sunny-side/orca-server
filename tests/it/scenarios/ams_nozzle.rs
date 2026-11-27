@@ -1,9 +1,8 @@
-use crate::common::peers::Action;
 use crate::common::*;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 #[allow(clippy::too_many_lines)]
-pub fn ams_priority(browser: bool) {
+pub fn ams_priority() {
     let mut rig = Rig::new("ams-priority");
     rig.broker.allow_options.store(true, Ordering::SeqCst);
     rig.launch();
@@ -115,25 +114,6 @@ pub fn ams_priority(browser: bool) {
         1,
         "unsupported auto-refill sends no print option"
     );
-    if browser {
-        let actions = rig.broker.actions.clone();
-        let control = HttpPeer::new(move |_, _, body| {
-            let value: Value = serde_json::from_slice(body).expect("control request body is JSON");
-            actions
-                .send(Action::Report(
-                    serde_json::to_vec(&value).expect("JSON value serializes"),
-                    false,
-                    format!("device/{}/report", crate::common::peers::SERIAL),
-                ))
-                .expect("broker action channel is open");
-            (204, vec![])
-        });
-        rig.browser(
-            "E2E_AMS_CONTEXT",
-            &json!({"resolve":resolve_path,"control":control.base}),
-            None,
-        );
-    }
     let preferred = resolve()["preferred_slot"].clone();
     rig.full = report;
     let job = rig.add(0);

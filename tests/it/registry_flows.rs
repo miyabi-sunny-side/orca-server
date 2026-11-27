@@ -4,9 +4,9 @@ use crate::scenarios::registry as scenario;
 fn independent_printers() {
     let appdir =
         std::path::PathBuf::from(std::env::var_os("ORCA_APPDIR").expect("ORCA_APPDIR required"));
-    scenario::registry(Some(&appdir), false);
+    scenario::registry(Some(&appdir));
 }
 #[test]
 fn filament_ams() {
-    scenario::filament_ams(None, false);
+    scenario::filament_ams(None);
 }

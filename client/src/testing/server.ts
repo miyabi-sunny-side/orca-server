@@ -15,8 +15,8 @@ export type Route = (
 ) => Reply | undefined | Promise<Reply | undefined>;
 
 /**
- * The server, faked in place of `fetch`. The newest route answers first, like
- * Playwright's `page.route`; a request no route answers gets an empty list.
+ * The server, faked in place of `fetch`. The newest route answers first and may
+ * leave a request to the older ones; a request no route answers gets an empty list.
  */
 export function server(...routes: Route[]) {
   const sent: Sent[] = [];

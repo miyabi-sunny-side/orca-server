@@ -49,8 +49,8 @@ formatter・型検査・lint・テスト・ビルドは開発環境で実行し�
 | 段 | コマンド | 所要 | 使う場面 |
 | --- | --- | --- | --- |
 | 単体 | `cargo test --locked --lib <名前>`、`npm --prefix client test` | 数秒 | 実装中（TDD）。プロセスやネットワークを使いません。 |
-| commit前 | `bash tests/verify-local.sh quick` | 約1分15秒 | commitの前。整形・型検査・lint・単体・結合・模擬APIの画面E2E。 |
-| 全体 | `bash tests/verify-local.sh` | 約4分30秒 | リリース（tag）するcommit。commit前の全項目に、実APIのブラウザ・公式OrcaSlicer・コンテナを加えます。 |
+| commit前 | `bash tests/verify-local.sh quick` | 約2分 | commitの前。整形・型検査・lint・単体・結合・画面（jsdomとブラウザ）。 |
+| 全体 | `bash tests/verify-local.sh` | 約4分 | リリース（tag）するcommit。commit前の全項目に、公式OrcaSlicer・コンテナを加えます。 |
 
 commit前の成功を全体検証の成功と扱いません。全体検証は、必要なツールの不足や未実行を失敗にします。
 
@@ -61,20 +61,16 @@ export ORCA_APPDIR=/path/to/squashfs-root
 bash tests/verify-local.sh
 ```
 
-commit前の段にはRust、Node.js、npm、curlが必要です。全体にはDocker Engine、OpenSSL、Python 3、sha256sumと、
+commit前の段にはRust、Node.js、npm、curl、Python 3が必要です。全体にはDocker Engine、OpenSSL、sha256sumと、
 展開した[公式OrcaSlicer 2.4.2](slicing.md#orcaslicerの設定)も必要です。
-スクリプトはnpm依存とChromiumを取得します。Chromiumのシステム依存が足りなければ、次で導入します。
-
-```sh
-(cd client && npx playwright install --with-deps chromium)
-```
-
+画面のブラウザ試験は、`bin/browser`がChrome for Testingの`chrome-headless-shell`と同じ版の`chromedriver`を
+`~/.cache/chrome-for-testing/<版>/`へ一度だけ取得して使います（版とSHA-256は`bin/browser`に固定）。
 依存の取得とコンテナのビルドにはネットワークを使います。
 
 スクリプトは独立した工程を同時に実行し、工程ごとの結果と所要を表示します。
 工程のログは`ORCA_TEST_OUTPUT`（未指定なら表示された一時ディレクトリ）の`stages/`に残り、失敗した工程は末尾を表示します。
 生成物と画面画像も同じ場所へ残します。プロセス・待受・一時DB・検証用コンテナは終了時に片付けます。
-コンテナのビルドは全コアを使うため、時間に敏感な結合テストはビルドの後に始めます。実APIのブラウザ試験は公式OrcaSlicerの試験と重ねません。
+コンテナのビルドは全コアを使うため、時間に敏感な結合テストはビルドの後に始めます。画面のブラウザ試験はほかの工程が終わってから流します。
 
 プリンターや通知の接続先はループバック上の使い捨てサーバーです。実機・Discord・公式のエラー表への通信は行いません。
 コンテナ検証ではLinuxのhostネットワークと専用の一時保存先を使います。
@@ -87,8 +83,13 @@ Python 3は運用コード`packaging/release_notes.py`の外部契約をRustか�
 | --- | --- | --- |
 | Rustの単体 | `src/` の `#[cfg(test)]` | `cargo test --locked --lib` |
 | Rustの結合 | `tests/it/`（1つのテストバイナリ） | `cargo test --locked --test it` |
-| 画面の単体 | `client/src/**/*.test.ts` | `npm --prefix client test` |
-| 模擬APIの画面E2E | `client/e2e/*.spec.ts`（`*-live` 以外） | `npm --prefix client run test:e2e` |
+| 画面（jsdom） | `client/src/**/*.test.ts`（画面全体は `client/src/pages/page.*.test.ts`） | `npm --prefix client test` |
+| 画面（ブラウザ） | `tests/page.rs`（`tests/support/`） | `cargo test --locked --test page` |
+
+画面の試験は、配置・大きさ・実際の色・WebGLの描画・本物の指やマウスの入力を測らないものをjsdomに置き、
+APIの応答は試験の中の偽物（`client/src/testing/`）で返します。ブラウザの試験は実際のバイナリが画面を配り、
+APIの応答は`tests/support/page.js`が試験の表で返します。ブラウザは1つで、試験を書いた順に流れます。
+`cargo test --locked --test page -- <語>`で題に語を含む試験だけを流せます。
 
 結合テストは1件ごとに専用の一時DB・ポート・子プロセスを持ち、全件を並列に実行します。
 画面を埋め込むため、Rustのテストの前に画面をビルドします。
@@ -105,15 +106,14 @@ cargo test --locked --test it queue_lifecycle::
 
 ```sh
 cargo test --locked --test it official_cli:: -- --ignored
-ORCA_ROLE_UI=1 cargo test --locked --test it material_roles:: -- --ignored --nocapture
+cargo test --locked --test it material_roles:: -- --ignored --nocapture
 cargo test --locked --test it registry_flows::independent_printers -- --ignored
-cargo test --locked --test it browser:: -- --ignored --test-threads=4 --nocapture
 docker build -t orca-server-check .
 ORCA_TEST_IMAGE=orca-server-check cargo test --locked --test it container:: -- --ignored --test-threads=1
 cargo test --locked --lib -- --ignored --exact notifications::delivery_tests::isolated_notification_delivery
 ```
 
-公式CLIとブラウザの対象には`ORCA_APPDIR`が必要です。ブラウザの生成物は実行ごとの保存先へ分かれるので、並列に実行できます。
+公式CLIの対象には`ORCA_APPDIR`が必要です。
 通知配送の筋書きは、ライブラリのテストバイナリ自身をサービスとして子プロセスで起動します。約1分かかるため単体の段から外し、commit前の段で実行します。
 
 ### 保証する範囲
@@ -121,7 +121,6 @@ cargo test --locked --lib -- --ignored --exact notifications::delivery_tests::is
 Rustの結合テストはHTTP・MCP・SQLiteの保存と移行、同時操作、再起動、失敗後の保全を確認します。
 MQTT/FTPSではv1/v3証明書、TLSセッション再利用、転送内容、AMS指定と重複命令を観測します。
 通知は完了・失敗時の送信、重複防止、429・5xx・timeout・恒久エラー・中断を隔離したHTTPS相手で確認します。
-Chromiumの操作と期待値はTypeScriptが所有し、実APIの起動・環境準備・通信制御をRustが担います。
 
 `tests/it/common/slicer.rs`は状態遷移と設定受渡し用のCLI代替で、既知の印刷データを使います。
 同梱の`tests/fixtures/p1_print.gcode.3mf`は、OrcaSlicer 2.4.2で20mm立方体2個を生成した通信検証用ファイルです。

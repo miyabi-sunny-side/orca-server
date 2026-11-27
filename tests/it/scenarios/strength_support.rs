@@ -15,7 +15,7 @@ fn strength(value: &Value) -> Value {
     )
 }
 #[allow(clippy::too_many_lines)]
-pub fn strength_settings(browser: bool) {
+pub fn strength_settings() {
     let mut rig = Rig::new("strength-settings");
     let default = json!({"sparse_infill_pattern":"adaptivecubic","sparse_infill_density":15.0,"wall_loops":2});
     let path = rig
@@ -320,13 +320,6 @@ pub fn strength_settings(browser: bool) {
         "migration uploads nothing extra"
     );
     rig.send(json!({"type":"remove","job_id":queued["id"]}), 200);
-    if browser {
-        rig.browser(
-            "E2E_STRENGTH_CONTEXT",
-            &json!({"legacy":rig.plate["id"],"material":rig.materials[0]["id"]}),
-            None,
-        );
-    }
 }
 
 #[allow(dead_code)] // API-only target uses this scenario.
@@ -421,7 +414,7 @@ pub fn legacy_support() {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn support_interface(browser: bool) {
+pub fn support_interface() {
     let mut rig = Rig::new("support-interface");
     rig.env.insert("P1_START_TIMEOUT_SECS".into(), "3".into());
     rig.launch();
@@ -541,13 +534,6 @@ pub fn support_interface(browser: bool) {
     );
     rig.map_material(3, 1);
     rig.estimated(&job);
-    if browser {
-        rig.browser(
-            "E2E_SUPPORT_CONTEXT",
-            &json!({"white":white,"blue":blue,"gf":gf["id"]}),
-            None,
-        );
-    }
     let before = rig.traces().len();
     rig.ftp.action(Action::Wait);
     rig.next(&job, 200);

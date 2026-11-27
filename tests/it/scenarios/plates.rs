@@ -69,7 +69,7 @@ fn assign(rig: &Rig, pid: &str, index: u64, material: Value) {
     rig.put(&format!("/api/printers/{pid}/ams/{}", id(slot)), &body, 204);
 }
 
-pub fn plate_duplication(browser: bool) {
+pub fn plate_duplication() {
     let mut rig = Rig::new("plate-duplication");
     for name in [
         "gridfinity/base-front.stl",
@@ -116,13 +116,6 @@ pub fn plate_duplication(browser: bool) {
         &json!({"name":"deleted"}),
         404,
     );
-    if browser {
-        rig.browser(
-            "E2E_DUPLICATE_CONTEXT",
-            &json!({"source":source,"second_material":rig.materials[0]["id"]}),
-            None,
-        );
-    }
     assert_eq!(
         rig.get(&format!("/api/plates/{}", id(&source))),
         source,
@@ -145,7 +138,7 @@ pub fn plate_duplication(browser: bool) {
     );
 }
 
-pub fn plate_archive(browser: bool) {
+pub fn plate_archive() {
     let mut rig = Rig::new("plate-archive");
     rig.launch();
     rig.seed();
@@ -204,13 +197,6 @@ pub fn plate_archive(browser: bool) {
         "archive state survives restart"
     );
     rig.request("DELETE", &format!("{path}/archive"), None, 204);
-    if browser {
-        rig.browser(
-            "E2E_ARCHIVE_CONTEXT",
-            &json!({"plate":plate,"other":other}),
-            None,
-        );
-    }
     assert_eq!(
         rig.get(&path),
         plate,
@@ -238,7 +224,7 @@ pub fn plate_archive(browser: bool) {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn plate_admission(browser: bool) {
+pub fn plate_admission() {
     let mut rig = Rig::new("plate-admission");
     rig.launch();
     rig.seed();
@@ -372,9 +358,6 @@ pub fn plate_admission(browser: bool) {
     for (_, device) in &peers[..2] {
         assign(&rig, id(device), 3, fid.clone());
     }
-    if browser {
-        rig.browser("E2E_PLATE_CONTEXT",&json!({"devices":peers.iter().map(|(_,d)|id(d)).collect::<Vec<_>>(),"filament":fid,"machine":MACHINE,"mini":mini,"process":PROCESS,"bed":BED}),None);
-    }
     rig.stop(false);
     rig.launch();
     assert_eq!(
@@ -396,7 +379,7 @@ pub fn plate_admission(browser: bool) {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn creation_defaults(browser: bool) {
+pub fn creation_defaults() {
     let mut rig = Rig::new("creation-defaults");
     let quality = "0.16mm Fixture quality";
     let path = rig
@@ -510,9 +493,6 @@ pub fn creation_defaults(browser: bool) {
     until(|| rig.slot(3)["reported"]["present"] == true, 12);
     assign(&rig, "p1", 0, rig.materials[0]["id"].clone());
     assign(&rig, "p1", 3, rig.materials[1]["id"].clone());
-    if browser {
-        rig.browser("E2E_DEFAULTS_CONTEXT",&json!({"first":rig.materials[0]["id"],"second":rig.materials[1]["id"],"old":old["id"]}),None);
-    }
     old = save(&rig, &old, nullable(&first["conditions"]));
     // MCP's independently discovered creation_defaults_match_rest covers the same creation/clear contract.
     rig.plate = manual.clone();
@@ -571,13 +551,6 @@ pub fn creation_defaults(browser: bool) {
         "p1",
         "adding printers keeps p1 as default"
     );
-    if browser {
-        rig.browser(
-            "E2E_DEFAULTS_CONTEXT",
-            &json!({"devices":[chosen,other]}),
-            None,
-        );
-    }
     rig.put(
         "/api/default-settings",
         &json!({"default_printer_id":chosen}),
@@ -710,7 +683,7 @@ pub fn recover_default_process() {
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn filament_picker(browser: bool) {
+pub fn filament_picker() {
     let mut rig = Rig::new("filament-picker");
     rig.launch();
     rig.seed();
@@ -789,55 +762,6 @@ pub fn filament_picker(browser: bool) {
         "printer with the material admits the plate"
     );
     rig.configure(Some(rig.specification(0)), None);
-    if browser {
-        let actions = rig.broker.actions.clone();
-        let second = peers[0].0.actions.clone();
-        let third = peers[1].0.actions.clone();
-        let full = rig.full.clone();
-        let db_path = rig.store.join("orca.sqlite3");
-        // The fixture alone can change observations or seed a broken historical reference.
-        let control = HttpPeer::new(move |_, _, body| {
-            let v: Value = serde_json::from_slice(body).expect("control request body is JSON");
-            if v["missing"] == true {
-                let db = rusqlite::Connection::open(&db_path).expect("database opens");
-                db.pragma_update(None, "foreign_keys", false)
-                    .expect("foreign keys can be disabled");
-                db.execute(
-                    "UPDATE plates SET filament_id='missing-material' WHERE id=?1",
-                    [v["plate_id"]
-                        .as_str()
-                        .expect("control request has a plate_id string")],
-                )
-                .expect("plate filament update succeeds");
-            } else {
-                for (sender, serial) in [
-                    (&actions, crate::common::peers::SERIAL),
-                    (&second, "SECOND"),
-                    (&third, "MINI"),
-                ] {
-                    if v["offline"] == true {
-                        sender
-                            .send(crate::common::peers::Action::Disconnect)
-                            .expect("fixture peer accepts the disconnect");
-                    } else {
-                        let mut report = full.clone();
-                        if v["empty"] == true {
-                            report["print"]["ams"]["tray_exist_bits"] = json!("0");
-                        }
-                        sender
-                            .send(crate::common::peers::Action::Report(
-                                serde_json::to_vec(&report).expect("report serializes to JSON"),
-                                false,
-                                format!("device/{serial}/report"),
-                            ))
-                            .expect("fixture peer accepts the report");
-                    }
-                }
-            }
-            (200, b"{}".to_vec())
-        });
-        rig.browser("E2E_FILAMENT_PICKER_CONTEXT",&json!({"plate":rig.plate["id"],"white":rig.materials[0]["id"],"blue":rig.materials[1]["id"],"other":other["id"],"mini_material":mini_material["id"],"future":future["id"],"machine":MACHINE,"mini":mini,"second":peers[0].1["id"],"control":control.base}),None);
-    }
     peers[0].0.action(crate::common::peers::Action::Disconnect);
     until(
         || {
