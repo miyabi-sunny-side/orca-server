@@ -658,3 +658,84 @@ it("support selection stays optional, searchable and persistent", async () => {
       .disabled,
   ).toBe(true);
 });
+
+it("saved defaults start complete and a manual material survives", async () => {
+  const filaments = ["first", "second"].map((id) => ({
+    id,
+    name: `PLA ${id}`,
+    vendor: "Fixture",
+    material: "PLA",
+  }));
+  const api = server(({ path, url, body }) => {
+    if (path === "/api/default-settings")
+      return {
+        json: {
+          default_printer_id: "p1",
+          conditions: {
+            filament_id: "first",
+            sparse_infill_pattern: "adaptivecubic",
+            sparse_infill_density: 15,
+            wall_loops: 2,
+          },
+          infill_patterns: ["adaptivecubic", "crosshatch"],
+          reason: null,
+        },
+      };
+    if (path === "/api/printers")
+      return {
+        json: [
+          {
+            id: "p1",
+            name: "P1S",
+            machine_profile_key: "Bambu Lab P1S 0.4 nozzle",
+          },
+        ],
+      };
+    if (path === "/api/scad/model-info")
+      return { json: { roles: ["primary"] } };
+    if (path === "/api/scad/models") return { json: ["parts/cube.stl"] };
+    if (path === "/api/plate-filaments") {
+      const selected = filaments.find(
+        (f) => f.id === url.searchParams.get("selected_id"),
+      );
+      return {
+        json: {
+          filaments,
+          selected: selected ?? null,
+          selected_state: selected ? "loaded" : "unset",
+          loaded_ids: ["first", "second"],
+          printers: [
+            { id: "p1", name: "P1S", state: "current", unassigned: false },
+          ],
+        },
+      };
+    }
+    if (path === "/api/plates/import")
+      return { status: 201, json: { id, version: 1, ...body } };
+  });
+  visit("/plates/new");
+  await fireEvent.click(await screen.findByRole("checkbox"));
+  await click("構成を確認（1）");
+  await waitFor(() =>
+    expect(materialButton().textContent).toContain("PLA first"),
+  );
+  for (const name of ["要求する機種・ノズル", "工程（品質）", "ビルドプレート"])
+    expect(screen.queryByLabelText(name)).toBeNull();
+  expect(screen.queryByText(/未設定でも保存できます。/)).toBeNull();
+  await typeInto(field("プレート名"), "Defaults");
+  await typeInto(field("parts/cube.stl の個数"), "10");
+  await selectMaterial("second");
+  await click("保存");
+  await waitFor(() => expect(went).toEqual([`/plates/${id}`]));
+  const saved = api.to("POST", "/api/plates/import")[0].body;
+  expect(saved.conditions).toEqual({
+    filament_id: "second",
+    sparse_infill_pattern: "adaptivecubic",
+    sparse_infill_density: 15,
+    wall_loops: 2,
+    brim_enabled: false,
+    support_enabled: false,
+    support_interface_filament_id: null,
+  });
+  expect(saved.models[0].quantity).toBe(10);
+});

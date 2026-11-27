@@ -2,27 +2,11 @@
 use crate::common::*;
 use crate::scenarios::import;
 use crate::scenarios::plates;
-use crate::scenarios::registry;
 use serde_json::json;
 fn appdir() -> std::path::PathBuf {
     std::env::var_os("ORCA_APPDIR")
         .expect("ORCA_APPDIR required for browser official CLI scenarios")
         .into()
-}
-#[test]
-#[ignore = "requires Chromium"]
-fn creation_defaults() {
-    plates::creation_defaults(true);
-}
-#[test]
-#[ignore = "requires Chromium and official Orca 2.4.2"]
-fn printer_registry() {
-    registry::registry(Some(&appdir()), true);
-}
-#[test]
-#[ignore = "requires Chromium and official Orca 2.4.2"]
-fn filament_ams() {
-    registry::filament_ams(Some(&appdir()), true);
 }
 #[test]
 #[ignore = "requires Chromium and official Orca 2.4.2"]
