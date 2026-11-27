@@ -2,9 +2,10 @@
 // the server, so that a test can show the page in states only a printer could bring about.
 // A test lays its answers in sessionStorage under `test:api` (JSON), keyed by "METHOD /path?query",
 // "METHOD /path", "/path?query" or "/path", the first that is there; an answer is
-// `{status, json}`, `{base64}` for bytes, `{abort: true}` for a server that cannot be reached,
+// `{status, json}`, `{bytes: [...]}` for bytes, `{abort: true}` for a server that cannot be reached,
 // or `{hold: "name"}` for one that answers once the test adds the name to `test:released`.
-// Every request is written down in `test:sent`; one the page gave up on, in `test:aborted`.
+// Every request is written down in `test:sent`; one the page gave up on, in `test:aborted`;
+// an error the page did not catch, in `test:errors`.
 // A request for no key is answered with an empty list. Without `test:api` the server answers.
 {
   const fetchOfPage = window.fetch.bind(window);
@@ -17,6 +18,10 @@
   };
   const note = (key, entry) =>
     sessionStorage.setItem(key, JSON.stringify([...read(key, []), entry]));
+  addEventListener("error", (event) => note("test:errors", event.message));
+  addEventListener("unhandledrejection", (event) =>
+    note("test:errors", String(event.reason)),
+  );
   window.fetch = async (input, init = {}) => {
     const routes = read("test:api", null);
     const asked = new URL(
@@ -55,11 +60,11 @@
       });
     if (answer.abort) throw new TypeError("Failed to fetch");
     const status = answer.status ?? 200;
-    if (answer.base64 !== undefined)
-      return new Response(
-        Uint8Array.from(atob(answer.base64), (c) => c.charCodeAt(0)),
-        { status, headers: { "Content-Type": "application/octet-stream" } },
-      );
+    if (answer.bytes !== undefined)
+      return new Response(new Uint8Array(answer.bytes), {
+        status,
+        headers: { "Content-Type": "application/octet-stream" },
+      });
     return new Response(
       status === 204 || status === 202 ? null : JSON.stringify(answer.json ?? null),
       { status, headers: { "Content-Type": "application/json" } },

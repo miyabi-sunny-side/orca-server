@@ -92,6 +92,26 @@ const TESTS: &[Test] = &[
         queue_menu_widths
     ),
     test!("the plate's estimates fit a 375px window", estimates_fit),
+    test!(
+        "real WebGL distinguishes models, ignores stale reads and survives errors and remounts",
+        preview_draws
+    ),
+    test!(
+        "hover and row focus show one passive shape without changing composition or covering controls",
+        hover_preview
+    ),
+    test!(
+        "touch selection and quantity entry remain usable without a hover panel",
+        touch_without_hover
+    ),
+    test!(
+        "editing an uploaded model previews its owned bytes without a SCAD connection",
+        uploaded_preview
+    ),
+    test!(
+        "sticky search stays in sight while the model list scrolls",
+        sticky_search
+    ),
 ];
 
 /// What every document of the page runs first: the stand-in for the API of the server.
@@ -1244,6 +1264,677 @@ async fn estimates_fit(page: Arc<Page>, server: Arc<Server>) {
         .await;
         no_overflow(&page, theme).await;
     }
+}
+
+// ---- the shapes ----
+
+const CUBE: &[u8] = include_bytes!("fixtures/cube.stl");
+const TRIANGLE: &[u8] = include_bytes!("fixtures/triangle.stl");
+const NO_DEFAULTS: &str =
+    r#"{"default_printer_id":null,"conditions":{"filament_id":null},"reason":"printer"}"#;
+
+/// The cube five times as long and a quarter as high: a long, flat box.
+fn long_box() -> Vec<u8> {
+    let mut stl = CUBE.to_vec();
+    let triangles = u32::from_le_bytes(stl[80..84].try_into().unwrap()) as usize;
+    let scale = |stl: &mut Vec<u8>, at: usize, by: f32| {
+        let value = f32::from_le_bytes(stl[at..at + 4].try_into().unwrap()) * by;
+        stl[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    };
+    for i in 0..triangles {
+        for j in 0..3 {
+            let at = 84 + i * 50 + 12 + j * 12;
+            scale(&mut stl, at, 5.0);
+            scale(&mut stl, at + 8, 0.25);
+        }
+    }
+    stl
+}
+
+/// The uncaught errors of the page.
+async fn errors(page: &Page) -> Value {
+    page.js(
+        "return JSON.parse(sessionStorage.getItem('test:errors') ?? '[]');",
+        Value::Null,
+    )
+    .await
+}
+
+/// A shot of what `find` (a script that returns it) shows.
+async fn shot_of(page: &Page, find: &str) -> String {
+    let r = page
+        .js(&format!("const r = (() => {{ {find} }})().getBoundingClientRect(); return [r.x, r.y, r.width, r.height];"), Value::Null)
+        .await;
+    let n = |i: usize| r[i].as_f64().unwrap();
+    page.shot(n(0), n(1), n(2), n(3)).await
+}
+
+/// Waits until the status of `within` (a selector) says `text` in full.
+async fn says(page: &Page, within: &str, text: &str) {
+    page.until(
+        &format!("{within} says {text}"),
+        "return document.querySelector(arguments[0] + ' [role=status]')?.textContent.trim() === arguments[1];",
+        json!([within, text]),
+    )
+    .await;
+}
+
+/// Presses the button named `name` in `within` (a selector), with a click of the page.
+async fn press(page: &Page, within: &str, name: &str) {
+    let find = button(within, name);
+    page.until(
+        &format!("{name} can be pressed"),
+        &format!("const b = (() => {{ {find} }})(); return b && !b.disabled;"),
+        Value::Null,
+    )
+    .await;
+    page.js(&format!("(() => {{ {find} }})().click();"), Value::Null)
+        .await;
+}
+
+const PREVIEW: &str = "aside[aria-label=STLプレビュー]";
+
+fn preview_routes(cube: &Value) -> Value {
+    json!({
+        "/api/default-settings": {"json": serde_json::from_str::<Value>(NO_DEFAULTS).unwrap()},
+        format!("/api/plates/{PLATE}"): {"json": {"id": PLATE, "version": 1, "name": "形状を見て選ぶプレート", "models": [
+            {"id": "cube", "name": "立方体.stl", "source": "parts/cube.stl", "quantity": 10},
+            {"id": "triangle", "name": "三角形.stl", "source": null, "quantity": 1}]}},
+        format!("/api/plates/{PLATE}/models/cube"): cube,
+        format!("/api/plates/{PLATE}/models/triangle"): {"bytes": TRIANGLE},
+    })
+}
+
+/// The preview lies beside the controls on a wide window and below them on a narrow one.
+async fn preview_places(page: &Page) {
+    for theme in LOOKS {
+        for width in [320, 900] {
+            let look = format!("{width} {theme}");
+            page.look(theme, width, 900).await;
+            press(page, PREVIEW, "全体を表示").await;
+            let at = page
+                .js(
+                    &format!(
+                        "const c = document.querySelector('.controls').getBoundingClientRect(), \
+                       v = document.querySelector(\"{PREVIEW}\").getBoundingClientRect(); \
+                     return [c.right, c.bottom, v.x, v.y];"
+                    ),
+                    Value::Null,
+                )
+                .await;
+            let n = |i: usize| at[i].as_f64().unwrap();
+            if width == 900 {
+                assert!(
+                    n(2) >= n(0),
+                    "{look}: the preview is not beside the controls: {at}"
+                );
+            } else {
+                assert!(
+                    n(3) >= n(1),
+                    "{look}: the preview is not below the controls: {at}"
+                );
+            }
+            no_overflow(page, &look).await;
+        }
+    }
+}
+
+/// The preview says when the STL cannot be shown, reads it again, zooms, and is drawn again
+/// after editing and after the page is opened again.
+async fn preview_recovers(page: &Page, server: &Server) {
+    let cube = json!({"bytes": CUBE});
+    for broken in [
+        json!({"status": 404}),
+        json!({"bytes": b"not an STL"}),
+        json!({"abort": true}),
+    ] {
+        lay(page, &preview_routes(&broken)).await;
+        press(page, PREVIEW, "読み直す").await;
+        page.until(
+            &format!("{broken}: the preview says it cannot show the STL"),
+            &format!("return document.querySelector(\"{PREVIEW} [role=alert]\")?.textContent.includes('STLを表示できません');"),
+            Value::Null,
+        )
+        .await;
+        page.until(
+            "the composition can be edited",
+            &format!(
+                "const b = (() => {{ {} }})(); return b && !b.disabled;",
+                button("", "構成を編集")
+            ),
+            Value::Null,
+        )
+        .await;
+    }
+    lay(page, &preview_routes(&cube)).await;
+    press(page, PREVIEW, "読み直す").await;
+    says(page, PREVIEW, "20.0 × 20.0 × 20.0 mm").await;
+    let canvas = format!("return document.querySelector(\"{PREVIEW} canvas\");");
+    let before = shot_of(page, &canvas).await;
+    press(page, PREVIEW, "拡大").await;
+    let mut changed = false;
+    for _ in 0..100 {
+        if shot_of(page, &canvas).await != before {
+            changed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(changed, "zooming in drew the same picture");
+    press(page, "", "構成を編集").await;
+    page.mouse("hovered", 0.0, 0.0).await;
+    page.until(
+        "the canvas goes",
+        "return document.querySelectorAll('canvas').length === 0;",
+        Value::Null,
+    )
+    .await;
+    press(page, "", "編集をやめる").await;
+    says(page, PREVIEW, "20.0 × 20.0 × 20.0 mm").await;
+    assert_eq!(
+        page.js(
+            "return document.querySelectorAll('canvas').length;",
+            Value::Null
+        )
+        .await,
+        1,
+        "one canvas"
+    );
+    page.open(&server.url("/")).await;
+    assert_eq!(
+        page.js(
+            "return document.querySelectorAll('canvas').length;",
+            Value::Null
+        )
+        .await,
+        0,
+        "a canvas outside the plate"
+    );
+    page.open(&server.url(&format!("/plates/{PLATE}"))).await;
+    says(page, PREVIEW, "20.0 × 20.0 × 20.0 mm").await;
+    page.js("const style = document.createElement('style'); style.textContent = 'html {font-size:200% !important}'; document.head.append(style);", Value::Null)
+        .await;
+    no_overflow(page, "200%").await;
+    assert_eq!(errors(page).await, json!([]), "the page threw");
+}
+
+async fn preview_draws(page: Arc<Page>, server: Arc<Server>) {
+    let cube = json!({"bytes": CUBE});
+    lay(&page, &preview_routes(&cube)).await;
+    page.open(&server.url(&format!("/plates/{PLATE}"))).await;
+    says(&page, PREVIEW, "20.0 × 20.0 × 20.0 mm").await;
+    preview_places(&page).await;
+    let triangle = "[...document.querySelectorAll('button')].find((b) => b.textContent.includes('三角形.stl'))";
+    let cube_button = "[...document.querySelectorAll('button')].find((b) => b.textContent.includes('立方体.stl'))";
+    page.js(&format!("{triangle}.click();"), Value::Null).await;
+    says(&page, PREVIEW, "1.0 × 1.0 × 0.0 mm").await;
+    assert_eq!(
+        page.js(
+            &format!("return {triangle}.getAttribute('aria-pressed');"),
+            Value::Null
+        )
+        .await,
+        "true",
+        "the triangle is not pressed"
+    );
+    page.js(&format!("{cube_button}.click();"), Value::Null)
+        .await;
+    says(&page, PREVIEW, "20.0 × 20.0 × 20.0 mm").await;
+    // A read the page no longer wants is given up and its late answer does not show.
+    let mut slow = preview_routes(&cube);
+    slow[format!("/api/plates/{PLATE}/models/triangle")] =
+        json!({"hold": "slow", "bytes": TRIANGLE});
+    lay(&page, &slow).await;
+    page.js(&format!("{triangle}.click();"), Value::Null).await;
+    page.until(
+        "the slow read is asked",
+        "return (sessionStorage.getItem('test:sent') ?? '').includes('/models/triangle');",
+        Value::Null,
+    )
+    .await;
+    page.js(&format!("{cube_button}.click();"), Value::Null)
+        .await;
+    page.until(
+        "the slow read is given up",
+        "return (sessionStorage.getItem('test:aborted') ?? '').includes('/models/triangle');",
+        Value::Null,
+    )
+    .await;
+    release(&page, "slow").await;
+    page.js(
+        "return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));",
+        Value::Null,
+    )
+    .await;
+    says(&page, PREVIEW, "20.0 × 20.0 × 20.0 mm").await;
+    preview_recovers(&page, &server).await;
+}
+
+const TOOLTIP: &str = "[role=tooltip]";
+
+/// The model names of the catalog of a new plate.
+fn catalog_names() -> Vec<String> {
+    let mut names = vec![
+        "parts/cube.stl".to_owned(),
+        "parts/triangle.stl".to_owned(),
+        "長いモデル名/".repeat(8) + "横長の形状.stl",
+    ];
+    names.extend((0..60).map(|i| format!("parts/extra-{i}.stl")));
+    names
+}
+
+fn catalog_routes(models: &Value) -> Value {
+    let names = catalog_names();
+    json!({
+        "/api/default-settings": {"json": serde_json::from_str::<Value>(NO_DEFAULTS).unwrap()},
+        "/api/scad/model-info": {"json": {"roles": ["primary"]}},
+        "/api/scad/models": {"json": names},
+        format!("/api/scad/model?path={}", encode(&names[0])): models[0],
+        format!("/api/scad/model?path={}", encode(&names[1])): models[1],
+        format!("/api/scad/model?path={}", encode(&names[2])): models[2],
+    })
+}
+
+/// `text` as `encodeURIComponent` writes it.
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Hovers the name of the catalog row `i`, and waits for the panel to say `size`, with one
+/// canvas drawn as an image and no control under it.
+async fn hover_shows(page: &Page, i: usize, size: &str) {
+    let name = format!(
+        "[...document.querySelectorAll('[data-stl-preview]')].find((e) => e.textContent.trim() === {})",
+        json!(catalog_names()[i])
+    );
+    let (x, y) = middle(page, &format!("return {name};")).await;
+    page.mouse("hovered", x, y).await;
+    says(page, TOOLTIP, size).await;
+    let at = page
+        .js(
+            "const p = document.querySelector('[role=tooltip]'); const r = p.getBoundingClientRect(); \
+             return { canvases: p.querySelectorAll('canvas').length, buttons: p.querySelectorAll('button').length, \
+               role: p.querySelector('canvas')?.getAttribute('role'), \
+               clear: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && \
+                 [...document.querySelectorAll('input,button,select,textarea,header')].every((c) => { \
+                   const b = c.getBoundingClientRect(); \
+                   return !b.width || !b.height || r.right <= b.left || r.left >= b.right || r.bottom <= b.top || r.top >= b.bottom; }) };",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(
+        at,
+        json!({"canvases": 1, "buttons": 0, "role": "img", "clear": true}),
+        "the panel of row {i}"
+    );
+}
+
+/// A slow read the next hover or leaving replaces is given up and its late answer does not
+/// show; a failed read says so.
+async fn hover_gives_up(page: &Page, normal: &Value) {
+    let names = catalog_names();
+    // A slow read the next hover replaces is given up, and its late answer does not show.
+    let mut slow = normal.clone();
+    slow[1] = json!({"hold": "slow", "bytes": TRIANGLE});
+    lay(page, &catalog_routes(&slow)).await;
+    let triangle = format!(
+        "return [...document.querySelectorAll('[data-stl-preview]')].find((e) => e.textContent.trim() === {});",
+        json!(names[1])
+    );
+    let (x, y) = middle(page, &triangle).await;
+    page.mouse("hovered", x, y).await;
+    let asked = |n: usize| {
+        format!(
+            "return JSON.parse(sessionStorage.getItem('test:sent') ?? '[]').filter((r) => r.path.includes('triangle')).length >= {n};"
+        )
+    };
+    page.until("the slow read is asked", &asked(1), Value::Null)
+        .await;
+    hover_shows(page, 0, "20.0 × 20.0 × 20.0 mm").await;
+    page.until(
+        "the slow read is given up",
+        "return (sessionStorage.getItem('test:aborted') ?? '').includes('triangle');",
+        Value::Null,
+    )
+    .await;
+    release(page, "slow").await;
+    says(page, TOOLTIP, "20.0 × 20.0 × 20.0 mm").await;
+    // Leaving gives up a slow read as well.
+    page.js(
+        "sessionStorage.removeItem('test:released'); sessionStorage.removeItem('test:aborted');",
+        Value::Null,
+    )
+    .await;
+    page.mouse("hovered", x, y).await;
+    page.until("the slow read is asked again", &asked(2), Value::Null)
+        .await;
+    page.mouse("hovered", 0.0, 899.0).await;
+    page.until(
+        "leaving gives the read up",
+        "return (sessionStorage.getItem('test:aborted') ?? '').includes('triangle');",
+        Value::Null,
+    )
+    .await;
+    release(page, "slow").await;
+    page.until(
+        "no canvas",
+        "return !document.querySelector('canvas');",
+        Value::Null,
+    )
+    .await;
+    let mut failing = normal.clone();
+    failing[1] = json!({"status": 502});
+    lay(page, &catalog_routes(&failing)).await;
+    page.mouse("hovered", x, y).await;
+    shows(page, "[role=tooltip] [role=alert]").await;
+    lay(page, &catalog_routes(normal)).await;
+}
+
+/// The keyboard previews the focused row, also in the composition, and nothing is changed.
+async fn hover_by_keyboard(page: &Page, server: &Server) {
+    let names = catalog_names();
+    // The keyboard previews the focused row; Escape closes it.
+    let checkbox = |i: usize| format!("document.querySelectorAll('input[type=checkbox]')[{i}]");
+    page.js(
+        &format!("{}.click(); {}.focus();", checkbox(0), checkbox(0)),
+        Value::Null,
+    )
+    .await;
+    page.key("ArrowDown").await;
+    page.until(
+        "ArrowDown moves to the next row",
+        &format!("return document.activeElement === {};", checkbox(1)),
+        Value::Null,
+    )
+    .await;
+    page.until("the focused row is previewed", "return document.querySelector('[role=tooltip] [role=status]')?.textContent.includes('1.0');", Value::Null)
+        .await;
+    page.key("Escape").await;
+    page.until(
+        "Escape closes it",
+        "return !document.querySelector('[role=tooltip]');",
+        Value::Null,
+    )
+    .await;
+    press(page, "", "構成を確認（1）").await;
+    let quantity = format!(
+        "document.querySelector('input[aria-label={}]')",
+        json!(format!("{} の個数", names[0]))
+    );
+    page.js(&format!("const q = {quantity}; q.value = '10'; q.dispatchEvent(new Event('input', {{bubbles: true}}));"), Value::Null)
+        .await;
+    hover_shows(page, 0, "20.0 × 20.0 × 20.0 mm").await;
+    assert_eq!(
+        page.js(&format!("return {quantity}.value;"), Value::Null)
+            .await,
+        "10",
+        "the quantity changed"
+    );
+    page.until(
+        "save can be pressed",
+        &format!(
+            "const b = (() => {{ {} }})(); return b && !b.disabled;",
+            button("", "保存")
+        ),
+        Value::Null,
+    )
+    .await;
+    // Resizing closes the panel; the keyboard opens it again.
+    page.look("light", 320, 812).await;
+    page.until(
+        "resizing closes the panel",
+        "return !document.querySelector('[role=tooltip]');",
+        Value::Null,
+    )
+    .await;
+    page.js(
+        &format!(
+            "document.querySelector('input[required][maxlength]').focus(); {quantity}.focus();"
+        ),
+        Value::Null,
+    )
+    .await;
+    says(page, TOOLTIP, "20.0 × 20.0 × 20.0 mm").await;
+    let changes: Vec<Value> = sent(page)
+        .await
+        .into_iter()
+        .filter(|r| r["method"] != "GET")
+        .collect();
+    assert!(
+        changes.is_empty(),
+        "previews changed something: {changes:?}"
+    );
+    page.open(&server.url("/")).await;
+    assert_eq!(
+        page.js(
+            "return document.querySelectorAll('canvas').length;",
+            Value::Null
+        )
+        .await,
+        0,
+        "a canvas outside the editor"
+    );
+    assert_eq!(errors(page).await, json!([]), "the page threw");
+}
+
+async fn hover_preview(page: Arc<Page>, server: Arc<Server>) {
+    let normal = json!([{"bytes": CUBE}, {"bytes": TRIANGLE}, {"bytes": long_box()}]);
+    lay(&page, &catalog_routes(&normal)).await;
+    page.look("dark", 900, 900).await;
+    page.open(&server.url("/plates/new")).await;
+    page.until(
+        "the catalog",
+        "return document.querySelectorAll('input[type=checkbox]').length > 60;",
+        Value::Null,
+    )
+    .await;
+    assert!(
+        sent_to(&page, "GET", "/api/scad/model?").await.is_empty(),
+        "shapes were read before a hover"
+    );
+    hover_shows(&page, 0, "20.0 × 20.0 × 20.0 mm").await;
+    let canvas = "return document.querySelector('[role=tooltip] canvas');";
+    let first = shot_of(&page, canvas).await;
+    hover_shows(&page, 1, "1.0 × 1.0 × 0.0 mm").await;
+    assert_ne!(
+        shot_of(&page, canvas).await,
+        first,
+        "the cube and the triangle look the same"
+    );
+    page.js("document.querySelector('[role=tooltip] canvas').addEventListener('webglcontextlost', () => { window.hoverContextLost = true; });", Value::Null)
+        .await;
+    page.mouse("hovered", 0.0, 899.0).await;
+    page.until(
+        "the panel and its canvas go",
+        "return !document.querySelector('[role=tooltip]') && !document.querySelector('canvas');",
+        Value::Null,
+    )
+    .await;
+    page.until(
+        "the WebGL context is let go",
+        "return window.hoverContextLost === true;",
+        Value::Null,
+    )
+    .await;
+    page.look("light", 900, 900).await;
+    hover_shows(&page, 2, "100.0 × 20.0 × 5.0 mm").await;
+    page.wheel(450.0, 450.0, 500.0).await;
+    page.until(
+        "the wheel scrolls and closes the panel",
+        "return scrollY > 0 && !document.querySelector('[role=tooltip]');",
+        Value::Null,
+    )
+    .await;
+    page.js("scrollTo(0, 0);", Value::Null).await;
+    page.until("back at the top", "return scrollY === 0;", Value::Null)
+        .await;
+    hover_gives_up(&page, &normal).await;
+    hover_by_keyboard(&page, &server).await;
+}
+
+async fn touch_without_hover(page: Arc<Page>, server: Arc<Server>) {
+    let names = catalog_names();
+    lay(
+        &page,
+        &catalog_routes(&json!([{"bytes": CUBE}, {"bytes": TRIANGLE}, {"bytes": CUBE}])),
+    )
+    .await;
+    page.look("light", 320, 812).await;
+    page.touches(true).await;
+    page.open(&server.url("/plates/new")).await;
+    let name = format!(
+        "return [...document.querySelectorAll('[data-stl-preview]')].find((e) => e.textContent.trim() === {});",
+        json!(names[0])
+    );
+    page.until(
+        "the catalog",
+        &format!("return !!(() => {{ {name} }})();"),
+        Value::Null,
+    )
+    .await;
+    let tap = |find: String| {
+        let page = page.clone();
+        async move {
+            let (x, y) = middle(&page, &find).await;
+            page.touch("touchStart", x, y).await;
+            page.touch("touchEnd", x, y).await;
+        }
+    };
+    tap(name.clone()).await;
+    page.until(
+        "the tap checks the model",
+        "return document.querySelector('input[type=checkbox]').checked;",
+        Value::Null,
+    )
+    .await;
+    tap(button("", "構成を確認（1）")).await;
+    let quantity = format!(
+        "return document.querySelector('input[aria-label={}]');",
+        json!(format!("{} の個数", names[0]))
+    );
+    page.until(
+        "the composition",
+        &format!("return !!(() => {{ {quantity} }})();"),
+        Value::Null,
+    )
+    .await;
+    tap(quantity.clone()).await;
+    page.js(&format!("const q = (() => {{ {quantity} }})(); q.value = '10'; q.dispatchEvent(new Event('input', {{bubbles: true}}));"), Value::Null)
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        page.js(
+            &format!("return (() => {{ {quantity} }})().value;"),
+            Value::Null
+        )
+        .await,
+        "10",
+        "the quantity"
+    );
+    assert_eq!(
+        page.js(
+            "return document.querySelectorAll('[role=tooltip]').length;",
+            Value::Null
+        )
+        .await,
+        0,
+        "a tap opened the hover panel"
+    );
+    assert!(
+        sent_to(&page, "GET", "/api/scad/model?").await.is_empty(),
+        "a tap read a shape"
+    );
+    no_overflow(&page, "320 touch").await;
+    page.touches(false).await;
+}
+
+async fn uploaded_preview(page: Arc<Page>, server: Arc<Server>) {
+    lay(
+        &page,
+        &json!({
+            "/api/default-settings": {"json": serde_json::from_str::<Value>(NO_DEFAULTS).unwrap()},
+            format!("/api/plates/{PLATE}"): {"json": {"id": PLATE, "version": 1, "name": "保存済みアップロード",
+                "models": [{"id": "upload", "name": "upload.stl", "source": null, "quantity": 5}]}},
+            format!("/api/plates/{PLATE}/models/upload"): {"bytes": CUBE},
+            "/api/scad/models": {"status": 503, "json": []},
+            "/api/scad/model-info": {"status": 503, "json": []},
+        }),
+    )
+    .await;
+    page.open(&server.url(&format!("/plates/{PLATE}"))).await;
+    press(&page, "", "構成を編集").await;
+    shows(&page, "form [data-stl-preview]").await;
+    let (x, y) = middle(
+        &page,
+        "return document.querySelector('form [data-stl-preview]');",
+    )
+    .await;
+    page.mouse("hovered", x, y).await;
+    says(&page, TOOLTIP, "20.0 × 20.0 × 20.0 mm").await;
+    assert_eq!(
+        page.js(
+            "return document.querySelector('input[aria-label=\"upload.stl の個数\"]').value;",
+            Value::Null
+        )
+        .await,
+        "5",
+        "the quantity"
+    );
+    assert!(
+        sent_to(&page, "GET", "/api/scad/model?").await.is_empty(),
+        "the public catalog was read"
+    );
+    page.key("Escape").await;
+    page.until(
+        "Escape closes the panel",
+        "return document.querySelectorAll('canvas').length === 0;",
+        Value::Null,
+    )
+    .await;
+}
+
+async fn sticky_search(page: Arc<Page>, server: Arc<Server>) {
+    let names: Vec<String> = (0..100).map(|i| format!("parts/item-{i:03}.stl")).collect();
+    lay(
+        &page,
+        &json!({
+            "/api/default-settings": {"json": serde_json::from_str::<Value>(NO_DEFAULTS).unwrap()},
+            "/api/scad/model-info": {"json": {"roles": ["primary"]}},
+            "/api/scad/models": {"json": names},
+        }),
+    )
+    .await;
+    page.look("light", 320, 812).await;
+    page.open(&server.url("/plates/new")).await;
+    page.until(
+        "the models",
+        "return document.querySelectorAll('input[type=checkbox]').length > 20;",
+        Value::Null,
+    )
+    .await;
+    page.js(
+        "document.querySelector('input[type=checkbox]').click(); window.scrollTo(0, 3000);",
+        Value::Null,
+    )
+    .await;
+    page.until("the page scrolls", "return scrollY > 1000;", Value::Null)
+        .await;
+    let search = page
+        .js("const r = document.querySelector('input[type=search][aria-label=\"モデル名で検索\"], input[type=search]').getBoundingClientRect(); return [r.y, r.bottom];", Value::Null)
+        .await;
+    assert!(
+        search[0].as_f64().unwrap() >= 48.0 && search[1].as_f64().unwrap() < 812.0,
+        "the search is out of sight: {search}"
+    );
+    in_sight(&page, "構成を確認（1）", &button("", "構成を確認（1）")).await;
 }
 
 // ---- running them ----

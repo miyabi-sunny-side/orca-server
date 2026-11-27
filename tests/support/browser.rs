@@ -280,6 +280,27 @@ impl Page {
         .await;
     }
 
+    /// What the window shows inside `x`, `y`, `width`, `height`, as a PNG in base64: two
+    /// shots of the same pixels are the same text.
+    pub async fn shot(&self, x: f64, y: f64, width: f64, height: f64) -> String {
+        let taken = self
+            .cdp(
+                "Page.captureScreenshot",
+                json!({"format": "png", "clip": {"x": x, "y": y, "width": width, "height": height, "scale": 1}}),
+            )
+            .await;
+        taken["data"].as_str().unwrap().to_owned()
+    }
+
+    /// The wheel of the mouse turned at `x`, `y` of the window, by `dy` pixels down.
+    pub async fn wheel(&self, x: f64, y: f64, dy: f64) {
+        self.cdp(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": 0, "deltaY": dy}),
+        )
+        .await;
+    }
+
     /// The mouse `pressed`, `moved` or `released` at `x`, `y` of the window, with its left
     /// button held down from `pressed` until `released`.
     pub async fn mouse(&self, kind: &str, x: f64, y: f64) {
