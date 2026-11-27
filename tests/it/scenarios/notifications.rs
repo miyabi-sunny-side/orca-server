@@ -176,7 +176,7 @@ fn isolated_notification_delivery() {
     rig.env
         .insert("NOTIFICATION_TEST_URL".into(), webhook.url.clone());
     // The printer's table explains 0300-4001 and has no entry for 0500-4003.
-    let _site = rig.describe(&[("03004001", "原点復帰に **失敗** しました。")]);
+    let _site = describe(&mut rig, &[("03004001", "原点復帰に **失敗** しました。")]);
     rig.launch();
     until(|| rig.store.join("codes/ja_TES.json").is_file(), 12);
     rig.seed();
@@ -501,4 +501,25 @@ fn isolated_notification_delivery() {
             .contains(TOKEN)
     );
     rig.stop(false);
+}
+
+/// Serve these code descriptions as the official site does and point the server at them.
+/// Eight digit codes are print errors, sixteen digit codes HMS. Keep the peer alive.
+fn describe(rig: &mut Rig, rows: &[(&str, &str)]) -> HttpPeer {
+    let list = |digits: usize| -> Vec<Value> {
+        rows.iter()
+            .filter(|(code, _)| code.len() == digits)
+            .map(|(code, text)| json!({"ecode":code,"intro":text}))
+            .collect()
+    };
+    let answer = json!({"result":0,"t":1,"ver":1,"data":{
+        "device_error":{"ver":1,"ja":list(8)},"device_hms":{"ver":1,"ja":list(16)}}})
+    .to_string()
+    .into_bytes();
+    let site = HttpPeer::new(move |_, _, _| (200, answer.clone()));
+    rig.env.insert(
+        "BAMBU_ERROR_TABLE_URL".into(),
+        format!("{}/query.php", site.base),
+    );
+    site
 }
